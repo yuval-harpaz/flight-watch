@@ -653,6 +653,21 @@ def with_routes(argv=()):
 
 
 class StandingDataTests(unittest.TestCase):
+    def test_airline_name_and_flight_number_in_alerts(self):
+        """An airline missing from AIRLINE_ICAO still gets its name and IATA number from the list."""
+        mon, feed, clock, alerts = with_routes()
+        feed.files["airlines/schema-01/airlines.csv"] = ("﻿Code,Name,ICAO,IATA,PositioningFlightPattern,"
+                                                         "CharterFlightPattern\nNOS,Neos,NOS,NO,,\n")
+        feed.files["routes/schema-01/N/NOS-all.csv"] = ("Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                                        "NOS123,NOS,123,NOS,LIMC-LLBG\n")
+        feed.local = {"300001"}
+        for _ in range(3):
+            feed.aircraft["300001"] = airborne(32.5, 34.5, 30000, flight="NOS123", squawk="7700")
+            step(mon, clock)
+            clock.t += 10
+        rec = [r for r in alerts if r["kind"] == "EMERGENCY"][0]
+        self.assertEqual((rec["flight"], rec["airline"], rec["military"]), ("NO123", "Neos", False))
+
     def test_route_and_airport_lookup_with_one_request_per_file(self):
         mon, feed, clock, alerts = with_routes()
         sd = mon.standing
@@ -764,6 +779,15 @@ class AnnouncerTests(unittest.TestCase):
         self.assertEqual([s["link"] for s in links], ["Live", "Replay", "FR24"])
         self.assertTrue(all(set(s) <= {"text", "link", "url"} for s in post["segments"]))  # TextBuilder-ready
         self.assertEqual(len(printed), 1)
+
+    def test_post_names_airline_military_and_unknown_route(self):
+        ann, _ = self.make()
+        post = ann.announce(alert_rec("EMERGENCY", "squawk 7700 (GENERAL EMERGENCY)", airline="Flydubai"))
+        self.assertIn("FZ1073 Flydubai (A6-FKF, B38M) Dubai (DXB) → TLV", post["text"])
+        post = ann.announce(alert_rec("POSITION_JUMP", "14.4 nm in 38s (~1373 kt) - possible GPS spoofing",
+                                      hexid="738bed", callsign="SHUFL", flight=None, reg="312", type="B762",
+                                      route_text=None, military=True))
+        self.assertIn("SHUFL (military, 312, B762), route unknown - FL150", post["text"])
 
     def test_long_details_are_cut_to_the_limit(self):
         ann, _ = self.make()

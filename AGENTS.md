@@ -34,7 +34,8 @@ Three data layers per cycle, in priority order:
 Each alert goes through `Monitor.alert()` (cooldowns, hot flights) to `Notifier`: a log line,
 `alerts.jsonl`, the `Announcer` (social-media-style post, threaded per flight, printed as a feed
 and appended to `posts.jsonl`), and ntfy / Telegram when configured. `tests/replay.py` and
-`tools/` (incident capture, turn-zone learning) are support code, not part of the monitor.
+`tools/` (incident capture, turn-zone learning, `plot_alert.py`
+3D replay of an alert) are support code, not part of the monitor.
 
 ADS-B carries no origin/destination. Arrival/departure comes from the flight board first,
 then the callsign's route in the VRS standing data, then a heuristic near the airport

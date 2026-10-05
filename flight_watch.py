@@ -428,6 +428,20 @@ class StandingData:
                 return row[4].split("-") if row and len(row) > 4 and row[4] else None
         return None
 
+    AIRLINES = "airlines/schema-01/airlines.csv"  # Code,Name,ICAO,IATA,...
+
+    def airline(self, code: str, fetch: bool = False) -> tuple[str, str] | None:
+        """(name, IATA) of an ICAO airline code, e.g. FDB -> ("Flydubai", "FZ"). Reads only the
+        loaded file unless `fetch` (alerting never waits for it)."""
+        if self.preload is not None:
+            row = self.preload.get("airlines", {}).get(code)
+            return tuple(row[:2]) if row else None
+        if fetch:
+            self._file(self.AIRLINES)
+        hit = self.files.get(self.AIRLINES)
+        row = hit[1].get(code) if hit and code else None
+        return (row[1], row[3]) if row and len(row) > 3 and row[1] else None
+
     def airport_info(self, icao: str) -> tuple[str, str] | None:
         """(IATA, city) from files already loaded - never fetches (used while alerting)."""
         if self.preload is not None:
@@ -501,6 +515,7 @@ class Track:
     lost_alerted: bool = False  # the current loss of contact was alerted (not just noted)
     israeli: bool = False    # seen low at an Israeli airport (so it is Israel traffic)
     route_dir: int = 0       # +1 flying the route as listed, -1 the reverse leg, 0 not known yet
+    military: bool = False   # readsb aircraft database flag (dbFlags bit 0)
 
     @property
     def last(self) -> Sample | None:
@@ -713,10 +728,11 @@ class Announcer:
         emoji, head = self.headline(rec)
         ident = rec.get("flight") or rec["callsign"] or rec["hex"].upper()
         if not reply:
-            extra = ", ".join(x for x in (rec.get("reg"), rec.get("type")) if x)
+            ident += f" {rec['airline']}" if rec.get("airline") else ""
+            extra = ", ".join(x for x in ("military" if rec.get("military") else None,
+                                          rec.get("reg"), rec.get("type")) if x)
             ident += f" ({extra})" if extra else ""
-            if rec.get("route_text"):
-                ident += f" {rec['route_text']}"
+            ident += f" {rec['route_text']}" if rec.get("route_text") else ", route unknown"
         alt = rec.get("alt")
         level = ("on the ground" if alt == 0 and rec["kind"] in ("DIVERSION", "RETURNED") else
                  f"FL{alt // 100:03d}" if isinstance(alt, int) and alt >= 10000 else
@@ -1046,6 +1062,8 @@ class Monitor:
             if not cs or (cs in self.routes and now - self.routes[cs][0] < ROUTE_TTL):
                 continue
             try:
+                if airline_like(t):  # airline names / IATA codes for alerts: one file, first
+                    self.standing.airline(cs[:3], fetch=True)
                 codes = self.standing.route(cs)
                 for icao in (codes or [])[:1] + (codes or [])[-1:]:
                     self.standing.airport(icao)  # warm the position cache for both ends
@@ -1061,6 +1079,21 @@ class Monitor:
                              "(flight board and heuristics still classify traffic)", self.route_failures)
                 return
             self.routes[cs] = (now, "-".join(codes) if codes else None)
+
+    def airline_name(self, t: Track) -> str | None:
+        info = self.standing.airline(t.callsign[:3]) if self.standing and airline_like(t) else None
+        return info[0] if info else None
+
+    def flight_number(self, t: Track) -> str | None:
+        """IATA flight number: from the board, the built-in airline map, or the airline list."""
+        if t.sched:
+            return t.sched.flight
+        flight = iata_flight(t.callsign)
+        m = re.fullmatch(r"([A-Z]{3})0*(\d{1,4})", t.callsign or "")
+        if not flight and m and self.standing:
+            info = self.standing.airline(m.group(1))
+            flight = info[1] + m.group(2) if info and re.fullmatch(r"[A-Z0-9]{2}", info[1] or "") else None
+        return flight
 
     def route_text(self, t: Track, traffic: str, route: str | None) -> str | None:
         """Readable route for announcements: "Dubai (DXB) -> TLV", "Budapest -> Tel Aviv"."""
@@ -1159,6 +1192,7 @@ class Monitor:
             t.reg = ac.get("r") or t.reg
             t.actype = ac.get("t") or t.actype
             t.category = ac.get("category") or t.category
+            t.military = t.military or bool(int(ac.get("dbFlags") or 0) & 1)
             t.last_msg = max(t.last_msg, msg_t)
             if self.schedule and t.callsign in self.schedule.by_callsign:
                 t.sched = self.schedule.by_callsign[t.callsign]
@@ -1543,8 +1577,8 @@ class Monitor:
             "lat": s.lat, "lon": s.lon, "alt": s.alt, "track": s.track, "gs": s.gs,
             "dist_nm": round(d, 1), "near": f"{apt} {ad:.0f} nm", "near_airport": apt,
             "near_nm": round(ad, 1), "bearing": round(bearing(a.lat, a.lon, s.lat, s.lon)),
-            "flight": t.sched.flight if t.sched else iata_flight(t.callsign), "reg": t.reg,
-            "type": t.actype, "squawk": t.squawk, "route_text": self.route_text(t, traffic, route),
+            "flight": self.flight_number(t), "airline": self.airline_name(t),
+            "military": t.military, "reg": t.reg, "type": t.actype, "squawk": t.squawk, "route_text": self.route_text(t, traffic, route),
             "recent": recent, "links": external_links(t, now),
         })
 

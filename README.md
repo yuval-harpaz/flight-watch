@@ -178,6 +178,19 @@ flights (`NOISE_BUDGET`). Capture another incident with `tools/capture_incident.
 `--help`); it uses the ADS-B Exchange globe history. The flight board of a past day is not
 online, so board rows are derived from the traces plus `--board` rows given by hand.
 
+## Plot an alert
+
+```bash
+python tools/plot_alert.py            # lists alerts.jsonl newest first; pick one
+python tools/plot_alert.py --pick 1 --minutes 30
+```
+
+Fetches the aircraft's full-rate trace (adsb.lol for the last day, else the ADS-B Exchange
+history of that UTC day) and writes `tmp_plot.html` (git-ignored): a rotatable 3D track
+coloured by time, ADS-B and MLAT positions, the ground track, Israel's outline and nearby
+airports. Every alert on that flight is marked and labelled, and the stretch that set it off is
+drawn in red. Below it is altitude and ground speed over time. Nothing else is stored.
+
 ## Caveats
 
 - GNSS jamming/spoofing is common in the Eastern Mediterranean. It causes position jumps, fake
