@@ -10,13 +10,31 @@ GPS-spoofing-style position jumps, diversions and returns to TLV.
 1. **local** - every aircraft within `--radius` nm (default 150) of TLV.
 2. **discover** - active flights on the Ben Gurion flight board (Israel Airports Authority open
    data on data.gov.il) are converted to callsigns (e.g. LY 002 -> `ELY002`) and searched
-   worldwide every 60 s, so an inbound flight from New York is picked up over the Atlantic.
+   worldwide in rounds every `--discovery-interval` (180 s), so an inbound flight from New York
+   is picked up over the Atlantic. Codeshare rows (LY25 / DL7441) are merged into one flight and
+   only the operating carrier's callsign is searched first (lowest flight number; the others are a
+   fallback). Arrivals due soon and departures that left within 3 h are searched first; departures
+   still at the gate (the local poll sees them) or gone more than `--departed-max-h` (6 h) are not
+   searched.
 3. **follow** - once a flight is confirmed as a TLV arrival/departure (flight board or route DB),
-   it is tracked by its hex id every cycle, wherever it is, until it lands.
+   it is tracked by its hex id wherever it is, until it lands: one combined request for all
+   followed flights outside the local circle every `--follow-interval` (30 s). Light aircraft and
+   registration callsigns (e.g. `4XHSC`) are never followed on a guess.
 
 Remote alerts are tagged `[REMOTE]`. Remote lost-contact uses a longer limit
 (`--lost-after-remote`, default 600 s) because volunteer coverage has big gaps over seas,
-deserts and some countries.
+deserts and some countries. Silence is only counted up to the last follow request that was
+actually answered, so throttled requests never produce a false `LOST_CONTACT`.
+
+## Rate limits
+
+The feeds' limits are undocumented and much stricter than ~1 request/s, especially from shared
+cloud IPs. Each feed host gets an adaptive budget (`--rate`, default 8 requests/min, up to
+`--rate-max` 60): it grows by 0.5 req/min per success and halves on HTTP 429, followed by a
+cooldown of 10 s doubling per consecutive 429 (max 120 s), with ±50% jitter. The local poll keeps
+its `--interval` and always comes first; follow, discovery and route lookups only use spare
+budget and stop at the first 429. On a very strict IP the remote layers can starve - a warning
+says so. adsb.lol's route database lookup is turned off after 3 failures in a row.
 
 ## Run
 
@@ -46,13 +64,14 @@ No flight tracks are stored. Each alert is one line in `alerts.jsonl` with links
 Tapping an ntfy notification opens the ADS-B Exchange live view; its buttons are
 Live, Replay (ADSBx) and FR24 flight. Telegram messages list all links.
 
-Distant flights are queried on several networks (`--remote-providers`, default
-`airplanes.live,adsb.lol`) because coverage outside Israel differs a lot between them.
+Distant flights can be queried on several networks (`--remote-providers`, default `adsb.lol`;
+e.g. `adsb.lol,adsb.fi`) because coverage outside Israel differs between them. A network that
+answers 401/403 is dropped for the rest of the run.
 
 ## Data source
 
-Default is airplanes.live (also: `--provider adsb.lol` / `adsb.fi`). These are free, need no key and
-allow ~1 request/s, so 10 s polling is fine. OpenSky was not used as default: its daily credit
+Default is adsb.lol (also: `--provider adsb.fi`). These are free and need no key; see
+[Rate limits](#rate-limits). airplanes.live is feeder-only now (HTTP 403). OpenSky was not used as default: its daily credit
 budget doesn't cover 8,640 requests/day.
 
 ADS-B carries no origin/destination. Arrival/departure comes from the TLV flight board first,
@@ -64,6 +83,15 @@ alphanumeric callsigns that don't match the flight number. Those flights are sti
 they enter the local radius and are then followed outbound. Unmapped airline codes are logged;
 add them with `--airline-map extra.json` (`{"XX": "XXX"}`). If data.gov.il is unreachable the
 script keeps running on the other layers.
+
+## Tests
+
+```bash
+python -m unittest discover -s tests
+```
+
+Offline simulations with a fake feed and clock: alerts, codeshare merging, discovery order,
+board paging, follow cadence, and 429 handling.
 
 ## Caveats
 
