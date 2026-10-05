@@ -30,6 +30,10 @@ class FakeResponse:
         self.status_code, self.payload, self.url = status, payload, url
         self.ok = status < 400
 
+    @property
+    def text(self):
+        return self.payload if isinstance(self.payload, str) else ""
+
     def json(self):
         if self.payload is None:
             raise ValueError("no JSON body")
@@ -49,7 +53,8 @@ class FakeFeed:
         self.local = set()        # hexes inside the /point circle
         self.calls = []           # (method, path)
         self.limited = set()      # path prefixes answered with 429
-        self.route_status = 201   # adsb.lol routeset currently answers 201 with no body
+        self.route_status = 200   # standing-data host: 200 serves self.files, else this status
+        self.files = {}           # standing-data path ("routes/schema-01/W/WZZ-3.csv") -> CSV text
         self.headers = {}
 
     def ac(self, hexid):
@@ -74,8 +79,11 @@ class FakeFeed:
             ids = set(path.rsplit("/", 1)[1].split(","))
             return FakeResponse(200, {"now": now_ms, "ac": [
                 self.ac(h) for h, a in self.aircraft.items() if a.get("flight", "").strip() in ids]})
-        if "routeset" in path:
-            return FakeResponse(self.route_status, None, url=url)
+        if "/standing-data/" in path:
+            rel = path.split("/standing-data/main/", 1)[1]
+            if self.route_status != 200:
+                return FakeResponse(self.route_status, url=url)
+            return FakeResponse(200, self.files[rel], url=url) if rel in self.files else FakeResponse(404, url=url)
         return FakeResponse(404, url=url)
 
 
@@ -256,11 +264,12 @@ class FollowAndDiscovery(unittest.TestCase):
 
     def test_route_api_disabled_after_repeated_failures(self):
         mon, feed, clock, alerts = make(["--rate", "60"])
+        feed.route_status = 500
         feed.local = {"738001"}
         for i in range(6):
             feed.aircraft["738001"] = airborne(32.5, 34.5, 30000, flight=f"ABC{i}")
             step(mon, clock)
-        self.assertEqual(sum("routeset" in p for m, p in feed.calls), 3)
+        self.assertEqual(sum("/standing-data/" in p for m, p in feed.calls), 3)
         self.assertTrue(mon.routes_off)
 
 
@@ -611,6 +620,119 @@ class DistantArrival(unittest.TestCase):
         self.assertIn("DIVERSION", k)
         self.assertNotIn("POSITION_JUMP", k)
         self.assertNotIn("LOST_CONTACT", k)
+
+
+ROUTE_FILES = {
+    "routes/schema-01/W/WZZ-3.csv": "﻿Callsign,Code,Number,AirlineCode,AirportCodes\nWZZ3W,WZZ,3W,WZZ,LHBP-LLBG\n",
+    "routes/schema-01/R/RJA-all.csv": ("Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                       "RJA111,RJA,111,RJA,OJAI-HEAL\nRJA112,RJA,112,RJA,OJAI-EGLL\n"),
+    "routes/schema-01/U/UAE-all.csv": ("Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                       "UAE121,UAE,121,UAE,OMDB-LTFM\nUAE122,UAE,122,UAE,LTFM-OMDB\n"),
+    "airports/schema-01/L/LH.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                                   "LHBP,Budapest,LHBP,BUD,Budapest,HU,47.436901,19.255600,495\n",
+    "airports/schema-01/L/LL.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                                   "LLBG,Ben Gurion,LLBG,TLV,Tel Aviv,IL,32.011398,34.886700,135\n",
+    "airports/schema-01/O/OJ.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                                   "OJAI,Queen Alia,OJAI,AMM,Amman,JO,31.722601,35.993198,2395\n",
+    # a made-up destination due west of the TOWARD_ISRAEL test track, beyond Israel
+    "airports/schema-01/H/HE.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                                   "HEAL,Test West,HEAL,,,EG,32.60,30.00,100\n",
+    "airports/schema-01/E/EG.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                                   "EGLL,Heathrow,EGLL,LHR,London,GB,51.4706,-0.461941,83\n",
+    "airports/schema-01/O/OM.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                                   "OMDB,Dubai,OMDB,DXB,Dubai,AE,25.2528,55.3644,62\n",
+    "airports/schema-01/L/LT.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                                   "LTFM,Istanbul,LTFM,IST,Istanbul,TR,41.2753,28.7519,325\n",
+}
+
+
+def with_routes(argv=()):
+    mon, feed, clock, alerts = make(["--rate", "600", "--rate-max", "6000", *argv])
+    feed.files = dict(ROUTE_FILES)
+    return mon, feed, clock, alerts
+
+
+class StandingDataTests(unittest.TestCase):
+    def test_route_and_airport_lookup_with_one_request_per_file(self):
+        mon, feed, clock, alerts = with_routes()
+        sd = mon.standing
+
+        def later(value):  # each new file is a low-priority request: let the budget refill
+            clock.t += 10
+            return value
+        self.assertEqual(later(sd.route("WZZ3W")), ["LHBP", "LLBG"])     # airline split by first digit
+        self.assertEqual(later(sd.route("RJA111")), ["OJAI", "HEAL"])    # small airline: one -all file
+        self.assertIsNone(later(sd.route("WZZ3X")))
+        self.assertIsNone(sd.route("4XHSC"))                            # not an airline callsign
+        self.assertEqual(later(sd.airport("LLBG")), (32.011398, 34.8867))
+        n = len(feed.calls)
+        sd.route("WZZ3W"), sd.airport("LLBG")
+        self.assertEqual(len(feed.calls), n, "files are cached")
+
+    def test_alphanumeric_callsign_classified_by_route(self):
+        """Wizz-style callsigns never match the flight board; the route says it is a TLV arrival."""
+        mon, feed, clock, alerts = with_routes()
+        fly(mon, feed, clock, "471d61", path(34.0, 32.0, [130] * 4, [35000] * 4), flight="WZZ3W", r="HA-LDH")
+        t = mon.tracks["471d61"]
+        self.assertEqual(mon.classify(t), ("ARR", "LHBP-LLBG"))
+        self.assertTrue(t.followed)
+
+    def test_capture_attaches_routes_from_a_local_checkout(self):
+        import tempfile
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        import capture_incident
+        with tempfile.TemporaryDirectory() as d:
+            for rel, text in ROUTE_FILES.items():
+                os.makedirs(os.path.join(d, os.path.dirname(rel)), exist_ok=True)
+                with open(os.path.join(d, rel), "w", encoding="utf-8") as f:
+                    f.write(text)
+            fixture = {"meta": {}, "aircraft": {"471d61": {"points": [[0, 0, 0, 0, 0, 0, 0, "WZZ3W", None, None, None]]},
+                                                "738001": {"points": [[0, 0, 0, 0, 0, 0, 0, "ELY999", None, None, None]]}}}
+            capture_incident.attach_routes(fixture, d)
+        self.assertEqual(fixture["routes"], {"WZZ3W": "LHBP-LLBG"})
+        self.assertEqual(set(fixture["airports"]), {"LHBP", "LLBG"})
+
+
+class RouteAwareTowardIsrael(unittest.TestCase):
+    def run_track(self, callsign):
+        mon, feed, clock, alerts = with_routes()
+        tracks = TowardIsraelTests.TRACKS
+        fly(mon, feed, clock, "740111", path(32.2, 36.9, tracks, [35000] * len(tracks)), flight=callsign,
+            r="JY-AYA")
+        return kinds(alerts)
+
+    def test_flight_pointing_at_its_own_destination_beyond_israel_is_not_flagged(self):
+        self.assertNotIn("TOWARD_ISRAEL", self.run_track("RJA111"))   # OJAI-HEAL, HEAL due west
+
+    def test_implausible_route_does_not_exempt(self):
+        self.assertIn("TOWARD_ISRAEL", self.run_track("RJA112"))      # "OJAI-EGLL", but turning west
+
+
+class RouteOffCourse(unittest.TestCase):
+    # over Iraq at FL370 heading northwest toward Istanbul for 5 min, then a U-turn and 5 min southeast
+    TRACKS = [315] * 30 + [315 - 15 * i for i in range(1, 13)] + [135] * 30
+
+    def run_track(self, callsign):
+        mon, feed, clock, alerts = with_routes()
+        fly(mon, feed, clock, "896121", path(33.0, 43.0, self.TRACKS, [37000] * len(self.TRACKS)),
+            flight=callsign, r="A6-EUA")
+        return [a for a in alerts if a["kind"] == "OFF_COURSE"]
+
+    def test_flight_turning_away_from_its_destination(self):
+        hits = self.run_track("UAE121")
+        self.assertTrue(hits)
+        self.assertIn("bound for LTFM", hits[0]["message"])
+
+    def test_route_stored_the_wrong_way_round_is_learned_from_the_flight(self):
+        hits = self.run_track("UAE122")       # listed LTFM-OMDB, flown toward Istanbul
+        self.assertTrue(hits)
+        self.assertIn("bound for LTFM", hits[0]["message"])
+
+    def test_no_alert_while_flying_the_route(self):
+        mon, feed, clock, alerts = with_routes()
+        fly(mon, feed, clock, "896121", path(33.0, 43.0, [315] * 60, [37000] * 60),
+            flight="UAE121", r="A6-EUA")
+        self.assertNotIn("OFF_COURSE", kinds(alerts))
 
 
 if __name__ == "__main__":

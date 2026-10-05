@@ -12,7 +12,7 @@ turning back, diversions, and flights not bound for Israel turning toward it.
 |---|---|---|
 | `EMERGENCY` | squawk 7500/7600/7700 set or changed, or an ADS-B emergency status | 5 |
 | `TOWARD_ISRAEL` | a flight not bound for Israel turns >= 45 deg so that Israeli airspace is <= 12 min ahead (or is about to enter it), above 8000 ft | 5 |
-| `OFF_COURSE` | a TLV arrival > 60 nm out flies >= 100 deg away from TLV for 150 s, distance opening | 5 |
+| `OFF_COURSE` | a TLV arrival > 60 nm out flies >= 100 deg away from TLV for 150 s, distance opening; also any flight with a known route flying away from its destination | 5 |
 | `LOST_CONTACT` / `DIVERSION` | silent too long; a TLV arrival on the ground elsewhere, or silent while descending near another airport | 5 |
 | `TURNING_BACK` / `RETURNED` | a TLV departure heads back toward TLV for 150 s while closing / lands back | 4 |
 | `VERTICAL_RATE` | flight-path angle steeper than 10 deg descending or 12 deg climbing (18 deg climbing near airports), or > 8000 ft/min | 4 |
@@ -101,12 +101,22 @@ Default is adsb.lol (also: `--provider adsb.fi`). These are free and need no key
 budget doesn't cover 8,640 requests/day.
 
 ADS-B carries no origin/destination. Arrival/departure comes from the TLV flight board first,
-then adsb.lol's crowd-sourced callsign route database (may be missing or wrong), then a heuristic
-near the airport (marked `ARR?` / `DEP?`).
+then the callsign's route in the Virtual Radar Server standing data (CC0, crowd-sourced, may be
+missing or wrong; adsb.lol's own route API now redirects to it), then a heuristic near the
+airport (marked `ARR?` / `DEP?`). Route files are fetched per airline from GitHub on first use
+and kept in memory only (`--standing-data` can point at a local checkout instead).
+
+The route is what identifies Wizz/easyJet-style alphanumeric callsigns (`WZZ3W` = Budapest ->
+TLV) that never match the board. It also gives each flight a destination: `TOWARD_ISRAEL` is not
+raised while a flight points at its own destination (or origin) beyond Israel, and `OFF_COURSE`
+covers any flight flying away from its destination. Because routes can be stale or stored the
+wrong way round, a route is ignored while the aircraft is far off the corridor between its ends,
+and the direction of travel is learned from the flight itself (away from both ends) before it is
+used.
 
 Flight number -> callsign mapping is imperfect: some airlines (e.g. Wizz, easyJet) use
-alphanumeric callsigns that don't match the flight number. Those flights are still caught once
-they enter the local radius and are then followed outbound. Unmapped airline codes are logged;
+alphanumeric callsigns that don't match the flight number; the route data above classifies them
+instead, and private flights without a route are still caught once they enter the local radius. Unmapped airline codes are logged;
 add them with `--airline-map extra.json` (`{"XX": "XXX"}`). If data.gov.il is unreachable the
 script keeps running on the other layers.
 

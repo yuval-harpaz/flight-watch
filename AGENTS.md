@@ -31,7 +31,8 @@ Three data layers per cycle, in priority order:
    (`/v2/callsign/A,B,C`), so inbound flights are found far from TLV. Slowest cadence.
 
 ADS-B carries no origin/destination. Arrival/departure comes from the flight board first,
-then the adsb.lol callsign route DB, then a heuristic near the airport (`ARR?` / `DEP?`).
+then the callsign's route in the VRS standing data, then a heuristic near the airport
+(`ARR?` / `DEP?`).
 
 ## Data sources: decisions and history
 
@@ -46,6 +47,16 @@ then the adsb.lol callsign route DB, then a heuristic near the airport (`ARR?` /
   429 with backoff and jitter, never hammer, protect the local poll's budget first.
 - Batch endpoints (`/v2/hex/a,b`, `/v2/callsign/A,B`) work on adsb.lol. A probe failing with
   429 or another error is **not** evidence that batching is unsupported.
+- **Routes**: adsb.lol's `routeset` POST now answers 201 with no body and its per-callsign route
+  endpoint redirects to `vrs-standing-data.adsb.lol`; the same Virtual Radar Server standing
+  data (CC0) is on GitHub as `vradarserver/standing-data` (`routes/schema-01/W/WZZ-3.csv`:
+  `Callsign,Code,Number,AirlineCode,AirportCodes`; airports in `airports/schema-01/L/LL.csv`).
+  It is the only source that identifies alphanumeric callsigns (Wizz `WZZ3W` = LHBP-LLBG;
+  the board's W6 number cannot be mapped). Crowd-sourced: in the FZ1073 replay RJA810 was
+  listed OJAI-ORBI while flying into Amman, and THY6685 LTBA-LEMD while departing Beirut for
+  Saudi Arabia. Hence: ignore a route while the aircraft is far off its corridor, and learn the
+  direction of travel from the flight (> 60 nm from both ends) before using the destination.
+  Never treat a route as proof that a flight is harmless beyond those checks.
 - Flight-board quirks: codeshare rows (e.g. DAL7441 on an El Al flight) never transmit, so
   search one callsign per physical flight. Departures stay "DEPARTED" long after landing.
   The board has >3000 rows, so paginate.
@@ -86,15 +97,20 @@ then the adsb.lol callsign route DB, then a heuristic near the airport (`ARR?` /
   Positions must agree with the speeds, so GNSS glitches don't count as turns.
 - **OFF_COURSE / TURNING_BACK**: long before landing, an arrival > 60 nm out flying >= 100 deg
   away from TLV for 150 s while the distance opens, or a departure flying back toward TLV
-  (within 60 deg) while closing. Route bends (Gulf flights via Saudi Arabia and Jordan) stayed
+  (within 60 deg) while closing. OFF_COURSE also covers any flight with a plausible route
+  flying away from its (learned-direction) destination; without the direction and corridor
+  checks this gave 20 false alarms on Beirut departures in the replay. Route bends (Gulf flights via Saudi Arabia and Jordan) stayed
   below 65 deg in the replay; FZ1073 reached 165 deg.
 - **TOWARD_ISRAEL**: the hijack scenario of a flight *not* bound for Israel turned toward it.
   Above 8000 ft, a turn of >= 45 deg after which Israeli airspace (rough polygon) is <= 12 min
   ahead on two samples in a row, from a track that did not point there; or about to enter it
   within 3 min without looking like an arrival. Israel traffic is exempt: board/route-DB
   TLV traffic, 4X- registrations, Israeli airline callsigns, aircraft seen low at an Israeli
-  airport, low traffic near one. Also exempt: descending into its own non-Israeli airport,
-  and learned route corners. Jordan is ~40 nm from the border, so a looser rule (30 min,
+  airport, low traffic near one, a route through an Israeli airport. Also exempt: descending
+  into its own non-Israeli airport, pointing (within 25 deg) at its own route destination or
+  origin beyond Israel, and learned route corners. The main false-alarm risk is TLV arrivals
+  not recognised as such (Wizz-style callsigns, private jets): they fly straight in, so the
+  turn requirement keeps them quiet; route data now recognises most of them. Jordan is ~40 nm from the border, so a looser rule (30 min,
   30 deg) flagged 12 routine Amman/Damascus movements in the replay.
 - **Hot flights**: any alert makes a flight followed and hot for `--hot-minutes` (20): queried
   every cycle instead of every `--follow-interval`, every anomaly reported (no terminal or
