@@ -93,6 +93,26 @@ python -m unittest discover -s tests
 Offline simulations with a fake feed and clock: alerts, codeshare merging, discovery order,
 board paging, follow cadence, and 429 handling.
 
+### Incident replays
+
+`tests/data/` holds real traffic captured around past incidents; the real `Monitor` replays it
+every 10 s through simulated `/point`, `/hex` and `/callsign` answers, so thresholds and logic
+can be checked against what actually happened:
+
+- `fz1073_2026-09-30.json.gz` - FZ1073 (A6-FKF, DXB->TLV) over Jordan, 05:00-06:15 UTC: sudden
+  descent from FL340, 8.5 min silence, squawk 7700 then 7500, U-turn 130 nm from TLV, lost heading
+  south-east. 161 other aircraft (150 nm circle + flights to/from TLV) for false-alarm counting.
+
+```bash
+python tests/replay.py                          # alert timeline (* = the incident aircraft)
+python tests/replay.py --vrate 6000 --turn 90   # try other thresholds (any flight_watch option)
+```
+
+`tests/test_replay_fz1073.py` requires the incident's alerts and caps alerts on the other
+flights (`NOISE_BUDGET`). Capture another incident with `tools/capture_incident.py` (see its
+`--help`); it uses the ADS-B Exchange globe history. The flight board of a past day is not
+online, so board rows are derived from the traces plus `--board` rows given by hand.
+
 ## Caveats
 
 - GNSS jamming/spoofing is common in the Eastern Mediterranean. It causes position jumps, fake
