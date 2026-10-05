@@ -27,6 +27,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import signal
 import sys
@@ -49,8 +50,10 @@ AIRPORTS = {
     "AMM": ("OJAI", 31.7226, 35.9932),
 }
 
-# readsb / ADSBExchange-v2 compatible feeds. Free, no key, ~1 request/second.
-# hex and callsign endpoints take comma-separated lists (verified for airplanes.live).
+# readsb / ADSBExchange-v2 compatible feeds. Free, no key. Rate limits are undocumented and much
+# stricter than 1 req/s from shared (cloud) IPs, hence the adaptive Budget.
+# hex and callsign endpoints take comma-separated lists (verified for adsb.lol).
+# airplanes.live is feeder-only now (HTTP 403 for everyone else).
 PROVIDERS = {
     "airplanes.live": {"base": "https://api.airplanes.live/v2",
                        "point": "/point/{lat}/{lon}/{radius}",
@@ -91,6 +94,9 @@ ICAO_TO_IATA = {v: k for k, v in AIRLINE_ICAO.items()}
 EMERGENCY_SQUAWKS = {"7500": "HIJACK", "7600": "RADIO FAILURE", "7700": "GENERAL EMERGENCY"}
 AIRPORT_TRAFFIC = {"ARR", "DEP", "VIA", "ARR?", "DEP?"}
 CONFIRMED = {"ARR", "DEP", "VIA"}
+# ADS-B emitter categories never followed on a guess: light, rotorcraft, glider, balloon,
+# parachutist, ultralight, UAV
+LIGHT_CATEGORIES = {"A1", "A7", "B1", "B2", "B3", "B4", "B6"}
 PRIORITY = {"EMERGENCY": 5, "LOST_CONTACT": 5, "DIVERSION": 5, "RETURNED": 4,
             "VERTICAL_RATE": 4, "COURSE_CHANGE": 4, "POSITION_JUMP": 3, "CONTACT_RESTORED": 3}
 
@@ -113,6 +119,15 @@ def chunks(seq, n):
         yield seq[i:i + n]
 
 
+def airline_like(t: "Track") -> bool:
+    """Airline-style callsign (ELY315, WZZ5TL) rather than local GA (4XHSC, light aircraft)."""
+    if t.category in LIGHT_CATEGORIES:
+        return False
+    cs = (t.callsign or "").upper()
+    return (re.fullmatch(r"[A-Z]{3}\d[0-9A-Z]{0,3}", cs) is not None
+            and cs != t.reg.replace("-", "").upper())
+
+
 def external_links(t: "Track", when: float) -> dict:
     """Links to the flight on existing sites (nothing is stored locally)."""
     day = time.strftime("%Y-%m-%d", time.gmtime(when))
@@ -133,32 +148,104 @@ def external_links(t: "Track", when: float) -> dict:
     return links
 
 
+HIGH, LOW = "high", "low"   # request priority: local poll / everything that can wait
+
+
+class Throttled(requests.RequestException):
+    """Request not sent: the host is cooling down after HTTP 429, or the budget is spent."""
+
+
+class Budget:
+    """Adaptive per-host request budget (token bucket, additive increase / multiplicative decrease).
+
+    The rate creeps up after every success and halves on HTTP 429, so it settles just under
+    whatever the host (or a shared cloud IP) tolerates. HIGH requests (the local poll) are only
+    held back during a 429 cooldown and may overdraw the bucket; LOW requests (follow, discovery,
+    routes) need a spare token and always leave one for the next local poll.
+    """
+
+    def __init__(self, rate: float, rate_max: float, burst: float = 4, rate_min: float = 3,
+                 clock=time.monotonic, rng=random.random):
+        self.rate, self.rate_min, self.rate_max = rate, rate_min, rate_max  # requests/minute
+        self.burst, self.tokens = burst, burst
+        self.clock, self.rng = clock, rng
+        self.t = clock()
+        self.cool_until = 0.0
+        self.strikes = 0  # consecutive 429s
+
+    def _refill(self) -> None:
+        now = self.clock()
+        self.tokens = min(self.burst, self.tokens + (now - self.t) * self.rate / 60)
+        self.t = now
+
+    def cooling(self) -> float:
+        return max(0.0, self.cool_until - self.clock())
+
+    def take(self, priority: str) -> bool:
+        self._refill()
+        if self.cooling() or (priority == LOW and self.tokens < 2):
+            return False
+        self.tokens = max(-self.burst, self.tokens - 1)
+        return True
+
+    def ok(self) -> None:
+        self.strikes = 0
+        self.rate = min(self.rate_max, self.rate + 0.5)
+
+    def limited(self) -> float:
+        """HTTP 429: halve the rate and cool down with jitter. Returns the cooldown in seconds."""
+        self.strikes += 1
+        self.rate = max(self.rate_min, self.rate / 2)
+        self.tokens = min(self.tokens, 0)
+        cool = min(120.0, 10.0 * 2 ** (self.strikes - 1)) * (0.5 + self.rng())
+        self.cool_until = self.clock() + cool
+        return cool
+
+
 class Http:
-    """requests.Session with a per-host minimum gap, to respect ~1 req/s limits."""
+    """requests.Session with a per-host minimum gap and an adaptive per-host Budget."""
 
-    def __init__(self, min_gap: float = 1.1):
+    def __init__(self, min_gap: float = 1.1, rate: float = 8, rate_max: float = 60,
+                 clock=time.monotonic, rng=random.random):
         self.s = requests.Session()
-        self.s.headers["User-Agent"] = "flight-watch/0.2"
+        self.s.headers["User-Agent"] = "flight-watch/0.3"
         self.min_gap, self.last = min_gap, {}
+        self.rate, self.rate_max, self.clock, self.rng = rate, rate_max, clock, rng
+        self.budgets: dict[str, Budget] = {}
 
-    def _wait(self, url: str) -> None:
-        host = url.split("/")[2]
-        gap = time.monotonic() - self.last.get(host, -1e9)
+    def budget(self, host: str) -> Budget:
+        if host not in self.budgets:
+            self.budgets[host] = Budget(self.rate, self.rate_max, clock=self.clock, rng=self.rng)
+        return self.budgets[host]
+
+    def _wait(self, host: str) -> None:
+        gap = self.clock() - self.last.get(host, -1e9)
         if gap < self.min_gap:
             time.sleep(self.min_gap - gap)
-        self.last[host] = time.monotonic()
+        self.last[host] = self.clock()
 
-    def get_json(self, url: str, **kw):
-        self._wait(url)
-        r = self.s.get(url, timeout=10, **kw)
-        r.raise_for_status()
-        return r.json()
-
-    def post(self, url: str, **kw):
-        self._wait(url)
-        r = self.s.post(url, timeout=8, **kw)
+    def request(self, method: str, url: str, priority: str = HIGH, timeout: float = 10, **kw):
+        host = url.split("/")[2]
+        b = self.budget(host)
+        if not b.take(priority):
+            raise Throttled(f"{host}: " + (f"cooling down {b.cooling():.0f}s after HTTP 429"
+                                           if b.cooling() else "request budget spent"))
+        self._wait(host)
+        r = self.s.request(method, url, timeout=timeout, **kw)
+        if r.status_code == 429:
+            cool = b.limited()
+            log.warning("HTTP 429 from %s - cooling down %.0fs, budget now %.1f req/min",
+                        host, cool, b.rate)
+        elif r.ok:
+            b.ok()
         r.raise_for_status()
         return r
+
+    def get_json(self, url: str, priority: str = HIGH, **kw):
+        return self.request("GET", url, priority, **kw).json()
+
+    def post(self, url: str, priority: str = HIGH, **kw):
+        return self.request("POST", url, priority, timeout=8, **kw)
 
 
 @dataclass
@@ -182,6 +269,9 @@ class SchedFlight:
     when: str              # scheduled/estimated local time
     status: str
     ts: float = 0.0        # same time as epoch seconds
+    codeshares: tuple = ()         # other flight numbers on the same physical flight
+    callsigns: tuple = ()          # searched first (operating carrier, best guess)
+    alt_callsigns: tuple = ()      # codeshare callsigns, searched only as a fallback
 
     def route(self, home: str) -> str:
         return (f"{self.flight} {self.other}->{home}" if self.direction == "ARR"
@@ -203,6 +293,8 @@ class Track:
     sched: SchedFlight | None = None
     alerted: dict = field(default_factory=dict)      # key -> (time, severity)
     squawk: str = ""
+    category: str = ""     # ADS-B emitter category, e.g. A1 = light aircraft
+    last_query: float = 0.0  # server time we last asked a remote feed for this hex and got an answer
 
     @property
     def last(self) -> Sample | None:
@@ -259,24 +351,44 @@ class Schedule:
         self.http, self.airline_map = http, airline_map
         self.refresh, self.window = refresh, timedelta(hours=window_h)
         self.by_callsign: dict[str, SchedFlight] = {}
+        self.flights: list[SchedFlight] = []
         self.fetched = -1e9
         self.tz = ZoneInfo("Asia/Jerusalem")
+
+    def fetch_records(self) -> list[dict]:
+        """All board rows, paging until `total` (one page of 3000 is not always enough)."""
+        records: list[dict] = []
+        for _ in range(20):
+            data = self.http.get_json(FLYDATA_URL, params={"resource_id": FLYDATA_RESOURCE,
+                                                           "limit": 3000, "offset": len(records)})
+            page = data["result"]["records"]
+            records += page
+            if not page or len(records) >= int(data["result"].get("total") or 0):
+                break
+        return records
 
     def refresh_if_due(self) -> None:
         if time.monotonic() - self.fetched < self.refresh:
             return
         self.fetched = time.monotonic()
         try:
-            data = self.http.get_json(FLYDATA_URL, params={"resource_id": FLYDATA_RESOURCE,
-                                                           "limit": 3000})
-            records = data["result"]["records"]
+            records = self.fetch_records()
         except (requests.RequestException, ValueError, KeyError, TypeError) as e:
             log.warning("flight board fetch failed (%s) - keeping %d known flights",
-                        e, len(self.by_callsign))
+                        e, len(self.flights))
             return
-        now = datetime.now(self.tz)
-        out, unmapped = {}, set()
+        self.load(records, datetime.now(self.tz))
+
+    def load(self, records: list[dict], now: datetime) -> None:
+        # The board has one row per marketing flight number. Rows sharing direction, scheduled
+        # time and other airport are one physical flight (e.g. LY25 / DL7441).
+        slots: dict[tuple, list[dict]] = {}
         for r in records:
+            key = (str(r.get("CHAORD", "")).upper()[:1], r.get("CHSTOL"), r.get("CHLOC1"))
+            slots.setdefault(key, []).append(r)
+        out, flights, unmapped = {}, [], set()
+        for rows in slots.values():
+            r = rows[0]
             status = str(r.get("CHRMINE") or "").upper()
             direction = "ARR" if str(r.get("CHAORD", "")).upper().startswith("A") else "DEP"
             if "CANCEL" in status or (direction == "ARR" and status == "LANDED"):
@@ -288,20 +400,63 @@ class Schedule:
                 continue
             if not (now - self.window <= when <= now + self.window):
                 continue
-            iata = str(r.get("CHOPER") or "").strip().upper()
-            num = str(r.get("CHFLTN") or "").strip().lstrip("0") or "0"
-            icao = self.airline_map.get(iata) or (iata if len(iata) == 3 else None)
-            if not icao:
-                unmapped.add(iata)
+            numbers = []  # (iata, num, icao)
+            for row in rows:
+                iata = str(row.get("CHOPER") or "").strip().upper()
+                num = str(row.get("CHFLTN") or "").strip().lstrip("0") or "0"
+                icao = self.airline_map.get(iata) or (iata if len(iata) == 3 else None)
+                if icao:
+                    numbers.append((iata, num, icao))
+                else:
+                    unmapped.add(iata)
+            if not numbers:
                 continue
-            sf = SchedFlight(f"{iata}{num}", direction, str(r.get("CHLOC1") or "?"),
-                             str(r.get("CHLOC1D") or ""), when.strftime("%Y-%m-%d %H:%M"), status, when.timestamp())
-            for cs in {f"{icao}{num}", f"{icao}{num.zfill(3)}"}:  # ELY1 / ELY001
+            # Codeshare numbers are usually long (DL7441, SK3161, LY9613): the lowest number
+            # is the best guess for the operating carrier, whose callsign the aircraft sends.
+            numbers.sort(key=lambda n: (len(n[1]), n[1]))
+
+            def variants(n):  # ELY1 / ELY001
+                return tuple(dict.fromkeys((f"{n[2]}{n[1]}", f"{n[2]}{n[1].zfill(3)}")))
+            sf = SchedFlight(f"{numbers[0][0]}{numbers[0][1]}", direction, str(r.get("CHLOC1") or "?"),
+                             str(r.get("CHLOC1D") or ""), when.strftime("%Y-%m-%d %H:%M"), status,
+                             when.timestamp(),
+                             codeshares=tuple(f"{n[0]}{n[1]}" for n in numbers[1:]),
+                             callsigns=variants(numbers[0]),
+                             alt_callsigns=tuple(cs for n in numbers[1:] for cs in variants(n)))
+            flights.append(sf)
+            for cs in sf.callsigns + sf.alt_callsigns:
                 out[cs] = sf
-        self.by_callsign = out
-        log.info("flight board: %d active flights (%d callsign variants)%s",
-                 len({id(v) for v in out.values()}), len(out),
+        self.by_callsign, self.flights = out, flights
+        log.info("flight board: %d active flights (%d with codeshares, %d callsign variants)%s",
+                 len(flights), sum(bool(f.codeshares) for f in flights), len(out),
                  f"; unmapped airlines: {', '.join(sorted(unmapped))}" if unmapped else "")
+
+    def search_order(self, now: float, exclude: set, departed_max_h: float) -> list[str]:
+        """Callsigns worth a global search, most likely airborne first.
+
+        Arrivals due within -1..+6 h and departures that left within 3 h come first. Departures
+        not yet gone are on the ground at TLV (the local poll sees them) and departures older than
+        `departed_max_h` have landed or are long since followed, so both are skipped. Codeshare
+        callsigns of the first group go last, as a fallback for a wrong operator guess.
+        """
+        ranked = []
+        for sf in self.flights:
+            if id(sf) in exclude:
+                continue
+            dt = sf.ts - now
+            if sf.direction == "ARR":
+                tier = 0 if -3600 <= dt <= 6 * 3600 else 1
+            elif dt > 0 and sf.status != "DEPARTED":
+                continue
+            elif -dt > departed_max_h * 3600:
+                continue
+            else:
+                tier = 0 if -dt <= 3 * 3600 else 1
+            ranked.append((tier, abs(dt), sf))
+        ranked.sort(key=lambda x: x[:2])
+        out = [cs for _, _, sf in ranked for cs in sf.callsigns]
+        out += [cs for tier, _, sf in ranked if tier == 0 for cs in sf.alt_callsigns]
+        return list(dict.fromkeys(out))
 
 
 # --------------------------------------------------------------------------- notifier
@@ -350,19 +505,29 @@ class Notifier:
 class Monitor:
     def __init__(self, args, notifier: Notifier, http: Http, schedule: Schedule | None):
         self.args, self.notifier, self.http, self.schedule = args, notifier, http, schedule
+        self.clock = time.monotonic
         self.tracks: dict[str, Track] = {}
         self.routes: dict[str, tuple[float, str | None]] = {}
+        self.route_failures = 0
+        self.routes_off = args.no_routes
         self.last_ok: float | None = None
         self.last_count = 0
-        self.last_discovery = -1e9
         self.stats = {}
         self.multi: dict[tuple, bool] = {}   # (provider, kind) -> accepts comma-separated ids
-        self.rr: dict[tuple, int] = {}       # round-robin position for one-id-per-request mode
+        self.cursor: dict[str, int] = {}     # follow rotation per provider (when > 1 request)
         self.disabled: set[str] = set()      # providers that refused us (401/403)
+        self.last_follow = -1e9
+        self.started = self.clock()
+        self.starved_warned = -1e9
+        self.disc_queue: dict[str, list[str]] = {}  # discovery round in progress, per provider
+        self.disc_round = -1e9
 
     # ---- remote queries
     def multi_supported(self, prov: str, kind: str, local: list) -> bool | None:
-        """Probe once whether `prov` accepts several ids per request, using 2 live local aircraft."""
+        """Probe once whether `prov` accepts several ids per request, using 2 live local aircraft.
+
+        Only a clean answer is cached: a 429 or other error says nothing about the API, so the
+        probe is retried later (None = not known yet, skip this layer for now)."""
         key = (prov, kind)
         if key in self.multi:
             return self.multi[key]
@@ -374,56 +539,128 @@ class Monitor:
             if len(vals) == 2:
                 break
         if len(vals) < 2:
-            return None  # can't tell yet
+            return True  # nothing to probe with; these readsb APIs normally take lists
         try:
-            _, acs = self.fetch(kind, prov, ids=",".join(vals))
-            got = {(x.get("hex") or "").lower() if kind == "hex" else (x.get("flight") or "").strip()
-                   for x in acs}
-            ok = all(v in got for v in vals)
-        except (requests.RequestException, ValueError):
-            ok = False
+            _, acs = self.fetch(kind, prov, LOW, ids=",".join(vals))
+        except requests.HTTPError as e:
+            self.note_refusal(prov, e)
+            log.debug("%s %s probe failed (%s) - will retry", prov, kind, e)
+            return None
+        except (requests.RequestException, ValueError) as e:
+            log.debug("%s %s probe not sent/failed (%s) - will retry", prov, kind, e)
+            return None
+        got = {(x.get("hex") or "").lower() if kind == "hex" else (x.get("flight") or "").strip()
+               for x in acs}
+        ok = all(v in got for v in vals)
         self.multi[key] = ok
         log.info("%s %s lookups: %s", prov, kind,
-                 "many ids per request" if ok else "one id per request (rotating)")
+                 "many ids per request" if ok else "one id per request")
         return ok
 
-    def remote_query(self, prov: str, kind: str, ids: list[str], local: list) -> tuple[list, bool]:
-        """Look up ids on a provider within --remote-budget requests. Returns (batches, any_ok)."""
+    def note_refusal(self, prov: str, e: requests.HTTPError) -> None:
+        code = e.response.status_code if e.response is not None else 0
+        if code in (401, 403) and prov not in self.disabled:
+            self.disabled.add(prov)
+            log.error("%s refused access (HTTP %s) - dropping it for this run", prov, code)
+
+    def remote_query(self, prov: str, kind: str, ids: list[str], local: list,
+                     max_requests: int) -> tuple[list, list]:
+        """Look up ids (in order) on one provider, while its budget allows.
+
+        Returns (batches, done): [(server_now, aircraft)] and [(server_now, ids answered)].
+        Stops at the first 429, refusal or spent budget; the caller resumes later."""
         if not ids or prov in self.disabled:
-            return [], False
-        if self.multi_supported(prov, kind, local):
-            groups = list(chunks(ids, 150 if kind == "hex" else 120))
-        else:
-            start = self.rr.get((prov, kind), 0) % len(ids)
-            order = ids[start:] + ids[:start]
-            groups = [[x] for x in order[:self.args.remote_budget]]
-            self.rr[(prov, kind)] = start + len(groups)
-        out, any_ok = [], False
-        for g in groups[:self.args.remote_budget]:
+            return [], []
+        multi = self.multi_supported(prov, kind, local)
+        if multi is None:
+            return [], []
+        size = (150 if kind == "hex" else 120) if multi else 1
+        out, done = [], []
+        for g in list(chunks(ids, size))[:max_requests]:
             try:
-                now_r, acs = self.fetch(kind, prov, ids=",".join(g))
-                out += [(now_r, ac) for ac in acs]
-                any_ok = True
+                now_r, acs = self.fetch(kind, prov, LOW, ids=",".join(g))
+            except Throttled as e:
+                log.debug("%s %s lookup deferred: %s", prov, kind, e)
+                break
             except requests.HTTPError as e:
-                code = e.response.status_code if e.response is not None else 0
-                if code in (401, 403):
-                    self.disabled.add(prov)
-                    log.error("%s refused access (HTTP %s) - dropping it for this run", prov, code)
-                    break
-                log.error("%s query failed (%s): %s", kind, prov, e)
+                self.note_refusal(prov, e)
+                if prov not in self.disabled and (e.response is None or e.response.status_code != 429):
+                    log.error("%s query failed (%s): %s", kind, prov, e)
+                break
             except (requests.RequestException, ValueError) as e:
                 log.error("%s query failed (%s): %s", kind, prov, e)
-        return out, any_ok
+                break
+            out += [(now_r, ac) for ac in acs]
+            done.append((now_r, g))
+        return out, done
+
+    def follow(self, local_hexes: set, local: list) -> list:
+        """One combined hex request per --follow-interval for followed flights not in the local circle."""
+        a = self.args
+        ids = [h for h, t in self.tracks.items() if t.followed and h not in local_hexes][:a.follow_max]
+        if not ids or self.clock() - self.last_follow < a.follow_interval:
+            return []
+        batches, sent = [], False
+        for prov in a.remote_providers:
+            start = self.cursor.get(prov, 0) % len(ids)
+            order = ids[start:] + ids[:start]
+            got, done = self.remote_query(prov, "hex", order, local, a.remote_budget)
+            batches += got
+            for now_r, g in done:
+                sent = True
+                self.cursor[prov] = self.cursor.get(prov, 0) + len(g)
+                for h in g:
+                    if h in self.tracks:
+                        self.tracks[h].last_query = max(self.tracks[h].last_query, now_r)
+        if sent:
+            self.last_follow = self.clock()
+        elif (self.clock() - max(self.last_follow, self.starved_warned) > 10 * a.follow_interval
+              and self.clock() - self.started > 10 * a.follow_interval):
+            self.starved_warned = self.clock()
+            log.warning("follow requests starved for %.0fs: the feed allows only ~%.1f req/min "
+                        "from this IP and the local poll comes first",
+                        self.clock() - max(self.last_follow, self.started),
+                        self.http.budget(PROVIDERS[a.remote_providers[0]]["base"].split("/")[2]).rate)
+        return batches
+
+    def discover(self, local: list) -> list:
+        """Search scheduled flights globally by callsign.
+
+        A round (every --discovery-interval) queues the whole search list per provider, and is
+        worked off as fast as the request budget allows: in one cycle with a generous budget,
+        over several cycles after 429s."""
+        a = self.args
+        if not self.schedule:
+            return []
+        if not any(self.disc_queue.values()):
+            if self.clock() - self.disc_round < a.discovery_interval:
+                return []
+            exclude = {id(t.sched) for t in self.tracks.values() if t.followed and t.sched}
+            wanted = self.schedule.search_order(time.time(), exclude, a.departed_max_h)
+            self.disc_round = self.clock()
+            self.disc_queue = {p: list(wanted) for p in a.remote_providers if p not in self.disabled}
+            log.debug("discovery round: %d callsigns", len(wanted))
+        batches = []
+        for prov, queue in self.disc_queue.items():
+            if prov in self.disabled:
+                queue.clear()
+                continue
+            got, done = self.remote_query(prov, "callsign", queue, local, a.remote_budget)
+            batches += got
+            del queue[:sum(len(g) for _, g in done)]
+        return batches
 
     # ---- data
-    def fetch(self, kind: str, provider: str | None = None, **fmt):
+    def fetch(self, kind: str, provider: str | None = None, priority: str = HIGH, **fmt):
         p = PROVIDERS[provider or self.args.provider]
-        data = self.http.get_json(p["base"] + p[kind].format(**fmt))
+        data = self.http.get_json(p["base"] + p[kind].format(**fmt), priority)
         now = data.get("now")
         server_now = now / 1000 if now and now > 1e11 else (now or time.time())
         return float(server_now), data.get("ac") or data.get("aircraft") or []
 
     def lookup_routes(self, tracks: list[Track]) -> None:
+        if self.routes_off:
+            return
         now = time.time()
         need = [t for t in tracks if t.callsign and not t.sched and (
             t.callsign not in self.routes or now - self.routes[t.callsign][0] > ROUTE_TTL)][:100]
@@ -431,15 +668,24 @@ class Monitor:
             return
         got = {}
         try:
-            r = self.http.post(ROUTE_API, json={"planes": [
+            r = self.http.post(ROUTE_API, LOW, json={"planes": [
                 {"callsign": t.callsign, "lat": t.last.lat, "lng": t.last.lon} for t in need]})
             for item in r.json():
                 cs = (item.get("callsign") or "").strip()
                 codes = item.get("_airport_codes_iata") or item.get("airport_codes")
                 if cs and codes and codes.lower() != "unknown":
                     got[cs] = codes.upper()
+            self.route_failures = 0
+        except Throttled:
+            return  # try again next cycle
         except (requests.RequestException, ValueError, AttributeError) as e:
+            self.route_failures += 1
             log.debug("route lookup failed: %s", e)
+            if self.route_failures >= 3:
+                self.routes_off = True
+                log.info("route lookups failed %d times in a row - disabled for this run "
+                         "(flight board and heuristics still classify traffic)", self.route_failures)
+            return
         for t in need:
             self.routes[t.callsign] = (now, got.get(t.callsign))
 
@@ -473,34 +719,17 @@ class Monitor:
         if self.schedule:
             self.schedule.refresh_if_due()
 
-        # 1) local circle - failure here aborts the cycle
-        server_now, local = self.fetch("point", lat=a.lat, lon=a.lon, radius=int(a.radius))
+        # 1) local circle every cycle, top priority - failure here aborts the cycle
+        server_now, local = self.fetch("point", priority=HIGH, lat=a.lat, lon=a.lon,
+                                       radius=int(a.radius))
         batches = [(server_now, ac) for ac in local]
+        local_hexes = {(ac.get("hex") or "").lower() for ac in local}
 
-        # 2) follow known TLV flights wherever they are
-        # Remote layers ask several networks: coverage differs a lot outside Israel.
-        followed = [h for h, t in self.tracks.items() if t.followed][:a.follow_max]
-        follow_ok = not followed
-        for prov in a.remote_providers:
-            got, ok = self.remote_query(prov, "hex", followed, local)
-            batches += got
-            follow_ok = follow_ok or ok
-
+        # 2) follow known TLV flights wherever they are (own, slower cadence)
         # 3) discover scheduled flights not seen yet (searched globally by callsign)
-        if self.schedule and time.monotonic() - self.last_discovery >= a.discovery_interval:
-            self.last_discovery = time.monotonic()
-            known = {t.callsign for t in self.tracks.values() if t.followed}
-            now_wall = time.time()
-
-            def likely_airborne(cs):  # arrivals due soon / departures that recently left first
-                sf = self.schedule.by_callsign[cs]
-                if sf.direction == "ARR":
-                    return 0 if -3600 <= sf.ts - now_wall <= 6 * 3600 else 1
-                return 0 if -14 * 3600 <= sf.ts - now_wall <= 0 else 1
-            wanted = sorted((cs for cs in self.schedule.by_callsign if cs not in known),
-                            key=likely_airborne)
-            for prov in a.remote_providers:
-                batches += self.remote_query(prov, "callsign", wanted, local)[0]
+        # Remote layers may ask several networks: coverage differs a lot outside Israel.
+        batches += self.follow(local_hexes, local)
+        batches += self.discover(local)
 
         # merge (same aircraft may come from several queries) and update tracks
         latest: dict[str, tuple] = {}
@@ -515,6 +744,7 @@ class Monitor:
             t.callsign = (ac.get("flight") or t.callsign).strip()
             t.reg = ac.get("r") or t.reg
             t.actype = ac.get("t") or t.actype
+            t.category = ac.get("category") or t.category
             t.last_msg = max(t.last_msg, msg_t)
             if self.schedule and t.callsign in self.schedule.by_callsign:
                 t.sched = self.schedule.by_callsign[t.callsign]
@@ -523,14 +753,13 @@ class Monitor:
                 t.samples.append(sample)
             updated.append((t, prev, ac))
 
-        if not a.no_routes:
-            self.lookup_routes([t for t, _, _ in updated])
+        self.lookup_routes([t for t, _, _ in updated])
 
         for t, prev, ac in updated:
             s = t.last
             d = self.dist(s)
             kind, route = self.classify(t)
-            if not t.followed and (kind in CONFIRMED or (kind == "DEP?" and d < 15)):
+            if not t.followed and (kind in CONFIRMED or (kind == "DEP?" and d < 15 and airline_like(t))):
                 t.followed = True
                 log.info("following %s (%s %s)", t.label(), kind, route or "")
             if t.lost and server_now - t.last_msg < a.lost_after:
@@ -552,13 +781,15 @@ class Monitor:
             log.warning("feed returned %d aircraft (was %d) - skipping lost-contact check",
                         len(local), self.last_count)
         if gap_ok and feed_ok:
-            self.check_lost(server_now, follow_ok)
+            self.check_lost(server_now)
 
         self.last_ok, self.last_count = server_now, len(local)
         self.tracks = {h: t for h, t in self.tracks.items()
                        if server_now - t.last_msg < (3 * 3600 if t.followed else 1800)}
+        b = self.http.budget(PROVIDERS[a.provider]["base"].split("/")[2])
         self.stats = {"local": len(local), "followed": sum(t.followed for t in self.tracks.values()),
-                      "scheduled": len(self.schedule.by_callsign) if self.schedule else 0}
+                      "scheduled": len(self.schedule.flights) if self.schedule else 0,
+                      "rate": b.rate}
 
     # ---- checks
     def check_emergency(self, t: Track, ac: dict) -> None:
@@ -621,32 +852,36 @@ class Monitor:
             self.alert(t, "RETURNED", f"{self.args.airport} departure landed back at "
                        f"{self.args.airport} (had reached {t.max_dist:.0f} nm)")
 
-    def check_lost(self, now: float, follow_ok: bool) -> None:
+    def check_lost(self, now: float) -> None:
         a = self.args
         for t in self.tracks.values():
             s = t.last
             if t.lost or not s or s.on_ground or len(t.samples) < 3:
                 continue
             d = self.dist(s)
+            remote = d > a.radius - a.edge_margin
+            # Silence only counts up to the last time someone actually answered for this aircraft:
+            # the local poll (this cycle) inside the circle, the last follow request outside it.
+            # A throttled or failed follow therefore never turns into a false LOST_CONTACT.
+            silent = (t.last_query if remote else now) - t.last_msg
             if (s.alt or 0) < a.lost_min_alt:
                 # A TLV arrival vanishing low and far from TLV is most likely landing elsewhere
                 # (low-altitude coverage is poor, so we may never see it on the ground).
-                if (t.followed and follow_ok and d > 30 and (s.vrate or 0) <= 0
-                        and self.classify(t)[0] == "ARR" and now - t.last_msg >= 3 * a.lost_after):
+                if (t.followed and d > 30 and (s.vrate or 0) <= 0
+                        and self.classify(t)[0] == "ARR" and silent >= 3 * a.lost_after):
                     t.lost = True
                     self.alert(t, "DIVERSION", f"{a.airport} arrival went silent descending through "
                                f"{s.alt} ft, {d:.0f} nm from {a.airport} at {s.lat:.4f},{s.lon:.4f}"
                                " - probably landing elsewhere")
                 continue
-            if d > a.radius - a.edge_margin:
-                if not (t.followed and follow_ok):
+            if remote:
+                if not t.followed:
                     continue  # unfollowed aircraft simply leaving the local circle
                 limit = a.lost_after_remote
             else:
                 if d < a.lost_ignore_radius:
                     continue  # landing at the airport
                 limit = a.lost_after
-            silent = now - t.last_msg
             if silent < limit:
                 continue
             t.lost = True
@@ -696,7 +931,12 @@ def parse_args(argv=None):
     g.add_argument("--provider", choices=PROVIDERS, default="adsb.lol",
                    help="feed for the local circle")
     g.add_argument("--remote-providers", default="adsb.lol",
-                   help="comma-separated feeds for following/discovering distant flights")
+                   help="comma-separated feeds for following/discovering distant flights "
+                        "(e.g. adsb.lol,adsb.fi; a feed answering 401/403 is dropped)")
+    g.add_argument("--rate", type=float, default=8,
+                   help="starting request budget per feed host, requests/min (adapts: +0.5 per "
+                        "success, halved on HTTP 429)")
+    g.add_argument("--rate-max", type=float, default=60, help="upper limit for the adaptive budget")
     g.add_argument("--no-routes", action="store_true", help="skip callsign->route lookups")
     g.add_argument("--airport-traffic-only", action="store_true",
                    help="only alert for flights arriving/departing the airport")
@@ -705,10 +945,14 @@ def parse_args(argv=None):
     g.add_argument("--no-schedule", action="store_true", help="don't use the TLV flight board")
     g.add_argument("--schedule-refresh", type=float, default=600, help="flight board refresh, s")
     g.add_argument("--schedule-window", type=float, default=16, help="+/- hours of flights to track")
-    g.add_argument("--discovery-interval", type=float, default=60,
-                   help="seconds between global callsign searches for scheduled flights")
+    g.add_argument("--follow-interval", type=float, default=30,
+                   help="seconds between follow requests (all followed hex ids in one request)")
+    g.add_argument("--discovery-interval", type=float, default=180,
+                   help="seconds between rounds of global callsign searches for scheduled flights")
+    g.add_argument("--departed-max-h", type=float, default=6,
+                   help="stop searching for departures that left more than this many hours ago")
     g.add_argument("--follow-max", type=int, default=600, help="max flights followed globally")
-    g.add_argument("--remote-budget", type=int, default=6,
+    g.add_argument("--remote-budget", type=int, default=4,
                    help="max requests per provider per layer per cycle (follow / discover)")
     g.add_argument("--airline-map", help="JSON file of extra IATA->ICAO airline codes")
     g = p.add_argument_group("thresholds")
@@ -753,7 +997,7 @@ def main(argv=None) -> None:
     args = parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
-    http = Http()
+    http = Http(rate=args.rate, rate_max=args.rate_max)
     schedule = None
     if args.no_schedule:
         pass
@@ -771,19 +1015,28 @@ def main(argv=None) -> None:
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     log.info("watching %s (%s) r=%.0fnm every %.0fs via %s",
              args.airport, args.icao, args.radius, args.interval, args.provider)
+    local_host = PROVIDERS[args.provider]["base"].split("/")[2]
     backoff = 0.0
     while True:
         started = time.monotonic()
+        wait = http.budget(local_host).cooling()
+        if 0 < wait < args.interval / 2:  # cooldown ends just after this tick: wait, don't skip it
+            time.sleep(wait)
         try:
             monitor.poll()
             st = monitor.stats
-            log.info("%d local | %d followed globally | %d scheduled callsigns",
-                     st["local"], st["followed"], st["scheduled"])
+            log.info("%d local | %d followed globally | %d scheduled flights | budget %.1f req/min",
+                     st["local"], st["followed"], st["scheduled"], st["rate"])
             backoff = 0.0
+        except Throttled as e:
+            # Cooling down after a 429: skip this cycle's local poll but keep the --interval
+            # cadence; the Budget's jittered cooldown decides when requests resume.
+            log.info("local poll skipped - %s", e)
         except requests.HTTPError as e:
             code = e.response.status_code if e.response is not None else "?"
-            backoff = min(max(backoff * 2, args.interval), 300)
-            log.error("HTTP %s from %s - backing off %.0fs", code, args.provider, backoff)
+            if code != 429:  # on 429 the Budget has already set a jittered cooldown
+                backoff = min(max(backoff * 2, args.interval), 300)
+                log.error("HTTP %s from %s - backing off %.0fs", code, args.provider, backoff)
             if code in (401, 403):
                 others = [p for p in PROVIDERS if p != args.provider]
                 log.error("%s refuses access (some feeds are now feeder-only). "
