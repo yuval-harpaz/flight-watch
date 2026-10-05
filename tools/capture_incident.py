@@ -173,11 +173,34 @@ def legs(tr: dict, lat0: float, lon0: float, t0: float, t1: float) -> list[tuple
     return out
 
 
+def attach_routes(fixture: dict, source: str = fw.STANDING_DATA) -> None:
+    """Add the VRS standing-data route of every callsign in the fixture, plus the positions of the
+    airports on those routes, so replays classify traffic offline like flight_watch does live."""
+    import requests
+    sd = fw.StandingData(fw.Http(min_gap=0.1, rate=6000, rate_max=6000), source)
+    callsigns = {p[7] for a in fixture["aircraft"].values() for p in a["points"] if p[7]}
+    routes, airports = {}, {}
+    for cs in sorted(callsigns):
+        try:
+            codes = sd.route(cs)
+            if codes:
+                routes[cs] = "-".join(codes)
+                for icao in codes:
+                    pos = sd.airport(icao)
+                    if pos:
+                        airports[icao] = [round(pos[0], 5), round(pos[1], 5)]
+        except requests.RequestException as e:
+            print(f"  route of {cs} not fetched: {e}", file=sys.stderr)
+    fixture["routes"], fixture["airports"] = routes, airports
+    fixture["meta"]["routes_source"] = "VRS standing data (CC0), " + source
+    print(f"routes: {len(routes)} of {len(callsigns)} callsigns, {len(airports)} airports", file=sys.stderr)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--date", required=True, help="UTC date, YYYY-MM-DD")
-    p.add_argument("--start", required=True, help="UTC window start, HH:MM")
-    p.add_argument("--end", required=True, help="UTC window end, HH:MM")
+    p.add_argument("--date", help="UTC date, YYYY-MM-DD")
+    p.add_argument("--start", help="UTC window start, HH:MM")
+    p.add_argument("--end", help="UTC window end, HH:MM")
     p.add_argument("--airport", default="TLV")
     p.add_argument("--radius", type=float, default=150)
     p.add_argument("--before-h", type=float, default=3, help="hours before the window to look for departures")
@@ -188,8 +211,21 @@ def main() -> None:
     p.add_argument("--step", type=float, default=5, help="min seconds between stored points")
     p.add_argument("--name", default="")
     p.add_argument("--cache", default=os.path.join(os.path.expanduser("~"), ".cache", "flight-watch"))
-    p.add_argument("--out", required=True)
+    p.add_argument("--standing-data", default=fw.STANDING_DATA,
+                   help="VRS standing-data repository (URL or local checkout) for callsign routes")
+    p.add_argument("--add-routes", metavar="FIXTURE",
+                   help="only add/refresh routes in an existing fixture (rewritten in place)")
+    p.add_argument("--out", help="fixture to write (.json.gz)")
     a = p.parse_args()
+    if a.add_routes:
+        with gzip.open(a.add_routes, "rt", encoding="utf-8") as f:
+            fixture = json.load(f)
+        attach_routes(fixture, a.standing_data)
+        with gzip.open(a.add_routes, "wt", encoding="utf-8") as f:
+            json.dump(fixture, f, separators=(",", ":"))
+        return
+    if not (a.out and a.date and a.start and a.end):
+        p.error("--date, --start, --end and --out are required (or use --add-routes)")
 
     _, lat0, lon0 = fw.AIRPORTS[a.airport]
     day = datetime.strptime(a.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -264,6 +300,7 @@ def main() -> None:
         "board": records,
         "aircraft": aircraft,
     }
+    attach_routes(fixture, a.standing_data)
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)
     with gzip.open(a.out, "wt", encoding="utf-8") as f:
         json.dump(fixture, f, separators=(",", ":"))

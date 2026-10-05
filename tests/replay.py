@@ -124,7 +124,7 @@ def run(fixture: dict, argv=(), warmup: float = 300) -> tuple[list[dict], fw.Mon
     """Replay the fixture window; returns (alerts, monitor, feed)."""
     meta = fixture["meta"]
     args = fw.parse_args(["--airport", meta["airport"], "--radius", str(meta["radius"]),
-                          "--jsonl", "", "--no-routes", "--rate", "60", "--rate-max", "600",
+                          "--jsonl", "", "--rate", "60", "--rate-max", "600",
                           *argv])
     clock = Clock(meta["start"] - warmup)
     http = fw.Http(min_gap=0, rate=args.rate, rate_max=args.rate_max, clock=clock, rng=lambda: 0.5)
@@ -136,6 +136,9 @@ def run(fixture: dict, argv=(), warmup: float = 300) -> tuple[list[dict], fw.Mon
         schedule.fetched = float("inf")  # never fetch: the day's board comes from the fixture
         schedule.load(fixture["board"], datetime.fromtimestamp(clock(), schedule.tz))
     mon = fw.Monitor(args, fw.Notifier(args, http), http, schedule)
+    if mon.standing:  # routes captured with the fixture: classify offline, like the live route lookup
+        mon.standing = fw.StandingData(None, preload={"routes": fixture.get("routes", {}),
+                                                      "airports": fixture.get("airports", {})})
     mon.clock = mon.wall = clock
     mon.started = clock()
     alerts: list[dict] = []

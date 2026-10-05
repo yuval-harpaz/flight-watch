@@ -23,6 +23,8 @@ Alerts:
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import logging
 import math
@@ -65,7 +67,10 @@ PROVIDERS = {
                 "point": "/lat/{lat}/lon/{lon}/dist/{radius}",
                 "hex": "/hex/{ids}", "callsign": "/callsign/{ids}"},
 }
-ROUTE_API = "https://api.adsb.lol/api/0/routeset"  # callsign -> route (crowd-sourced)
+# Callsign -> route and airport positions: Virtual Radar Server standing data (CC0, crowd-sourced;
+# adsb.lol's own route API now redirects to it). Per-airline CSV files, fetched on first use and
+# kept in memory only. A local checkout of the repository can be used instead (--standing-data).
+STANDING_DATA = "https://raw.githubusercontent.com/vradarserver/standing-data/main"
 ROUTE_TTL = 6 * 3600
 FLYDATA_URL = "https://data.gov.il/api/3/action/datastore_search"
 FLYDATA_RESOURCE = "e83f763b-b7d7-479e-b172-ae981ddc6de5"  # Ben Gurion flight board
@@ -351,11 +356,87 @@ class Http:
         r.raise_for_status()
         return r
 
+    def get_text(self, url: str, priority: str = HIGH, **kw) -> str:
+        r = self.request("GET", url, priority, **kw)
+        r.encoding = "utf-8-sig"
+        return r.text
+
     def get_json(self, url: str, priority: str = HIGH, **kw):
         return self.request("GET", url, priority, **kw).json()
 
     def post(self, url: str, priority: str = HIGH, **kw):
         return self.request("POST", url, priority, timeout=8, **kw)
+
+
+class StandingData:
+    """Routes by callsign and airport positions from VRS standing data, cached per file.
+
+    `source` is the repository's base URL or a local checkout; `preload` (tests, replays) gives
+    {"routes": {callsign: "LHBP-LLBG"}, "airports": {icao: [lat, lon]}} and disables fetching."""
+
+    def __init__(self, http: "Http | None", source: str = STANDING_DATA, preload: dict | None = None,
+                 ttl: float = 24 * 3600, clock=time.monotonic):
+        self.http, self.source, self.ttl, self.clock = http, source.rstrip("/"), ttl, clock
+        self.files: dict[str, tuple[float, dict]] = {}
+        self.preload = preload
+        if http and self.source.startswith(("http://", "https://")):
+            # static files on a CDN: a far larger budget than the feed's, still backing off on 429
+            b = http.budget(self.source.split("/")[2])
+            b.rate, b.rate_max, b.burst = max(b.rate, 60), max(b.rate_max, 300), 10
+
+    def _file(self, path: str) -> dict:
+        """Rows keyed by their first column; {} when the file does not exist.
+        Raises Throttled / RequestException when it could not be fetched (try again later)."""
+        hit = self.files.get(path)
+        if hit and self.clock() - hit[0] < self.ttl:
+            return hit[1]
+        if self.source.startswith(("http://", "https://")):
+            try:
+                text = self.http.get_text(f"{self.source}/{path}", LOW)
+            except requests.HTTPError as e:
+                if e.response is None or e.response.status_code != 404:
+                    raise
+                text = ""
+        else:
+            try:
+                with open(os.path.join(self.source, path), encoding="utf-8-sig") as f:
+                    text = f.read()
+            except FileNotFoundError:
+                text = ""
+        rows = {}
+        for row in csv.reader(io.StringIO(text)):
+            if row and row[0] not in ("Callsign", "Code"):
+                rows[row[0]] = row
+        self.files[path] = (self.clock(), rows)
+        return rows
+
+    def route(self, callsign: str) -> list[str] | None:
+        """ICAO airport codes along the route (["LHBP", "LLBG"]), or None when not in the data."""
+        if self.preload is not None:
+            r = self.preload.get("routes", {}).get(callsign)
+            return r.split("-") if r else None
+        m = re.fullmatch(r"([A-Z]{3})([0-9][0-9A-Z]*)", callsign or "")
+        if not m:
+            return None
+        code, num = m.groups()
+        for name in (f"{code}-{num[0]}.csv", f"{code}-all.csv"):  # big airlines are split by digit
+            rows = self._file(f"routes/schema-01/{code[0]}/{name}")
+            if rows:
+                row = rows.get(callsign)
+                return row[4].split("-") if row and len(row) > 4 and row[4] else None
+        return None
+
+    def airport(self, icao: str) -> tuple[float, float] | None:
+        if self.preload is not None:
+            pos = self.preload.get("airports", {}).get(icao)
+            return tuple(pos[:2]) if pos else None
+        if not re.fullmatch(r"[A-Z0-9]{4}", icao or ""):
+            return None
+        row = self._file(f"airports/schema-01/{icao[0]}/{icao[:2]}.csv").get(icao)
+        try:
+            return float(row[6]), float(row[7])
+        except (TypeError, ValueError, IndexError):
+            return None
 
 
 @dataclass
@@ -408,6 +489,7 @@ class Track:
     hot_until: float = 0.0   # data time until which the flight is "hot" (alerted recently)
     lost_alerted: bool = False  # the current loss of contact was alerted (not just noted)
     israeli: bool = False    # seen low at an Israeli airport (so it is Israel traffic)
+    route_dir: int = 0       # +1 flying the route as listed, -1 the reverse leg, 0 not known yet
 
     @property
     def last(self) -> Sample | None:
@@ -624,6 +706,7 @@ class Monitor:
         self.routes: dict[str, tuple[float, str | None]] = {}
         self.route_failures = 0
         self.routes_off = args.no_routes
+        self.standing = None if args.no_routes else StandingData(http, args.standing_data)
         self.last_ok: float | None = None
         self.last_count = 0
         self.stats = {}
@@ -784,35 +867,55 @@ class Monitor:
         return float(server_now), data.get("ac") or data.get("aircraft") or []
 
     def lookup_routes(self, tracks: list[Track]) -> None:
-        if self.routes_off:
+        """Route (origin..destination) per callsign, from the standing data; at most a few new
+        files per cycle, on spare request budget."""
+        if self.routes_off or not self.standing:
             return
         now = self.wall()
-        need = [t for t in tracks if t.callsign and not t.sched and (
-            t.callsign not in self.routes or now - self.routes[t.callsign][0] > ROUTE_TTL)][:100]
-        if not need:
-            return
-        got = {}
-        try:
-            r = self.http.post(ROUTE_API, LOW, json={"planes": [
-                {"callsign": t.callsign, "lat": t.last.lat, "lng": t.last.lon} for t in need]})
-            for item in r.json():
-                cs = (item.get("callsign") or "").strip()
-                codes = item.get("_airport_codes_iata") or item.get("airport_codes")
-                if cs and codes and codes.lower() != "unknown":
-                    got[cs] = codes.upper()
-            self.route_failures = 0
-        except Throttled:
-            return  # try again next cycle
-        except (requests.RequestException, ValueError, AttributeError) as e:
-            self.route_failures += 1
-            log.debug("route lookup failed: %s", e)
-            if self.route_failures >= 3:
-                self.routes_off = True
-                log.info("route lookups failed %d times in a row - disabled for this run "
-                         "(flight board and heuristics still classify traffic)", self.route_failures)
-            return
-        for t in need:
-            self.routes[t.callsign] = (now, got.get(t.callsign))
+        for t in tracks:
+            cs = t.callsign
+            if not cs or (cs in self.routes and now - self.routes[cs][0] < ROUTE_TTL):
+                continue
+            try:
+                codes = self.standing.route(cs)
+                for icao in (codes or [])[:1] + (codes or [])[-1:]:
+                    self.standing.airport(icao)  # warm the position cache for both ends
+                self.route_failures = 0
+            except Throttled:
+                return  # try again next cycle
+            except requests.RequestException as e:
+                self.route_failures += 1
+                log.debug("route lookup failed: %s", e)
+                if self.route_failures >= 3:
+                    self.routes_off = True
+                    log.info("route lookups failed %d times in a row - disabled for this run "
+                             "(flight board and heuristics still classify traffic)", self.route_failures)
+                return
+            self.routes[cs] = (now, "-".join(codes) if codes else None)
+
+    def route_ends(self, t: Track) -> list[tuple[str, float, float]]:
+        """[(icao, lat, lon)] for the first and last airport of the flight's known route, if the
+        flight is plausibly on it: crowd-sourced routes can be stale or belong to another leg, so a
+        route is ignored while the aircraft is far off the corridor between its ends."""
+        route = self.routes.get(t.callsign, (0, None))[1]
+        if not route or not self.standing:
+            return []
+        out = []
+        for icao in dict.fromkeys(route.split("-")[:1] + route.split("-")[-1:]):
+            try:
+                pos = self.standing.airport(icao)
+            except requests.RequestException:
+                pos = None
+            if pos:
+                out.append((icao, *pos))
+        s = t.last
+        if len(out) == 2 and s:
+            (_, olat, olon), (_, dlat, dlon) = out
+            length = haversine_nm(olat, olon, dlat, dlon)
+            detour = haversine_nm(olat, olon, s.lat, s.lon) + haversine_nm(s.lat, s.lon, dlat, dlon) - length
+            if detour > max(250, 0.3 * length):
+                return []
+        return out
 
     def dist(self, s: Sample) -> float:
         return haversine_nm(self.args.lat, self.args.lon, s.lat, s.lon)
@@ -1036,8 +1139,9 @@ class Monitor:
         The deviation must hold over --course-hold seconds while the distance opens (arrival) or
         closes (departure); route bends on the way (e.g. via Saudi Arabia and Jordan) stay below it."""
         a, s = self.args, t.last
-        if (kind not in ("ARR", "DEP") or s.on_ground or s.track is None or (s.alt or 0) < 5000
-                or d < a.off_course_min_dist):
+        if kind not in ("ARR", "DEP"):
+            return self.check_route_course(t)
+        if s.on_ground or s.track is None or (s.alt or 0) < 5000 or d < a.off_course_min_dist:
             return
         old = t.sample_ago(a.course_hold)
         if not old:
@@ -1055,6 +1159,59 @@ class Monitor:
             self.alert(t, "TURNING_BACK", f"{a.airport} departure heading back to {a.airport} "
                        f"(track {s.track:.0f} deg) for {s.t - old.t:.0f}s, {d:.0f} nm out and "
                        f"closing ({was:.0f} -> {d:.0f} nm)")
+
+    def check_route_course(self, t: Track) -> None:
+        """Any flight with a known route flying away from its destination, long before landing.
+
+        Crowd-sourced routes are sometimes stored the wrong way round (a return leg under the
+        outbound callsign), so the direction is first learned from the flight itself: closing on
+        the listed destination confirms it, closing on the listed origin swaps the two."""
+        a, s = self.args, t.last
+        if s.on_ground or s.track is None or (s.alt or 0) < 10000:
+            return
+        ends = self.route_ends(t)
+        if len(ends) < 2:
+            return
+        old = t.sample_ago(a.course_hold)
+        if not old:
+            return
+        (o, olat, olon), (dst, dlat, dlon) = ends[0], ends[-1]
+        d_dest, d_orig = haversine_nm(s.lat, s.lon, dlat, dlon), haversine_nm(s.lat, s.lon, olat, olon)
+        was_dest, was_orig = haversine_nm(old.lat, old.lon, dlat, dlon), haversine_nm(old.lat, old.lon, olat, olon)
+        if not t.route_dir:
+            # learned away from both ends (departure loops and approaches mislead) while heading
+            # roughly toward the end it is closing on
+            if min(d_dest, d_orig) < a.off_course_min_dist:
+                return
+            if (d_dest < was_dest - 5 and d_orig > was_orig
+                    and heading_diff(s.track, bearing(s.lat, s.lon, dlat, dlon)) <= 60):
+                t.route_dir = 1
+            elif (d_orig < was_orig - 5 and d_dest > was_dest
+                    and heading_diff(s.track, bearing(s.lat, s.lon, olat, olon)) <= 60):
+                t.route_dir = -1
+            return
+        if t.route_dir < 0:
+            (o, olat, olon), (dst, dlat, dlon) = (dst, dlat, dlon), (o, olat, olon)
+            d_dest, was_dest = d_orig, was_orig
+        if d_dest < a.off_course_min_dist:
+            return
+        window = [x for x in t.samples if x.t >= old.t and x.track is not None]
+        if len(window) < 3:
+            return
+        devs = [heading_diff(x.track, bearing(x.lat, x.lon, dlat, dlon)) for x in window]
+        if min(devs) >= a.off_course and d_dest > was_dest + 3:
+            self.alert(t, "OFF_COURSE", f"bound for {dst} (route {self.routes[t.callsign][1]}) but heading "
+                       f"{s.track:.0f} deg, {devs[-1]:.0f} deg away from it for {s.t - old.t:.0f}s, "
+                       f"{d_dest:.0f} nm out and opening ({was_dest:.0f} -> {d_dest:.0f} nm)")
+
+    def toward_own_airport(self, t: Track) -> str | None:
+        """ICAO of the route's origin/destination the flight is pointing at, if any."""
+        s = t.last
+        for icao, lat, lon in self.route_ends(t):
+            if (haversine_nm(s.lat, s.lon, lat, lon) > 20
+                    and heading_diff(s.track, bearing(s.lat, s.lon, lat, lon)) <= self.args.toward_dest_tol):
+                return icao
+        return None
 
     def arrival_guess(self, t: Track) -> bool:
         """Looks like an Israeli-airport arrival the board/route DB did not identify."""
@@ -1081,6 +1238,8 @@ class Monitor:
         apt, ad = nearest_airport(s.lat, s.lon, israeli=False)
         if ad < 40 and (s.vrate or 0) < -300:
             return  # descending into its own (non-Israeli) airport
+        if self.toward_own_airport(t):
+            return  # pointing at its own destination (or origin) beyond Israel
         prev = t.samples[-2] if len(t.samples) > 1 else None
         if (not prev or prev.track is None
                 or minutes_to(ISRAEL, prev.lat, prev.lon, prev.track, prev.gs or s.gs, a.toward_eta) is None):
@@ -1223,6 +1382,8 @@ def parse_args(argv=None):
                         "success, halved on HTTP 429)")
     g.add_argument("--rate-max", type=float, default=60, help="upper limit for the adaptive budget")
     g.add_argument("--no-routes", action="store_true", help="skip callsign->route lookups")
+    g.add_argument("--standing-data", default=STANDING_DATA,
+                   help="VRS standing-data repository (URL or local checkout) for routes and airports")
     g.add_argument("--airport-traffic-only", action="store_true",
                    help="only alert for flights arriving/departing the airport")
     g.add_argument("--once", action="store_true", help="single poll then exit")
@@ -1280,6 +1441,9 @@ def parse_args(argv=None):
     g.add_argument("--toward-eta", type=float, default=12,
                    help="TOWARD_ISRAEL when a turn brings Israeli airspace within this many minutes")
     g.add_argument("--toward-turn", type=float, default=45, help="degrees of turn for TOWARD_ISRAEL")
+    g.add_argument("--toward-dest-tol", type=float, default=25,
+                   help="no TOWARD_ISRAEL while the track is within this many degrees of the "
+                        "flight's own destination (or origin) from the route data")
     g.add_argument("--toward-min-alt", type=int, default=8000, help="ft; ignore lower traffic")
     g.add_argument("--hot-minutes", type=float, default=20,
                    help="after an alert, follow the flight every cycle and report every anomaly")

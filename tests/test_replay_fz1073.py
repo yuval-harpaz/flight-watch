@@ -70,6 +70,11 @@ class FZ1073Replay(unittest.TestCase):
         a = self.first("LOST_CONTACT", "05:53:00", "06:15:00")
         self.assertEqual(a["traffic"], "ARR")
 
+    def test_alphanumeric_callsign_recognised_as_tlv_arrival(self):
+        """WZZ3W never matches the flight board; its route (standing data) makes it a TLV arrival,
+        so it is not "a foreign flight pointing at Israel"."""
+        self.assertEqual(self.monitor.classify(self.monitor.tracks["471d61"]), ("ARR", "LHBP-LLBG"))
+
     def test_no_high_priority_false_alarms_on_other_flights(self):
         bad = [a for a in self.others if a["kind"] in ("DIVERSION", "RETURNED", "EMERGENCY", "OFF_COURSE",
                                                        "TURNING_BACK", "TOWARD_ISRAEL")]
