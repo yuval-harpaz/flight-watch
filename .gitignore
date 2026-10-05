@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 posts.jsonl
 tmp*
+standing-data/
+*.log

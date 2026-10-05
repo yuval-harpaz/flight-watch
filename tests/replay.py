@@ -179,7 +179,7 @@ def main() -> None:
           f"{time.strftime('%H:%M', time.gmtime(meta['end']))} UTC, "
           f"{len(fixture['aircraft'])} aircraft ({time.monotonic() - started:.1f}s)\n")
     if "--feed" in sys.argv:  # the announcements as they would have been posted
-        ann = fw.Announcer(mon.args)
+        ann = fw.Announcer(mon.args, out=print)
         for rec in alerts:
             ann.announce(rec)
     else:

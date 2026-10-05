@@ -89,7 +89,8 @@ class FakeFeed:
 
 def make(argv=(), with_schedule=False):
     clock = Clock()
-    args = fw.parse_args(["--jsonl", "", "--no-schedule", "--turn-zones", "", *argv])
+    args = fw.parse_args(["--jsonl", "", "--no-schedule", "--turn-zones", "",
+                          "--standing-data", fw.STANDING_DATA, *argv])  # the fake feed, never a local copy
     http = fw.Http(min_gap=0, rate=args.rate, rate_max=args.rate_max, clock=clock, rng=lambda: 0.5)
     feed = FakeFeed(clock)
     http.s = feed
@@ -97,7 +98,7 @@ def make(argv=(), with_schedule=False):
     if with_schedule:
         schedule = fw.Schedule(http, dict(fw.AIRLINE_ICAO), 1e9, 16)
         schedule.fetched = 1e18  # never refetch; tests load records directly
-    mon = fw.Monitor(args, fw.Notifier(args, http), http, schedule)
+    mon = fw.Monitor(args, fw.Notifier(args, http, console=lambda text: None), http, schedule)
     mon.clock = mon.wall = clock
     mon.started = clock()
     alerts = []
@@ -684,6 +685,21 @@ class StandingDataTests(unittest.TestCase):
         sd.route("WZZ3W"), sd.airport("LLBG")
         self.assertEqual(len(feed.calls), n, "files are cached")
 
+    def test_route_downloads_are_spread_over_cycles(self):
+        """A cold start sees dozens of new callsigns; fetching all their files at once held up the
+        first local poll for over a minute."""
+        mon, feed, clock, alerts = with_routes()
+        for i, cs in enumerate(("WZZ3W", "RJA111", "UAE121", "ABC12", "DEF34", "GHI56")):
+            feed.aircraft[f"30000{i}"] = airborne(32.5, 34.0 + i / 10, 30000, flight=cs)
+        feed.local = set(feed.aircraft)
+        counts = []
+        for _ in range(4):
+            n = sum("/standing-data/" in p for m, p in feed.calls)
+            step(mon, clock)
+            counts.append(sum("/standing-data/" in p for m, p in feed.calls) - n)
+        self.assertLessEqual(max(counts), 5, counts)  # the cap (3), and one callsign may overrun it
+        self.assertGreater(counts[1], 0, "the rest follow in later cycles")
+
     def test_alphanumeric_callsign_classified_by_route(self):
         """Wizz-style callsigns never match the flight board; the route says it is a TLV arrival."""
         mon, feed, clock, alerts = with_routes()
@@ -789,6 +805,19 @@ class AnnouncerTests(unittest.TestCase):
                                       route_text=None, military=True))
         self.assertIn("SHUFL (military, 312, B762), route unknown - FL150", post["text"])
 
+    def test_quiet_console_shows_one_row_per_alert(self):
+        args = fw.parse_args(["--jsonl", "", "--posts", "", "--turn-zones", ""])
+        rows, posts = [], []
+        n = fw.Notifier(args, None, fw.Announcer(args, out=posts.append), console=rows.append)
+        n.send(alert_rec("EMERGENCY", "squawk 7700 (GENERAL EMERGENCY)", airline="Flydubai",
+                         remote=True, traffic="ARR", route=None))
+        self.assertEqual(rows, ["08:00:00  FZ1073 Flydubai  Dubai (DXB) → TLV  EMERGENCY"])
+        self.assertEqual(fw.Notifier.row(alert_rec("POSITION_JUMP", "x", callsign="SHUFL", flight=None,
+                                                    route_text=None, military=True)),
+                         "08:00:00  SHUFL (military)  POSITION_JUMP")
+        quiet = fw.Announcer(args)  # without -v the feed goes to posts.jsonl only
+        self.assertIsNotNone(quiet.announce(alert_rec("EMERGENCY", "squawk 7700 (GENERAL EMERGENCY)")))
+
     def test_long_details_are_cut_to_the_limit(self):
         ann, _ = self.make()
         post = ann.announce(alert_rec("TOWARD_ISRAEL", "not bound for Israel " + "x" * 400))
@@ -836,7 +865,8 @@ class AnnouncerTests(unittest.TestCase):
     def test_monitor_alerts_reach_the_feed(self):
         mon, feed, clock, alerts = make(["--no-routes"])
         printed = []
-        mon.notifier = fw.Notifier(mon.args, mon.http, fw.Announcer(mon.args, out=printed.append))
+        mon.notifier = fw.Notifier(mon.args, mon.http, fw.Announcer(mon.args, out=printed.append),
+                                  console=lambda text: None)
         mon.args.posts = ""
         feed.local = {"738001"}
         feed.aircraft["738001"] = airborne(32.5, 34.5, 30000, squawk="7700")

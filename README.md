@@ -90,7 +90,8 @@ for the run after 3 failures in a row.
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python flight_watch.py --once -v                        # one poll with request logging, then exit
+python flight_watch.py --once -v                        # one poll with the full log, then exit
+python flight_watch.py --log-file flight_watch.log      # quiet console, full log in a file
 python flight_watch.py                                  # TLV, every 10 s, 150 nm radius; Ctrl+C stops
 python flight_watch.py --airport ETM --descent-angle 8 --interval 15
 python flight_watch.py --airport-traffic-only           # only flights to/from the airport
@@ -99,8 +100,17 @@ python flight_watch.py --ntfy-topic my-random-topic-8f3k   # phone push via ntfy
 python flight_watch.py --help                           # all thresholds
 ```
 
-It runs until stopped (Ctrl+C). The terminal shows a status line per cycle and the announcement
-feed; alerts are appended to `alerts.jsonl` and posts to `posts.jsonl` in the current directory
+It runs until stopped (Ctrl+C). By default the terminal shows the first aircraft count, then one
+line per alert (Israel time, flight and airline, route when known, alert type), plus errors:
+
+```
+22:52:11  watching TLV: 22 aircraft within 150 nm, 487 scheduled flights
+19:53:16  SHUFL (military)  POSITION_JUMP
+08:22:10  FZ1073 Flydubai  Dubai (DXB) → TLV  VERTICAL_RATE
+```
+
+`-v` shows the full log instead (a status line per cycle, rate limiting, flights followed) and
+the announcement feed; `-vv` adds debug detail. Alerts are appended to `alerts.jsonl` and posts to `posts.jsonl` in the current directory
 (`--jsonl ''` / `--posts ''` to disable). Telegram: set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
 
 ## Storage and links
@@ -130,8 +140,15 @@ budget doesn't cover 8,640 requests/day.
 ADS-B carries no origin/destination. Arrival/departure comes from the TLV flight board first,
 then the callsign's route in the Virtual Radar Server standing data (CC0, crowd-sourced, may be
 missing or wrong; adsb.lol's own route API now redirects to it), then a heuristic near the
-airport (marked `ARR?` / `DEP?`). Route files are fetched per airline from GitHub on first use
-and kept in memory only (`--standing-data` can point at a local checkout instead).
+airport (marked `ARR?` / `DEP?`). With a local copy in `standing-data/` (git-ignored, 38 MB) it
+is read from disk; without one, files are fetched per airline from GitHub on first use (at most 3
+per cycle, so the poll is not held up) and kept in memory only. `--standing-data` picks another
+checkout or URL. The data changes daily:
+
+```bash
+git clone --depth 1 https://github.com/vradarserver/standing-data standing-data
+git -C standing-data pull --depth 1     # daily (cron / systemd timer); pulling needs no write access
+```
 
 The route is what identifies Wizz/easyJet-style alphanumeric callsigns (`WZZ3W` = Budapest ->
 TLV) that never match the board. It also gives each flight a destination: `TOWARD_ISRAEL` is not
@@ -204,6 +221,12 @@ drawn in red. Below it is altitude and ground speed over time. Nothing else is s
 
 Run it as a long-lived process from its venv: in `tmux` while testing, later as a `systemd` service
 on a VPS (`ExecStart=/path/to/flight-watch/.venv/bin/python flight_watch.py`, `Restart=always`,
-`WorkingDirectory=` where `alerts.jsonl` / `posts.jsonl` should go).
+`WorkingDirectory=` where `alerts.jsonl` / `posts.jsonl` should go). The console lines go to the
+journal (`journalctl -u flight-watch`); `--log-file flight_watch.log` also keeps the full log.
+The server only ever pulls (this repo and `standing-data/`); nothing it writes is pushed.
+
+Network use is small: measured compressed sizes are ~2 KB per local poll at night (more aircraft
+by day), ~30 KB per flight-board refresh (10 min), under 1 KB per follow/search request: roughly
+20-80 MB a day, most of it the 10-second local poll.
 Cheap always-on options: Oracle Cloud free-tier VM, a ~€4/month Hetzner VPS, Fly.io or Railway.
 A Raspberry Pi with an RTL-SDR receiver gives your own local feed with zero API dependency.

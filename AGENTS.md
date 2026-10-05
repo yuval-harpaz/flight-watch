@@ -31,7 +31,8 @@ Three data layers per cycle, in priority order:
    `e83f763b-b7d7-479e-b172-ae981ddc6de5`) → expected callsigns → global search
    (`/v2/callsign/A,B,C`), so inbound flights are found far from TLV. Slowest cadence.
 
-Each alert goes through `Monitor.alert()` (cooldowns, hot flights) to `Notifier`: a log line,
+Each alert goes through `Monitor.alert()` (cooldowns, hot flights) to `Notifier`: a console row
+(the only output besides the first aircraft count and errors, unless `-v`), a log line,
 `alerts.jsonl`, the `Announcer` (social-media-style post, threaded per flight, printed as a feed
 and appended to `posts.jsonl`), and ntfy / Telegram when configured. `tests/replay.py` and
 `tools/` (incident capture, turn-zone learning, `plot_alert.py`
@@ -64,6 +65,7 @@ then the callsign's route in the VRS standing data, then a heuristic near the ai
   Saudi Arabia. Hence: ignore a route while the aircraft is far off its corridor, and learn the
   direction of travel from the flight (> 60 nm from both ends) before using the destination.
   Never treat a route as proof that a flight is harmless beyond those checks.
+- The board is fetched with only the columns used (`FLYDATA_FIELDS`), half the size.
 - Flight-board quirks: codeshare rows (e.g. DAL7441 on an El Al flight) never transmit, so
   search one callsign per physical flight. Departures stay "DEPARTED" long after landing.
   The board has >3000 rows, so paginate.
@@ -162,6 +164,9 @@ Incident replays (`tests/replay.py`) serve captured real traffic the same way. K
   without permanently marking a provider or endpoint as unsupported.
 
 Quick live check: `python flight_watch.py --once -v`. Keep live experiments short.
+A local `standing-data/` checkout is used when present (tests pin `--standing-data` to the URL so
+they keep using the fake feed). Otherwise route/airline files are fetched at most `ROUTE_FILES_PER_CYCLE` (3) per poll: they are 1.1 s apart,
+and fetching a cold start's ~60 files in one cycle held up the local poll for over a minute.
 
 ## Open issues
 

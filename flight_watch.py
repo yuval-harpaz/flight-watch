@@ -72,8 +72,14 @@ PROVIDERS = {
 # kept in memory only. A local checkout of the repository can be used instead (--standing-data).
 STANDING_DATA = "https://raw.githubusercontent.com/vradarserver/standing-data/main"
 ROUTE_TTL = 6 * 3600
+ROUTE_FILES_PER_CYCLE = 3  # new standing-data files per poll (a cold start needs ~60)
 FLYDATA_URL = "https://data.gov.il/api/3/action/datastore_search"
 FLYDATA_RESOURCE = "e83f763b-b7d7-479e-b172-ae981ddc6de5"  # Ben Gurion flight board
+# the board columns we use: operator, flight number, scheduled / updated time, arrival or departure,
+# other airport code and name, status (asking for these only halves the download)
+FLYDATA_FIELDS = "CHOPER,CHFLTN,CHSTOL,CHPTOL,CHAORD,CHLOC1,CHLOC1D,CHRMINE"
+# a local checkout used instead of STANDING_DATA when present (git clone, then git pull daily)
+LOCAL_STANDING_DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "standing-data")
 
 # IATA airline code -> ICAO callsign prefix, for carriers commonly seen at TLV.
 # Extend with --airline-map file.json ({"XX": "XXX"}).
@@ -381,6 +387,7 @@ class StandingData:
         self.http, self.source, self.ttl, self.clock = http, source.rstrip("/"), ttl, clock
         self.files: dict[str, tuple[float, dict]] = {}
         self.preload = preload
+        self.remote = self.source.startswith(("http://", "https://"))  # else a local checkout
         if http and self.source.startswith(("http://", "https://")):
             # static files on a CDN: a far larger budget than the feed's, still backing off on 429
             b = http.budget(self.source.split("/")[2])
@@ -581,6 +588,7 @@ class Schedule:
         records: list[dict] = []
         for _ in range(20):
             data = self.http.get_json(FLYDATA_URL, params={"resource_id": FLYDATA_RESOURCE,
+                                                           "fields": FLYDATA_FIELDS,
                                                            "limit": 3000, "offset": len(records)})
             page = data["result"]["records"]
             records += page
@@ -704,8 +712,9 @@ class Announcer:
                  "COURSE_CHANGE": ("\U0001f504", "Course reversal"),
                  "POSITION_JUMP": ("\U0001f6f0️", "Position jump (GPS spoofing?)")}
 
-    def __init__(self, args, out=print):
-        self.args, self.out = args, out
+    def __init__(self, args, out=None):
+        self.args = args
+        self.out = out or (print if args.verbose else (lambda text: None))  # quiet: posts.jsonl only
         self.threads: dict[str, dict] = {}   # hex -> {"root", "parent", "t"}
         self.sent: deque = deque()           # data times of recent posts (hourly cap)
         self.count = 0
@@ -839,8 +848,10 @@ class Announcer:
 
 # --------------------------------------------------------------------------- notifier
 class Notifier:
-    def __init__(self, args, http: Http, announcer: Announcer | None = None):
+    def __init__(self, args, http: Http, announcer: Announcer | None = None, console=None):
         self.args, self.http = args, http
+        # without --verbose the console shows one line per alert (the log is off below ERROR)
+        self.console = console or (print if not args.verbose else (lambda text: None))
         self.announcer = announcer or Announcer(args)
         self.tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.tg_chat = os.getenv("TELEGRAM_CHAT_ID")
@@ -854,6 +865,7 @@ class Notifier:
         text = (f"[{rec['kind']}]{where} {rec['aircraft']} {rec['traffic']}"
                 f"{' ' + rec['route'] if rec['route'] else ''} - {rec['message']}")
         log.info("%s | %s", text, rec["links"]["live_adsbx"])
+        self.console(self.row(rec))
         self.announcer.announce(rec)
         if self.args.jsonl:
             with open(self.args.jsonl, "a", encoding="utf-8") as f:
@@ -873,6 +885,16 @@ class Notifier:
             self._post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage",
                        json={"chat_id": self.tg_chat, "text": f"{text}\n{link_lines}",
                              "disable_web_page_preview": True})
+
+    @staticmethod
+    def row(rec: dict) -> str:
+        """One console line per alert: time (Israel), flight, route if known, alert type."""
+        when = datetime.fromisoformat(rec["time"].replace("Z", "+00:00")).astimezone(ZoneInfo("Asia/Jerusalem"))
+        ident = rec.get("flight") or rec.get("callsign") or rec["hex"].upper()
+        ident += f" {rec['airline']}" if rec.get("airline") else ""
+        ident += " (military)" if rec.get("military") else ""
+        route = f"  {rec['route_text']}" if rec.get("route_text") else ""
+        return f"{when:%H:%M:%S}  {ident}{route}  {rec['kind']}"
 
     def _post(self, url, **kw):
         try:
@@ -1057,10 +1079,13 @@ class Monitor:
         if self.routes_off or not self.standing:
             return
         now = self.wall()
+        loaded = len(self.standing.files)
         for t in tracks:
             cs = t.callsign
             if not cs or (cs in self.routes and now - self.routes[cs][0] < ROUTE_TTL):
                 continue
+            if self.standing.remote and len(self.standing.files) - loaded >= ROUTE_FILES_PER_CYCLE:
+                return  # the rest next cycle: downloads are 1.1 s apart and must not hold up the poll
             try:
                 if airline_like(t):  # airline names / IATA codes for alerts: one file, first
                     self.standing.airline(cs[:3], fetch=True)
@@ -1605,8 +1630,9 @@ def parse_args(argv=None):
                         "success, halved on HTTP 429)")
     g.add_argument("--rate-max", type=float, default=60, help="upper limit for the adaptive budget")
     g.add_argument("--no-routes", action="store_true", help="skip callsign->route lookups")
-    g.add_argument("--standing-data", default=STANDING_DATA,
-                   help="VRS standing-data repository (URL or local checkout) for routes and airports")
+    g.add_argument("--standing-data",
+                   help="VRS standing-data repository (URL or local checkout) for routes and airports "
+                        f"(default: {LOCAL_STANDING_DATA} if it exists, else {STANDING_DATA})")
     g.add_argument("--airport-traffic-only", action="store_true",
                    help="only alert for flights arriving/departing the airport")
     g.add_argument("--once", action="store_true", help="single poll then exit")
@@ -1683,8 +1709,13 @@ def parse_args(argv=None):
                    help="later alerts on a flight reply to its thread for this long")
     g.add_argument("--ntfy-topic", default=os.getenv("NTFY_TOPIC"), help="ntfy topic name")
     g.add_argument("--ntfy-server", default=os.getenv("NTFY_SERVER", "https://ntfy.sh"))
-    g.add_argument("-v", "--verbose", action="store_true")
+    g.add_argument("--log-file", help="also write the full log (as with -v) to this file")
+    g.add_argument("-v", "--verbose", action="count", default=0,
+                   help="-v: the full log and the announcement feed; -vv: also debug detail. "
+                        "Without it: the first aircraft count, then one line per alert (and errors)")
     a = p.parse_args(argv)
+    if not a.standing_data:
+        a.standing_data = LOCAL_STANDING_DATA if os.path.isdir(LOCAL_STANDING_DATA) else STANDING_DATA
 
     a.airport = a.airport.upper()
     known = AIRPORTS.get(a.airport)
@@ -1707,8 +1738,15 @@ def parse_args(argv=None):
 
 def main(argv=None) -> None:
     args = parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+    console = {0: logging.ERROR, 1: logging.INFO}.get(args.verbose, logging.DEBUG)
+    logging.basicConfig(level=min(console, logging.INFO if args.log_file else console),
                         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
+    logging.getLogger().handlers[0].setLevel(console)
+    if args.log_file:
+        fh = logging.FileHandler(args.log_file, encoding="utf-8")
+        fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%Y-%m-%d %H:%M:%S"))
+        logging.getLogger().addHandler(fh)
+    log.info("standing data (routes, airports, airlines): %s", args.standing_data)
     http = Http(rate=args.rate, rate_max=args.rate_max)
     schedule = None
     if args.no_schedule:
@@ -1728,7 +1766,7 @@ def main(argv=None) -> None:
     log.info("watching %s (%s) r=%.0fnm every %.0fs via %s",
              args.airport, args.icao, args.radius, args.interval, args.provider)
     local_host = PROVIDERS[args.provider]["base"].split("/")[2]
-    backoff = 0.0
+    backoff, counted = 0.0, False
     while True:
         started = time.monotonic()
         wait = http.budget(local_host).cooling()
@@ -1739,6 +1777,10 @@ def main(argv=None) -> None:
             st = monitor.stats
             log.info("%d local | %d followed globally | %d scheduled flights | budget %.1f req/min",
                      st["local"], st["followed"], st["scheduled"], st["rate"])
+            if not args.verbose and not counted:
+                counted = True
+                print(f"{time.strftime('%H:%M:%S')}  watching {args.airport}: {st['local']} aircraft within "
+                      f"{args.radius:.0f} nm, {st['scheduled']} scheduled flights", flush=True)
             backoff = 0.0
         except Throttled as e:
             # Cooling down after a 429: skip this cycle's local poll but keep the --interval
