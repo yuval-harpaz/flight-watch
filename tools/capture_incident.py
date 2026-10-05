@@ -188,7 +188,8 @@ def attach_routes(fixture: dict, source: str = fw.STANDING_DATA) -> None:
                 for icao in codes:
                     pos = sd.airport(icao)
                     if pos:
-                        airports[icao] = [round(pos[0], 5), round(pos[1], 5)]
+                        iata, city = sd.airport_info(icao) or ("", "")
+                        airports[icao] = [round(pos[0], 5), round(pos[1], 5), iata, city]
         except requests.RequestException as e:
             print(f"  route of {cs} not fetched: {e}", file=sys.stderr)
     fixture["routes"], fixture["airports"] = routes, airports

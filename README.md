@@ -31,6 +31,26 @@ dived at 26-28 deg. Routine turns are learned per 0.5 deg cell and out-heading f
 regional traffic (`turn_zones.json`, from `tools/learn_turn_zones.py`; statistics only, no tracks),
 so route corners and detours around closed airspace do not alert, while sharp turns there still do.
 
+## Announcements
+
+Every alert is also written as a short social-media-style post (<= 280 characters, Israel time,
+`Live` / `Replay` / `FR24` links), printed to the terminal as a feed and appended to
+`posts.jsonl` (`--posts`). Posts are threaded per flight: later alerts reply to the flight's
+thread for `--thread-hours` (6); a more serious event (priority 5, or squawk 7500 above all)
+starts a new top-level post. Restored contact only appears as a reply. At most
+`--announce-max-per-hour` (20) posts, never holding back priority 5.
+
+```
+━━ 🚨 Hijack code 7500: FZ1073 (A6-FKF, B38M) DXB → TLV - FL152, 163 nm SE of TLV. Also: steep climb/descent 08:35 IDT
+   Live · Replay · FR24
+  ↳ 🔄 Course reversal: FZ1073 - FL150, 130 nm SE of TLV. track 298° → 213° in 127 s. Also: emergency 08:42 IDT
+  ↳ ↩️ Flying away from its destination: FZ1073 - FL150, 141 nm SE of TLV. heading 104°, 169° away from TLV 08:45 IDT
+```
+
+Each post is stored as segments (text, or link label + URL) with `root` / `reply_to` ids, so it can
+be published to Bluesky as is (atproto `TextBuilder` + `ReplyRef`) - the next step.
+`python tests/replay.py --feed` shows the FZ1073 incident as it would have been posted.
+
 ## How distant flights are found
 
 1. **local** - every aircraft within `--radius` nm (default 150) of TLV.
