@@ -81,6 +81,9 @@ AIRLINE_ICAO = {
     "PS": "AUI", "B2": "BRU", "HY": "UZB", "KC": "KZR", "BT": "BTI", "EW": "EWG",
     "HV": "TRA", "TO": "TVF", "LS": "EXS", "XQ": "SXS", "BY": "TOM", "QS": "TVS",
     "MS": "MSR", "RJ": "RJA", "SU": "AFL", "4Y": "OCN", "EN": "DLA", "XC": "CAI",
+    "AM": "AMX", "AR": "ARG", "MU": "CES", "QF": "QFA", "SK": "SAS", "TG": "THA",
+    "UL": "ALK", "VN": "HVN", "VS": "VIR", "DE": "CFG", "BZ": "BBG", "5F": "FIA",
+    "GQ": "SEH", "WZ": "RWZ",
 }
 
 ICAO_TO_IATA = {v: k for k, v in AIRLINE_ICAO.items()}
@@ -178,6 +181,7 @@ class SchedFlight:
     other_name: str
     when: str              # scheduled/estimated local time
     status: str
+    ts: float = 0.0        # same time as epoch seconds
 
     def route(self, home: str) -> str:
         return (f"{self.flight} {self.other}->{home}" if self.direction == "ARR"
@@ -286,12 +290,12 @@ class Schedule:
                 continue
             iata = str(r.get("CHOPER") or "").strip().upper()
             num = str(r.get("CHFLTN") or "").strip().lstrip("0") or "0"
-            icao = self.airline_map.get(iata)
+            icao = self.airline_map.get(iata) or (iata if len(iata) == 3 else None)
             if not icao:
                 unmapped.add(iata)
                 continue
             sf = SchedFlight(f"{iata}{num}", direction, str(r.get("CHLOC1") or "?"),
-                             str(r.get("CHLOC1D") or ""), when.strftime("%Y-%m-%d %H:%M"), status)
+                             str(r.get("CHLOC1D") or ""), when.strftime("%Y-%m-%d %H:%M"), status, when.timestamp())
             for cs in {f"{icao}{num}", f"{icao}{num.zfill(3)}"}:  # ELY1 / ELY001
                 out[cs] = sf
         self.by_callsign = out
@@ -352,6 +356,64 @@ class Monitor:
         self.last_count = 0
         self.last_discovery = -1e9
         self.stats = {}
+        self.multi: dict[tuple, bool] = {}   # (provider, kind) -> accepts comma-separated ids
+        self.rr: dict[tuple, int] = {}       # round-robin position for one-id-per-request mode
+        self.disabled: set[str] = set()      # providers that refused us (401/403)
+
+    # ---- remote queries
+    def multi_supported(self, prov: str, kind: str, local: list) -> bool | None:
+        """Probe once whether `prov` accepts several ids per request, using 2 live local aircraft."""
+        key = (prov, kind)
+        if key in self.multi:
+            return self.multi[key]
+        vals = []
+        for ac in local:
+            v = (ac.get("hex") or "").lower() if kind == "hex" else (ac.get("flight") or "").strip()
+            if v and v not in vals:
+                vals.append(v)
+            if len(vals) == 2:
+                break
+        if len(vals) < 2:
+            return None  # can't tell yet
+        try:
+            _, acs = self.fetch(kind, prov, ids=",".join(vals))
+            got = {(x.get("hex") or "").lower() if kind == "hex" else (x.get("flight") or "").strip()
+                   for x in acs}
+            ok = all(v in got for v in vals)
+        except (requests.RequestException, ValueError):
+            ok = False
+        self.multi[key] = ok
+        log.info("%s %s lookups: %s", prov, kind,
+                 "many ids per request" if ok else "one id per request (rotating)")
+        return ok
+
+    def remote_query(self, prov: str, kind: str, ids: list[str], local: list) -> tuple[list, bool]:
+        """Look up ids on a provider within --remote-budget requests. Returns (batches, any_ok)."""
+        if not ids or prov in self.disabled:
+            return [], False
+        if self.multi_supported(prov, kind, local):
+            groups = list(chunks(ids, 150 if kind == "hex" else 120))
+        else:
+            start = self.rr.get((prov, kind), 0) % len(ids)
+            order = ids[start:] + ids[:start]
+            groups = [[x] for x in order[:self.args.remote_budget]]
+            self.rr[(prov, kind)] = start + len(groups)
+        out, any_ok = [], False
+        for g in groups[:self.args.remote_budget]:
+            try:
+                now_r, acs = self.fetch(kind, prov, ids=",".join(g))
+                out += [(now_r, ac) for ac in acs]
+                any_ok = True
+            except requests.HTTPError as e:
+                code = e.response.status_code if e.response is not None else 0
+                if code in (401, 403):
+                    self.disabled.add(prov)
+                    log.error("%s refused access (HTTP %s) - dropping it for this run", prov, code)
+                    break
+                log.error("%s query failed (%s): %s", kind, prov, e)
+            except (requests.RequestException, ValueError) as e:
+                log.error("%s query failed (%s): %s", kind, prov, e)
+        return out, any_ok
 
     # ---- data
     def fetch(self, kind: str, provider: str | None = None, **fmt):
@@ -420,27 +482,25 @@ class Monitor:
         followed = [h for h, t in self.tracks.items() if t.followed][:a.follow_max]
         follow_ok = not followed
         for prov in a.remote_providers:
-            for chunk in chunks(followed, 150):
-                try:
-                    now_r, acs = self.fetch("hex", prov, ids=",".join(chunk))
-                    batches += [(now_r, ac) for ac in acs]
-                    follow_ok = True
-                except (requests.RequestException, ValueError) as e:
-                    log.error("follow query failed (%s): %s", prov, e)
+            got, ok = self.remote_query(prov, "hex", followed, local)
+            batches += got
+            follow_ok = follow_ok or ok
 
         # 3) discover scheduled flights not seen yet (searched globally by callsign)
         if self.schedule and time.monotonic() - self.last_discovery >= a.discovery_interval:
             self.last_discovery = time.monotonic()
             known = {t.callsign for t in self.tracks.values() if t.followed}
-            wanted = [cs for cs in self.schedule.by_callsign if cs not in known]
+            now_wall = time.time()
+
+            def likely_airborne(cs):  # arrivals due soon / departures that recently left first
+                sf = self.schedule.by_callsign[cs]
+                if sf.direction == "ARR":
+                    return 0 if -3600 <= sf.ts - now_wall <= 6 * 3600 else 1
+                return 0 if -14 * 3600 <= sf.ts - now_wall <= 0 else 1
+            wanted = sorted((cs for cs in self.schedule.by_callsign if cs not in known),
+                            key=likely_airborne)
             for prov in a.remote_providers:
-                for chunk in chunks(wanted, 120):
-                    try:
-                        now_r, acs = self.fetch("callsign", prov, ids=",".join(chunk))
-                        batches += [(now_r, ac) for ac in acs]
-                    except (requests.RequestException, ValueError) as e:
-                        log.error("discovery query failed (%s): %s", prov, e)
-                        break
+                batches += self.remote_query(prov, "callsign", wanted, local)[0]
 
         # merge (same aircraft may come from several queries) and update tracks
         latest: dict[str, tuple] = {}
@@ -633,9 +693,9 @@ def parse_args(argv=None):
     g.add_argument("--radius", type=float, default=150, help="local watch radius, nm (max 250)")
     g = p.add_argument_group("polling")
     g.add_argument("--interval", type=float, default=10, help="seconds between polls")
-    g.add_argument("--provider", choices=PROVIDERS, default="airplanes.live",
+    g.add_argument("--provider", choices=PROVIDERS, default="adsb.lol",
                    help="feed for the local circle")
-    g.add_argument("--remote-providers", default="airplanes.live,adsb.lol",
+    g.add_argument("--remote-providers", default="adsb.lol",
                    help="comma-separated feeds for following/discovering distant flights")
     g.add_argument("--no-routes", action="store_true", help="skip callsign->route lookups")
     g.add_argument("--airport-traffic-only", action="store_true",
@@ -648,6 +708,8 @@ def parse_args(argv=None):
     g.add_argument("--discovery-interval", type=float, default=60,
                    help="seconds between global callsign searches for scheduled flights")
     g.add_argument("--follow-max", type=int, default=600, help="max flights followed globally")
+    g.add_argument("--remote-budget", type=int, default=6,
+                   help="max requests per provider per layer per cycle (follow / discover)")
     g.add_argument("--airline-map", help="JSON file of extra IATA->ICAO airline codes")
     g = p.add_argument_group("thresholds")
     g.add_argument("--vrate", type=int, default=4000, help="alert above this |ft/min|")
@@ -722,6 +784,10 @@ def main(argv=None) -> None:
             code = e.response.status_code if e.response is not None else "?"
             backoff = min(max(backoff * 2, args.interval), 300)
             log.error("HTTP %s from %s - backing off %.0fs", code, args.provider, backoff)
+            if code in (401, 403):
+                others = [p for p in PROVIDERS if p != args.provider]
+                log.error("%s refuses access (some feeds are now feeder-only). "
+                          "Try --provider %s", args.provider, " or --provider ".join(others))
         except (requests.RequestException, ValueError) as e:
             backoff = min(max(backoff * 2, args.interval), 300)
             log.error("fetch failed: %s - backing off %.0fs", e, backoff)
