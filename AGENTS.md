@@ -13,9 +13,10 @@ position jumps, diversions. Speed of warning matters more than completeness of d
 
 - Runs from a terminal in a Python **venv**, not Docker. Later as a systemd service on a VPS.
 - **Store almost nothing.** No flight tracks, no web pages. Each alert is one JSON line in
-  `alerts.jsonl` with **links to existing sites** (FR24, ADS-B Exchange, airplanes.live).
+  `alerts.jsonl` with **links to existing sites** (FR24, ADS-B Exchange, airplanes.live), and
+  one announcement in `posts.jsonl`.
 - Report findings and proposals **before** large changes; deliver changes as pull requests.
-- Never commit secrets (ntfy topic, Telegram token) or `alerts.jsonl`; they come from CLI
+- Never commit secrets (ntfy topic, Telegram token) or `alerts.jsonl` / `posts.jsonl`; they come from CLI
   args or environment variables.
 
 ## Architecture (single file: `flight_watch.py`)
@@ -153,6 +154,29 @@ scripted aircraft states. Keep or create at least these scenarios:
   without permanently marking a provider or endpoint as unsupported.
 
 Quick live check: `python flight_watch.py --once -v`. Keep live experiments short.
+
+## Open issues
+
+- **Short events between polls (the FZ1073 altitude wobble, 05:21:44-49Z).** It lasted ~5 s
+  while FZ1073 was 224 nm out, so it was sampled only by the 30 s follow request; `/v2/hex`
+  returns only the latest state, and the flight became hot only at its first alert (the dive
+  after the wobble). Detection currently works without it. Idea to return to: for hot (and
+  perhaps all followed) flights, pull the last ~30 s of full-rate positions once per 30 s from
+  readsb's recent-trace files (`globe.adsb.lol/data/traces/<last 2 hex>/trace_recent_<hex>.json`
+  redirects to `adsb.lol`; not reachable from the cloud sandbox, untested), and feed every
+  point to the checks. Budget: one extra request per hot flight per 30 s.
+
+- **Next step: publish announcements to Bluesky.** `Announcer` already builds posts as
+  segments + `root`/`reply_to`. The owner's `yuval-harpaz/astro` bots show the pattern:
+  `from atproto import Client, client_utils, models`; `Client().login(os.environ['Bluehandle'],
+  os.environ['Blueword'])` (app password from env, never committed); `client_utils.TextBuilder()`
+  with `.text()` / `.link(label, url)`; `send_post(builder)` (or `send_post(text=builder,
+  reply_to=models.AppBskyFeedPost.ReplyRef(parent=models.create_strong_ref(parent_post),
+  root=models.create_strong_ref(root_post)))` for thread replies); post URL
+  `https://bsky.app/profile/<handle>/post/<uri.split('/')[-1]>`. astro keeps text to ~250 chars
+  ("300 limit but failed once"); posts here are <= 280 incl. link labels. Keep a map of local
+  post id -> returned post refs to thread replies, log failures, and never let posting block
+  the poll loop.
 
 ## Out of scope unless asked
 

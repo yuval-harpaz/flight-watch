@@ -735,5 +735,92 @@ class RouteOffCourse(unittest.TestCase):
         self.assertNotIn("OFF_COURSE", kinds(alerts))
 
 
+def alert_rec(kind, message, minute=0, hexid="8965d1", priority=None, **kw):
+    rec = {"time": f"2026-09-30T05:{minute:02d}:00Z", "kind": kind, "message": message,
+           "priority": priority or fw.PRIORITY.get(kind, 3), "hex": hexid, "callsign": "FDB1073",
+           "aircraft": "FDB1073 / FZ1073 / A6-FKF / B38M", "flight": "FZ1073", "reg": "A6-FKF",
+           "type": "B38M", "route_text": "Dubai (DXB) → TLV", "alt": 15000, "dist_nm": 163.0,
+           "bearing": 120, "near_airport": "AMM", "near_nm": 70.0,
+           "links": {"live_adsbx": f"https://globe.adsbexchange.com/?icao={hexid}",
+                     "replay_adsbx": f"https://globe.adsbexchange.com/?icao={hexid}&showTrace=2026-09-30",
+                     "fr24_flight": "https://www.flightradar24.com/data/flights/fz1073"}}
+    rec.update(kw)
+    return rec
+
+
+class AnnouncerTests(unittest.TestCase):
+    def make(self, *argv):
+        args = fw.parse_args(["--jsonl", "", "--posts", "", "--turn-zones", "", *argv])
+        printed = []
+        return fw.Announcer(args, out=printed.append), printed
+
+    def test_post_reads_like_a_social_media_post(self):
+        ann, printed = self.make()
+        post = ann.announce(alert_rec("EMERGENCY", "squawk 7500 (HIJACK)"))
+        self.assertTrue(post["text"].startswith("🚨 Hijack code 7500: FZ1073 (A6-FKF, B38M) Dubai (DXB) → TLV"))
+        self.assertIn("FL150, 163 nm SE of TLV", post["text"])
+        self.assertIn("08:00 IDT", post["text"])  # Israel time
+        links = [s for s in post["segments"] if "link" in s]
+        self.assertEqual([s["link"] for s in links], ["Live", "Replay", "FR24"])
+        self.assertTrue(all(set(s) <= {"text", "link", "url"} for s in post["segments"]))  # TextBuilder-ready
+        self.assertEqual(len(printed), 1)
+
+    def test_long_details_are_cut_to_the_limit(self):
+        ann, _ = self.make()
+        post = ann.announce(alert_rec("TOWARD_ISRAEL", "not bound for Israel " + "x" * 400))
+        self.assertLessEqual(len(post["text"]), fw.Announcer.LIMIT)
+        self.assertIn("…", post["text"])
+
+    def test_one_thread_per_flight_and_hijack_code_starts_a_new_post(self):
+        ann, _ = self.make()
+        first = ann.announce(alert_rec("VERTICAL_RATE", "DESCENT -19456 ft/min, -26.1 deg at 32325 ft", 22))
+        turn = ann.announce(alert_rec("COURSE_CHANGE", "track 298 -> 213 deg (85 deg in 127s) at 15000 ft", 25))
+        self.assertIsNone(first["reply_to"])
+        self.assertEqual((turn["root"], turn["reply_to"]), (first["id"], first["id"]))
+        self.assertNotIn("A6-FKF", turn["text"])  # replies don't repeat the identification
+        hijack = ann.announce(alert_rec("EMERGENCY", "squawk 7500 (HIJACK)", 35))
+        self.assertIsNone(hijack["reply_to"], "a hijack code is a top-level post, not a reply")
+        later = ann.announce(alert_rec("OFF_COURSE", "TLV arrival heading 104 deg, 169 deg away from TLV", 45))
+        self.assertEqual(later["root"], hijack["id"])
+        other = ann.announce(alert_rec("LOST_CONTACT", "silent 64s; last 9125 ft, track 308 deg", 46, hexid="748051"))
+        self.assertIsNone(other["reply_to"])
+
+    def test_contact_restored_only_as_a_reply(self):
+        ann, _ = self.make()
+        self.assertIsNone(ann.announce(alert_rec("CONTACT_RESTORED", "heard again at 16175 ft")))
+        ann.announce(alert_rec("LOST_CONTACT", "silent 64s; last 9125 ft, track 308 deg", 10))
+        self.assertIsNotNone(ann.announce(alert_rec("CONTACT_RESTORED", "heard again at 16175 ft", 14)))
+
+    def test_hourly_cap_never_holds_back_priority_5(self):
+        ann, _ = self.make("--announce-max-per-hour", "2")
+        for i in range(3):
+            ann.announce(alert_rec("SHARP_TURN", "8 -> 90 deg in 28s at 356 kt (~53 deg bank)", i, hexid=f"a{i}"))
+        self.assertEqual(ann.count, 2)
+        self.assertIsNotNone(ann.announce(alert_rec("EMERGENCY", "squawk 7700 (GENERAL EMERGENCY)", 5)))
+
+    def test_posts_are_written_as_json_lines(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "posts.jsonl")
+            ann, _ = self.make("--posts", path)
+            ann.announce(alert_rec("EMERGENCY", "squawk 7700 (GENERAL EMERGENCY)"))
+            with open(path, encoding="utf-8") as f:
+                rows = [json.loads(line) for line in f]
+        self.assertEqual(rows[0]["kind"], "EMERGENCY")
+        self.assertIn("segments", rows[0])
+
+    def test_monitor_alerts_reach_the_feed(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        printed = []
+        mon.notifier = fw.Notifier(mon.args, mon.http, fw.Announcer(mon.args, out=printed.append))
+        mon.args.posts = ""
+        feed.local = {"738001"}
+        feed.aircraft["738001"] = airborne(32.5, 34.5, 30000, squawk="7700")
+        step(mon, clock)
+        self.assertEqual(len(printed), 1)
+        self.assertIn("Emergency code 7700", printed[0])
+        self.assertIn("LY315", printed[0])  # callsign ELY315 -> IATA flight number
+
+
 if __name__ == "__main__":
     unittest.main()

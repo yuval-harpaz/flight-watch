@@ -8,6 +8,7 @@ flight_watch option can be passed through to try other thresholds:
   python tests/replay.py                                   # default fixture, timeline of alerts
   python tests/replay.py tests/data/fz1073_2026-09-30.json.gz --turn 60 --vrate 3000
   python tests/replay.py --rate 4                          # with a cloud-IP-sized request budget
+  python tests/replay.py --feed                            # the announcements, threaded per flight
 """
 from __future__ import annotations
 
@@ -124,7 +125,7 @@ def run(fixture: dict, argv=(), warmup: float = 300) -> tuple[list[dict], fw.Mon
     """Replay the fixture window; returns (alerts, monitor, feed)."""
     meta = fixture["meta"]
     args = fw.parse_args(["--airport", meta["airport"], "--radius", str(meta["radius"]),
-                          "--jsonl", "", "--rate", "60", "--rate-max", "600",
+                          "--jsonl", "", "--posts", "", "--rate", "60", "--rate-max", "600",
                           *argv])
     clock = Clock(meta["start"] - warmup)
     http = fw.Http(min_gap=0, rate=args.rate, rate_max=args.rate_max, clock=clock, rng=lambda: 0.5)
@@ -163,7 +164,7 @@ def timeline(alerts: list[dict], focus=()) -> str:
 
 
 def main() -> None:
-    argv = sys.argv[1:]
+    argv = [x for x in sys.argv[1:] if x != "--feed"]
     path = DEFAULT_FIXTURE
     if argv and argv[0].endswith(".json.gz"):
         path, argv = argv[0], argv[1:]
@@ -177,7 +178,12 @@ def main() -> None:
           f"{time.strftime('%H:%M', time.gmtime(meta['start']))}-"
           f"{time.strftime('%H:%M', time.gmtime(meta['end']))} UTC, "
           f"{len(fixture['aircraft'])} aircraft ({time.monotonic() - started:.1f}s)\n")
-    print(timeline(alerts, set(meta["focus"])))
+    if "--feed" in sys.argv:  # the announcements as they would have been posted
+        ann = fw.Announcer(mon.args)
+        for rec in alerts:
+            ann.announce(rec)
+    else:
+        print(timeline(alerts, set(meta["focus"])))
     counts = Counter(r["kind"] for r in alerts)
     print(f"\n{len(alerts)} alerts: " + ", ".join(f"{k} {v}" for k, v in counts.most_common()))
     print(f"requests: {len(feed.calls)} ({Counter(p.split('/')[2] for p in feed.calls)})"

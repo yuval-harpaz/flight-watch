@@ -243,15 +243,17 @@ def airline_like(t: "Track") -> bool:
             and cs != t.reg.replace("-", "").upper())
 
 
+def iata_flight(callsign: str) -> str | None:
+    """Callsign -> IATA flight number where the airline is known, e.g. FDB1073 -> FZ1073."""
+    m = re.fullmatch(r"([A-Z]{3})0*(\d{1,4})", callsign or "")
+    return ICAO_TO_IATA[m.group(1)] + m.group(2) if m and m.group(1) in ICAO_TO_IATA else None
+
+
 def external_links(t: "Track", when: float) -> dict:
     """Links to the flight on existing sites (nothing is stored locally)."""
     day = time.strftime("%Y-%m-%d", time.gmtime(when))
     links = {}
-    flight = t.sched.flight if t.sched else None
-    if not flight:  # callsign -> IATA flight number, e.g. FDB1073 -> FZ1073
-        m = re.fullmatch(r"([A-Z]{3})0*(\d{1,4})", t.callsign or "")
-        if m and m.group(1) in ICAO_TO_IATA:
-            flight = ICAO_TO_IATA[m.group(1)] + m.group(2)
+    flight = t.sched.flight if t.sched else iata_flight(t.callsign)
     if flight:
         links["fr24_flight"] = f"https://www.flightradar24.com/data/flights/{flight.lower()}"
     if t.reg:
@@ -425,6 +427,15 @@ class StandingData:
                 row = rows.get(callsign)
                 return row[4].split("-") if row and len(row) > 4 and row[4] else None
         return None
+
+    def airport_info(self, icao: str) -> tuple[str, str] | None:
+        """(IATA, city) from files already loaded - never fetches (used while alerting)."""
+        if self.preload is not None:
+            pos = self.preload.get("airports", {}).get(icao)
+            return (pos[2], pos[3]) if pos and len(pos) >= 4 else None
+        hit = self.files.get(f"airports/schema-01/{(icao or 'X')[0]}/{(icao or 'XX')[:2]}.csv")
+        row = hit[1].get(icao) if hit else None
+        return (row[3], row[4]) if row and len(row) > 4 else None
 
     def airport(self, icao: str) -> tuple[float, float] | None:
         if self.preload is not None:
@@ -654,10 +665,167 @@ class Schedule:
         return list(dict.fromkeys(out))
 
 
+# --------------------------------------------------------------------------- announcements
+def compass(brg: float) -> str:
+    return ("N", "NE", "E", "SE", "S", "SW", "W", "NW")[int((brg % 360 + 22.5) // 45) % 8]
+
+
+class Announcer:
+    """Alerts as short social-media posts, one thread per flight.
+
+    Written locally for now (console + --posts JSON lines). A post is a list of segments - plain
+    text, or {"link": label, "url": url} - which maps one-to-one onto atproto's TextBuilder
+    (.text / .link), and replies carry the thread's root and parent ids (atproto ReplyRef)."""
+
+    LIMIT = 280  # Bluesky allows 300 graphemes; keep a margin (emoji, combining characters)
+    HEADLINES = {"TOWARD_ISRAEL": ("⚠️", "Not bound for Israel, turned toward it"),
+                 "OFF_COURSE": ("↩️", "Flying away from its destination"),
+                 "TURNING_BACK": ("↩️", "Turning back"),
+                 "RETURNED": ("\U0001f6ec", "Landed back"),
+                 "DIVERSION": ("\U0001f6ec", "Diversion"),
+                 "LOST_CONTACT": ("\U0001f4e1", "Lost contact"),
+                 "CONTACT_RESTORED": ("\U0001f4e1", "Contact restored"),
+                 "SHARP_TURN": ("\U0001f504", "Sharp turn"),
+                 "COURSE_CHANGE": ("\U0001f504", "Course reversal"),
+                 "POSITION_JUMP": ("\U0001f6f0️", "Position jump (GPS spoofing?)")}
+
+    def __init__(self, args, out=print):
+        self.args, self.out = args, out
+        self.threads: dict[str, dict] = {}   # hex -> {"root", "parent", "t"}
+        self.sent: deque = deque()           # data times of recent posts (hourly cap)
+        self.count = 0
+        self.tz = ZoneInfo("Asia/Jerusalem")
+
+    def headline(self, rec: dict) -> tuple[str, str]:
+        kind, msg = rec["kind"], rec["message"]
+        if kind == "EMERGENCY":
+            for code, text in (("7500", "Hijack code 7500"), ("7600", "Radio failure code 7600"),
+                               ("7700", "Emergency code 7700")):
+                if f"squawk {code}" in msg:
+                    return "\U0001f6a8", text
+            return "\U0001f6a8", "Emergency status"
+        if kind == "VERTICAL_RATE":
+            return ("⬇️", "Steep descent") if "DESCENT" in msg else ("⬆️", "Steep climb")
+        return self.HEADLINES.get(kind, ("ℹ️", kind.replace("_", " ").title()))
+
+    def compose(self, rec: dict, reply: bool) -> list:
+        a = self.args
+        emoji, head = self.headline(rec)
+        ident = rec.get("flight") or rec["callsign"] or rec["hex"].upper()
+        if not reply:
+            extra = ", ".join(x for x in (rec.get("reg"), rec.get("type")) if x)
+            ident += f" ({extra})" if extra else ""
+            if rec.get("route_text"):
+                ident += f" {rec['route_text']}"
+        alt = rec.get("alt")
+        level = ("on the ground" if alt == 0 and rec["kind"] in ("DIVERSION", "RETURNED") else
+                 f"FL{alt // 100:03d}" if isinstance(alt, int) and alt >= 10000 else
+                 f"{alt} ft" if isinstance(alt, int) else "")
+        where = f"{rec['dist_nm']:.0f} nm {compass(rec.get('bearing', 0))} of {a.airport}"
+        if rec.get("near_airport") and rec["near_airport"] != a.airport and rec.get("near_nm", 99) <= 40:
+            where += f", near {rec['near_airport']}"
+        when = datetime.fromisoformat(rec["time"].replace("Z", "+00:00")).astimezone(self.tz)
+        stamp = f"{when:%H:%M} {when.tzname()}"
+        detail = self.detail(rec)
+        links = [("Live", rec["links"].get("live_adsbx")), ("Replay", rec["links"].get("replay_adsbx")),
+                 ("FR24", rec["links"].get("fr24_flight"))]
+        links = [(k, v) for k, v in links if v]
+        lead = f"{emoji} {head}: {ident} - {', '.join(x for x in (level, where) if x)}. "
+        tail = f" {stamp}\n"
+        room = self.LIMIT - len(lead) - len(tail) - sum(len(k) + 3 for k, _ in links)
+        if room < len(detail):
+            detail = detail[:max(0, room - 1)].rstrip(" ,;") + "…" if room > 10 else ""
+        segments = [{"text": (lead + detail).rstrip() + tail}]
+        for i, (label, url) in enumerate(links):
+            if i:
+                segments.append({"text": " · "})
+            segments.append({"link": label, "url": url})
+        return segments
+
+    NAMES = {"EMERGENCY": "emergency", "LOST_CONTACT": "lost contact", "DIVERSION": "diversion",
+             "TOWARD_ISRAEL": "turn toward Israel", "OFF_COURSE": "off course", "TURNING_BACK": "turning back",
+             "VERTICAL_RATE": "steep climb/descent", "SHARP_TURN": "sharp turn",
+             "COURSE_CHANGE": "course reversal", "POSITION_JUMP": "position jump"}
+    DETAILS = {  # kind -> (pattern in the alert message, compact wording)
+        "LOST_CONTACT": (r"silent (\d+)s.*?track (\S+) deg", "silent {0} s, last track {1}°"),
+        "VERTICAL_RATE": (r"([+-]\d+) ft/min, (-?[\d.]+) deg", "{0} ft/min ({1}°)"),
+        "COURSE_CHANGE": (r"track (\d+) -> (\d+) deg \(\d+ deg in (\d+)s", "track {0}° → {1}° in {2} s"),
+        "SHARP_TURN": (r"(\d+) -> (\d+) deg in (\d+)s at (\d+) kt \(~(\d+) deg bank",
+                       "{0}° → {1}° in {2} s at {3} kt (~{4}° bank)"),
+        "POSITION_JUMP": (r"([\d.]+) nm in (\d+)s \(~(\d+) kt", "{0} nm in {1} s (~{2} kt)"),
+        "OFF_COURSE": (r"heading (\d+) deg, (\d+) deg away from (\S+)", "heading {0}°, {1}° away from {2}"),
+        "TURNING_BACK": (r"track (\d+) deg\) for (\d+)s", "track {0}° for {1} s"),
+    }
+
+    def detail(self, rec: dict) -> str:
+        """The facts the headline and position don't already say, compactly."""
+        kind, msg = rec["kind"], rec["message"].split(" [also:")[0]
+        if kind in self.DETAILS:
+            m = re.search(self.DETAILS[kind][0], msg)
+            out = self.DETAILS[kind][1].format(*m.groups()) if m else msg
+        elif kind == "CONTACT_RESTORED" or (kind == "EMERGENCY" and "squawk" in msg):
+            out = ""
+        else:
+            out = msg
+        also = re.search(r"\[also: ([^\]]+)\]", rec["message"])
+        if also:
+            names = [self.NAMES.get(k.strip(), k.strip().lower()) for k in also.group(1).split(",")]
+            out = (out + ". " if out else "") + "Also: " + ", ".join(names)
+        return out
+
+    @staticmethod
+    def rank(rec: dict) -> int:
+        """Seriousness for threading: a hijack code outranks everything."""
+        if rec["kind"] == "EMERGENCY" and "squawk 7500" in rec["message"]:
+            return 6
+        return PRIORITY.get(rec["kind"], 3)  # the kind's own priority, not a pattern bump
+
+    def announce(self, rec: dict) -> dict | None:
+        a = self.args
+        t = datetime.fromisoformat(rec["time"].replace("Z", "+00:00")).timestamp()
+        thread = self.threads.get(rec["hex"])
+        if thread and t - thread["t"] > a.thread_hours * 3600:
+            thread = None
+        if rec["priority"] < a.announce_min_priority and not thread:
+            return None  # e.g. CONTACT_RESTORED only as a reply to an announced loss
+        if thread and self.rank(rec) >= 5 and self.rank(rec) > thread["rank"]:
+            thread = None  # serious, and more so than what the thread started with: a new top-level post
+        while self.sent and t - self.sent[0] > 3600:
+            self.sent.popleft()
+        if len(self.sent) >= a.announce_max_per_hour and rec["priority"] < 5:
+            log.info("announcement suppressed (%d posts in the last hour): %s %s",
+                     len(self.sent), rec["kind"], rec["aircraft"])
+            return None
+        self.count += 1
+        post = {"id": f"p{self.count}", "time": rec["time"], "kind": rec["kind"],
+                "priority": rec["priority"], "hex": rec["hex"],
+                "root": thread["root"] if thread else None, "reply_to": thread["parent"] if thread else None,
+                "segments": self.compose(rec, reply=bool(thread))}
+        post["text"] = "".join(s.get("text") or s["link"] for s in post["segments"])
+        self.threads[rec["hex"]] = {"root": thread["root"] if thread else post["id"], "parent": post["id"],
+                                    "t": t, "rank": thread["rank"] if thread else self.rank(rec)}
+        self.sent.append(t)
+        if a.posts:
+            with open(a.posts, "a", encoding="utf-8") as f:
+                f.write(json.dumps(post, ensure_ascii=False) + "\n")
+        self.out(self.render(post))
+        return post
+
+    @staticmethod
+    def render(post: dict) -> str:
+        """Console view: the post as it would read, links spelled out underneath."""
+        mark = "  ↳ " if post["reply_to"] else "━━ "
+        body = "".join(s["text"] if "text" in s else s["link"] for s in post["segments"]).rstrip()
+        urls = "  ".join(f"{s['link']}: {s['url']}" for s in post["segments"] if "link" in s)
+        indent = "     " if post["reply_to"] else "   "
+        return f"{mark}{body.replace(chr(10), chr(10) + indent)}\n{indent}{urls}"
+
+
 # --------------------------------------------------------------------------- notifier
 class Notifier:
-    def __init__(self, args, http: Http):
+    def __init__(self, args, http: Http, announcer: Announcer | None = None):
         self.args, self.http = args, http
+        self.announcer = announcer or Announcer(args)
         self.tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.tg_chat = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -669,7 +837,8 @@ class Notifier:
         where = " [REMOTE]" if rec["remote"] else ""
         text = (f"[{rec['kind']}]{where} {rec['aircraft']} {rec['traffic']}"
                 f"{' ' + rec['route'] if rec['route'] else ''} - {rec['message']}")
-        log.warning("%s | %s", text, rec["links"]["live_adsbx"])
+        log.info("%s | %s", text, rec["links"]["live_adsbx"])
+        self.announcer.announce(rec)
         if self.args.jsonl:
             with open(self.args.jsonl, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -892,6 +1061,23 @@ class Monitor:
                              "(flight board and heuristics still classify traffic)", self.route_failures)
                 return
             self.routes[cs] = (now, "-".join(codes) if codes else None)
+
+    def route_text(self, t: Track, traffic: str, route: str | None) -> str | None:
+        """Readable route for announcements: "Dubai (DXB) -> TLV", "Budapest -> Tel Aviv"."""
+        known = (t.callsign in self.routes and self.routes[t.callsign][1]) or None
+        if t.sched and t.sched.other not in ("", "?"):
+            name = t.sched.other_name.title() if t.sched.other_name else ""
+            other = f"{name} ({t.sched.other})" if name and name.upper() != t.sched.other else t.sched.other
+            return (f"{other} → {self.args.airport}" if t.sched.direction == "ARR"
+                    else f"{self.args.airport} → {other}")
+        route = known if t.sched else (route or known)
+        if not route:
+            return None
+        names = []
+        for code in route.split("-"):
+            info = self.standing.airport_info(code) if self.standing else None
+            names.append(info[1] or info[0] or code if info else code)
+        return " → ".join(names)
 
     def route_ends(self, t: Track) -> list[tuple[str, float, float]]:
         """[(icao, lat, lon)] for the first and last airport of the flight's known route, if the
@@ -1355,7 +1541,10 @@ class Monitor:
             "traffic": traffic, "route": route, "remote": d > a.radius,
             "scheduled": t.sched.when if t.sched else None,
             "lat": s.lat, "lon": s.lon, "alt": s.alt, "track": s.track, "gs": s.gs,
-            "dist_nm": round(d, 1), "near": f"{apt} {ad:.0f} nm",
+            "dist_nm": round(d, 1), "near": f"{apt} {ad:.0f} nm", "near_airport": apt,
+            "near_nm": round(ad, 1), "bearing": round(bearing(a.lat, a.lon, s.lat, s.lon)),
+            "flight": t.sched.flight if t.sched else iata_flight(t.callsign), "reg": t.reg,
+            "type": t.actype, "squawk": t.squawk, "route_text": self.route_text(t, traffic, route),
             "recent": recent, "links": external_links(t, now),
         })
 
@@ -1450,6 +1639,14 @@ def parse_args(argv=None):
     g.add_argument("--cooldown", type=float, default=300, help="seconds between repeat alerts")
     g = p.add_argument_group("notifications")
     g.add_argument("--jsonl", default="alerts.jsonl", help="append alerts here ('' to disable)")
+    g.add_argument("--posts", default="posts.jsonl",
+                   help="append announcements (social-media style posts, threaded per flight) here")
+    g.add_argument("--announce-min-priority", type=int, default=3,
+                   help="announce alerts from this priority; lower ones only as replies in a thread")
+    g.add_argument("--announce-max-per-hour", type=int, default=20,
+                   help="cap on announcements per hour (priority 5 is never held back)")
+    g.add_argument("--thread-hours", type=float, default=6,
+                   help="later alerts on a flight reply to its thread for this long")
     g.add_argument("--ntfy-topic", default=os.getenv("NTFY_TOPIC"), help="ntfy topic name")
     g.add_argument("--ntfy-server", default=os.getenv("NTFY_SERVER", "https://ntfy.sh"))
     g.add_argument("-v", "--verbose", action="store_true")
