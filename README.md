@@ -2,8 +2,34 @@
 
 Early-warning monitor for irregular activity on flights to/from an airport (default TLV / LLBG),
 both near the airport and anywhere en route. Polls free ADS-B feeds every 10 s and alerts on lost
-contact, extreme climb/descent, sharp course changes, emergency squawks (7500/7600/7700),
-GPS-spoofing-style position jumps, diversions and returns to TLV.
+contact, too-steep climbs/descents, sharp turns and course reversals, emergency squawks
+(7500/7600/7700), GPS-spoofing-style position jumps, arrivals flying away from TLV, departures
+turning back, diversions, and flights not bound for Israel turning toward it.
+
+## Alerts
+
+| Kind | When | Priority |
+|---|---|---|
+| `EMERGENCY` | squawk 7500/7600/7700 set or changed, or an ADS-B emergency status | 5 |
+| `TOWARD_ISRAEL` | a flight not bound for Israel turns >= 45 deg so that Israeli airspace is <= 12 min ahead (or is about to enter it), above 8000 ft | 5 |
+| `OFF_COURSE` | a TLV arrival > 60 nm out flies >= 100 deg away from TLV for 150 s, distance opening | 5 |
+| `LOST_CONTACT` / `DIVERSION` | silent too long; a TLV arrival on the ground elsewhere, or silent while descending near another airport | 5 |
+| `TURNING_BACK` / `RETURNED` | a TLV departure heads back toward TLV for 150 s while closing / lands back | 4 |
+| `VERTICAL_RATE` | flight-path angle steeper than 10 deg descending or 12 deg climbing (18 deg climbing near airports), or > 8000 ft/min | 4 |
+| `SHARP_TURN` | turn tighter than ~35 deg of bank (airliners stay below ~25-30), anywhere, also near airports | 4 |
+| `COURSE_CHANGE` | >= 70 deg in 2 min above 12000 ft - except routine turns near airports and at learned route corners | 4 |
+| `POSITION_JUMP` | impossible jump (GPS spoofing or bad data) | 3 |
+| `CONTACT_RESTORED` | an alerted loss of contact ended | 2 |
+
+Any alert makes the flight followed and "hot" for `--hot-minutes` (20): it is then queried every
+cycle wherever it is, and every further anomaly is reported. Two different anomalies on one flight
+within that time are tagged `[also: ...]` and sent at priority 5.
+
+Thresholds come from the FZ1073 replay (below): normal traffic never descended steeper than ~8 deg
+or climbed steeper than ~13 deg (bizjet near TLV), and its turns implied <= 25 deg of bank; FZ1073
+dived at 26-28 deg. Routine turns are learned per 0.5 deg cell and out-heading from a day of
+regional traffic (`turn_zones.json`, from `tools/learn_turn_zones.py`; statistics only, no tracks),
+so route corners and detours around closed airspace do not alert, while sharp turns there still do.
 
 ## How distant flights are found
 
@@ -41,7 +67,7 @@ says so. adsb.lol's route database lookup is turned off after 3 failures in a ro
 ```bash
 pip install -r requirements.txt
 python flight_watch.py                                  # TLV, every 10 s, 150 nm radius
-python flight_watch.py --airport ETM --vrate 3000 --interval 15
+python flight_watch.py --airport ETM --descent-angle 8 --interval 15
 python flight_watch.py --airport-traffic-only           # only flights to/from the airport
 python flight_watch.py --lost-after-remote 900          # quieter remote lost-contact alerts
 python flight_watch.py --ntfy-topic my-random-topic-8f3k   # phone push via ntfy app
@@ -105,7 +131,7 @@ can be checked against what actually happened:
 
 ```bash
 python tests/replay.py                          # alert timeline (* = the incident aircraft)
-python tests/replay.py --vrate 6000 --turn 90   # try other thresholds (any flight_watch option)
+python tests/replay.py --descent-angle 8 --max-bank 30   # try other thresholds (any option)
 ```
 
 `tests/test_replay_fz1073.py` requires the incident's alerts and caps alerts on the other

@@ -2,6 +2,7 @@
 
 Run with:  python -m unittest discover -s tests
 """
+import json
 import os
 import sys
 import unittest
@@ -80,7 +81,7 @@ class FakeFeed:
 
 def make(argv=(), with_schedule=False):
     clock = Clock()
-    args = fw.parse_args(["--jsonl", "", "--no-schedule", *argv])
+    args = fw.parse_args(["--jsonl", "", "--no-schedule", "--turn-zones", "", *argv])
     http = fw.Http(min_gap=0, rate=args.rate, rate_max=args.rate_max, clock=clock, rng=lambda: 0.5)
     feed = FakeFeed(clock)
     http.s = feed
@@ -89,7 +90,7 @@ def make(argv=(), with_schedule=False):
         schedule = fw.Schedule(http, dict(fw.AIRLINE_ICAO), 1e9, 16)
         schedule.fetched = 1e18  # never refetch; tests load records directly
     mon = fw.Monitor(args, fw.Notifier(args, http), http, schedule)
-    mon.clock = clock
+    mon.clock = mon.wall = clock
     mon.started = clock()
     alerts = []
     mon.notifier.send = alerts.append
@@ -115,10 +116,10 @@ class AlertSimulation(unittest.TestCase):
         mon, feed, clock, alerts = make(["--no-routes"])
         feed.local = {"738001"}
         alt = 30000
-        for _ in range(6):
-            feed.aircraft["738001"] = airborne(32.5, 34.5, alt, rate=-6000)
+        for _ in range(6):  # -12000 ft/min at 450 kt: ~15 deg, far steeper than any normal descent
+            feed.aircraft["738001"] = airborne(32.5, 34.5, alt, rate=-12000)
             step(mon, clock)
-            alt -= 1000
+            alt -= 2000
         kinds = [a["kind"] for a in alerts]
         self.assertIn("VERTICAL_RATE", kinds)
         self.assertEqual(kinds.count("VERTICAL_RATE"), 1, "cooldown should suppress repeats")
@@ -365,6 +366,251 @@ class RateLimitTests(unittest.TestCase):
         self.assertIn("adsb.fi", mon.disabled)
         self.assertEqual(sum("adsb.fi" in p for m, p in feed.calls), 1)
         self.assertTrue(any("/hex/" in p for m, p in feed.calls if "adsb.fi" not in p))
+
+
+def path(lat, lon, tracks, alts, gs=450, dt=10, **kw):
+    """Physically consistent states every `dt` s: positions follow the tracks at `gs` knots."""
+    out = []
+    for i, (trk, alt) in enumerate(zip(tracks, alts)):
+        nxt = alts[i + 1] if i + 1 < len(alts) else alt
+        out.append(dict(lat=lat, lon=lon, alt_baro=alt, track=trk % 360, gs=gs,
+                        baro_rate=int((nxt - alt) * 60 / dt), **kw))
+        lat, lon = fw.destination(lat, lon, trk, gs * dt / 3600)
+    return out
+
+
+def fly(mon, feed, clock, hexid, states, local=True, dt=10, **ident):
+    ident = {"flight": "TST001", "r": "SX-ABC", "t": "A320", **ident}
+    for st in states:
+        feed.aircraft[hexid] = {**st, "flight": ident["flight"].ljust(8), "r": ident["r"], "t": ident["t"],
+                                **{k: v for k, v in ident.items() if k not in ("flight", "r", "t")}}
+        if local:
+            feed.local.add(hexid)
+        step(mon, clock, dt)
+
+
+def kinds(alerts, hexid=None):
+    return [a["kind"] for a in alerts if hexid is None or a["hex"] == hexid]
+
+
+def board_row(callsign_iata, num, direction, when_local, other="?"):
+    return {"CHOPER": callsign_iata, "CHFLTN": num, "CHAORD": direction, "CHSTOL": when_local,
+            "CHPTOL": when_local, "CHLOC1": other, "CHLOC1D": other, "CHRMINE": "ON TIME"}
+
+
+def with_board(rows, argv=()):
+    mon, feed, clock, alerts = make(["--no-routes", "--rate", "60", *argv], with_schedule=True)
+    mon.schedule.load(rows, datetime.fromtimestamp(clock(), mon.schedule.tz))
+    return mon, feed, clock, alerts
+
+
+def local_time(clock, hours):
+    return datetime.fromtimestamp(clock() + hours * 3600, fw.ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-%dT%H:%M")
+
+
+class SteepnessTests(unittest.TestCase):
+    def test_fast_but_shallow_descent_is_normal(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "738001", path(32.5, 33.0, [90] * 8, [30000 - 1000 * i for i in range(8)]))
+        self.assertNotIn("VERTICAL_RATE", kinds(alerts))  # -6000 ft/min at 450 kt is ~7.5 deg
+
+    def test_steep_approach_alerts_even_near_an_airport(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        # 15 nm west of Amman, 160 kt, -3600 ft/min: ~12.5 deg (glide slope 3, steep approach ~6)
+        fly(mon, feed, clock, "740001", path(31.72, 35.70, [90] * 8, [7000 - 600 * i for i in range(8)], gs=160))
+        hits = [a for a in alerts if a["kind"] == "VERTICAL_RATE"]
+        self.assertEqual(len(hits), 1)
+        self.assertIn("from AMM", hits[0]["message"])
+
+    def test_normal_departure_climb_is_not_steep(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        # 10 nm from TLV, 250 kt, +4500 ft/min (~10 deg): normal initial climb
+        fly(mon, feed, clock, "738001", path(32.1, 35.05, [40] * 8, [6000 + 750 * i for i in range(8)], gs=250))
+        self.assertNotIn("VERTICAL_RATE", kinds(alerts))
+
+    def test_dive_after_a_descent_alert_is_not_suppressed(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        alts = [34000] * 4 + [33000, 32000, 31000] + [27500, 24000, 20500, 17000]  # -6000 then -21000
+        fly(mon, feed, clock, "8965d1", path(31.0, 33.5, [90] * len(alts), alts, gs=250))
+        hits = [a for a in alerts if a["kind"] == "VERTICAL_RATE"]
+        self.assertEqual(len(hits), 2, [a["message"] for a in hits])
+        self.assertIn("-21000", hits[1]["message"])
+
+
+class TurnTests(unittest.TestCase):
+    def test_sharp_turn(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        tracks = [90] * 6 + [120, 150, 180] + [180] * 5  # 90 deg in 30 s at 450 kt: ~50 deg bank
+        fly(mon, feed, clock, "738001", path(33.5, 31.5, tracks, [30000] * len(tracks)))
+        self.assertEqual(kinds(alerts).count("SHARP_TURN"), 1)
+
+    def test_regular_turn_is_a_course_change_not_sharp(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        tracks = [90] * 6 + [90 + 7.5 * i for i in range(1, 13)] + [180] * 4  # 90 deg in 2 min
+        fly(mon, feed, clock, "738001", path(33.5, 31.5, tracks, [30000] * len(tracks)))
+        self.assertIn("COURSE_CHANGE", kinds(alerts))
+        self.assertNotIn("SHARP_TURN", kinds(alerts))
+
+    def routine_turn_near_beirut(self, **extra):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        tracks = [270] * 6 + [270 + 7.5 * i for i in range(1, 13)] + [0] * 4
+        fly(mon, feed, clock, "748001", path(33.75, 35.20, tracks, [15000] * len(tracks)), flight="MEA424",
+            **extra)
+        return kinds(alerts)
+
+    def test_routine_turn_near_an_airport_is_not_reported(self):
+        self.assertNotIn("COURSE_CHANGE", self.routine_turn_near_beirut())
+
+    def test_same_turn_is_reported_for_a_flight_already_alerting(self):
+        self.assertIn("COURSE_CHANGE", self.routine_turn_near_beirut(squawk="7700"))
+
+    def test_learned_route_corner_is_not_reported(self):
+        import tempfile
+        tracks = [90] * 6 + [90 + 7.5 * i for i in range(1, 13)] + [180] * 4
+        for out, expect in ((180, False), (0, True)):
+            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+                json.dump({"cell": 0.5, "zones": [{"lat": 33.25, "lon": 31.75, "out": out, "n": 9}]}, f)
+            mon, feed, clock, alerts = make(["--no-routes", "--turn-zones", f.name])
+            fly(mon, feed, clock, "738001", path(33.3, 31.6, tracks, [30000] * len(tracks)))
+            os.unlink(f.name)
+            self.assertEqual("COURSE_CHANGE" in kinds(alerts), expect, f"zone heading {out}")
+
+
+class DestinationTests(unittest.TestCase):
+    def test_arrival_turning_away_long_before_landing(self):
+        mon, feed, clock, alerts = with_board([board_row("LY", "26", "A", local_time(mon_clock(), 1), "EWR")])
+        # 150 nm west of TLV, inbound (track 80), then a U-turn and 4 min heading away
+        tracks = [80] * 6 + [80 + 15 * i for i in range(1, 13)] + [260] * 24
+        fly(mon, feed, clock, "738026", path(32.3, 32.0, tracks, [30000] * len(tracks)), flight="ELY026",
+            r="4X-ECA")
+        self.assertIn("OFF_COURSE", kinds(alerts))
+
+    def test_route_bend_is_not_off_course(self):
+        mon, feed, clock, alerts = with_board([board_row("LY", "26", "A", local_time(mon_clock(), 1), "EWR")])
+        fly(mon, feed, clock, "738026", path(32.3, 32.0, [20] * 30, [30000] * 30), flight="ELY026", r="4X-ECA")
+        self.assertNotIn("OFF_COURSE", kinds(alerts))  # 60 deg off the direct line: a route bend
+
+    def test_departure_turning_back(self):
+        mon, feed, clock, alerts = with_board([board_row("LY", "315", "D", local_time(mon_clock(), -0.5), "LHR")])
+        tracks = [255] * 6 + [255 + 15 * i for i in range(1, 13)] + [75] * 24
+        fly(mon, feed, clock, "738315", path(32.45, 32.6, tracks, [33000] * len(tracks)), flight="ELY315",
+            r="4X-EDC")
+        self.assertIn("TURNING_BACK", kinds(alerts))
+
+
+def mon_clock():
+    return Clock()
+
+
+class TowardIsraelTests(unittest.TestCase):
+    # Over Jordan at FL350 heading north (not toward Israel), then a turn west toward the Golan
+    TRACKS = [0] * 30 + [360 - 12 * i for i in range(1, 8)] + [270] * 8
+
+    def run_track(self, **ident):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "740111", path(32.2, 36.9, self.TRACKS, [35000] * len(self.TRACKS)), **ident)
+        return alerts
+
+    def test_foreign_flight_turning_toward_israel(self):
+        alerts = self.run_track(flight="RJA111", r="JY-AYA")
+        hits = [a for a in alerts if a["kind"] == "TOWARD_ISRAEL"]
+        self.assertEqual(len(hits), 1, kinds(alerts))
+        self.assertIn("turned", hits[0]["message"])
+        self.assertEqual(hits[0]["priority"], 5)
+
+    def test_israeli_flight_on_the_same_track_is_not_flagged(self):
+        self.assertNotIn("TOWARD_ISRAEL", kinds(self.run_track(flight="ELY111", r="4X-EHA")))
+
+    def test_straight_flight_past_israel_is_not_flagged(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "740112", path(31.0, 36.9, [0] * 40, [35000] * 40), flight="RJA112", r="JY-AYB")
+        self.assertNotIn("TOWARD_ISRAEL", kinds(alerts))
+
+
+class LostContactTests(unittest.TestCase):
+    def descend_and_vanish(self, mon, feed, clock, **ident):
+        feed.local.add("999999")
+        feed.aircraft["999999"] = airborne(31.0, 34.0, 20000, flight="KEEP1")
+        # 15 nm west of Amman, descending through 8000 ft, then silence
+        fly(mon, feed, clock, "740200", path(31.72, 35.70, [90] * 5, [8000 - 250 * i for i in range(5)], gs=220),
+            **ident)
+        feed.local.discard("740200")
+        del feed.aircraft["740200"]
+        for _ in range(12):
+            step(mon, clock)
+
+    def test_silent_while_descending_into_another_airport_is_a_probable_landing(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        self.descend_and_vanish(mon, feed, clock, flight="RJA200", r="JY-AYC")
+        self.assertNotIn("LOST_CONTACT", kinds(alerts))
+
+    def test_tlv_arrival_doing_that_is_a_diversion(self):
+        mon, feed, clock, alerts = with_board([board_row("LY", "200", "A", local_time(mon_clock(), 0.5))])
+        self.descend_and_vanish(mon, feed, clock, flight="ELY200", r="4X-EKA")
+        hits = [a for a in alerts if a["kind"] == "DIVERSION"]
+        self.assertEqual(len(hits), 1, kinds(alerts))
+        self.assertIn("landing at AMM", hits[0]["message"])
+
+    def remote_silence(self, hot):
+        mon, feed, clock, alerts = make(["--no-routes", "--rate", "60"])
+        feed.local = {"999999"}
+        feed.aircraft["999999"] = airborne(32.5, 34.5, 10000, flight="LOC1")
+        t = mon.tracks.setdefault("738001", fw.Track("738001"))
+        t.followed, t.last_msg, t.callsign = True, clock(), "ELY001"
+        for k in range(3):
+            t.samples.append(fw.Sample(clock() - 20 + k * 10, 45.0, 10.0, 36000, 90, 450, 0, False))
+        if hot:
+            t.hot_until = clock() + 3600
+        mon.multi[("adsb.lol", "hex")] = True
+        for _ in range(70):  # ~12 min of silence, follow requests answered (aircraft absent)
+            step(mon, clock)
+        return kinds(alerts)
+
+    def test_remote_cruise_gap_is_logged_not_alerted(self):
+        self.assertNotIn("LOST_CONTACT", self.remote_silence(hot=False))
+
+    def test_remote_silence_of_an_alerting_flight_is_alerted(self):
+        self.assertIn("LOST_CONTACT", self.remote_silence(hot=True))
+
+
+class FollowTests(unittest.TestCase):
+    def test_alerting_flight_is_followed_every_cycle(self):
+        mon, feed, clock, alerts = make(["--no-routes", "--rate", "60"])
+        feed.local = {"999999", "740300"}
+        feed.aircraft["999999"] = airborne(32.5, 34.5, 10000, flight="LOC1")
+        feed.aircraft["740300"] = dict(airborne(33.5, 33.0, 30000, flight="RJA300", squawk="7700"), r="JY-AYD")
+        step(mon, clock)
+        self.assertTrue(mon.tracks["740300"].followed)  # not TLV traffic, but it alerted
+        feed.local.discard("740300")  # leaves the circle
+        n = len(feed.calls)
+        for _ in range(6):
+            step(mon, clock)
+        hex_calls = [p for m, p in feed.calls[n:] if "/hex/" in p and "740300" in p]
+        self.assertGreaterEqual(len(hex_calls), 5, "hot flights are asked for every cycle, not every 30 s")
+
+
+class DistantArrival(unittest.TestCase):
+    def test_found_far_away_lost_restored_and_diverted(self):
+        """ELY002 (JFK->TLV) found by callsign search over Italy, followed by hex, silent for 13 min
+        at cruise (logged, not alerted), heard again and on the ground near Rome -> DIVERSION."""
+        mon, feed, clock, alerts = with_board([board_row("LY", "002", "A", local_time(mon_clock(), 3), "JFK")])
+        feed.local = {"999999"}
+        feed.aircraft["999999"] = airborne(32.5, 34.5, 10000, flight="LOC1")
+        cruise = path(42.5, 14.0, [100] * 12, [38000] * 12, dt=10)
+        fly(mon, feed, clock, "738002", cruise, local=False, flight="ELY002", r="4X-EDH")
+        self.assertTrue(mon.tracks["738002"].followed)
+        self.assertEqual(mon.tracks["738002"].sched.flight, "LY2")
+        del feed.aircraft["738002"]
+        for _ in range(80):
+            step(mon, clock)
+        self.assertTrue(mon.tracks["738002"].lost)
+        landing = path(41.85, 12.35, [160] * 6, [3000, 2000, 1200, 600, 200, 0], gs=150)
+        landing[-1]["alt_baro"] = "ground"
+        fly(mon, feed, clock, "738002", landing, local=False, flight="ELY002", r="4X-EDH")
+        k = kinds(alerts, "738002")
+        self.assertIn("DIVERSION", k)
+        self.assertNotIn("POSITION_JUMP", k)
+        self.assertNotIn("LOST_CONTACT", k)
 
 
 if __name__ == "__main__":

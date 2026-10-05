@@ -57,16 +57,49 @@ then the adsb.lol callsign route DB, then a heuristic near the airport (`ARR?` /
   `--lost-min-alt`, near the airport (landing), and near the circle edge for unfollowed
   aircraft (simply leaving coverage). Skipped entirely after our own outage or when the
   feed suddenly returns far fewer aircraft (feed glitch, not mass disappearance).
+  Silence while descending below 12,000 ft within 30 nm of another airport is a probable
+  landing there (DIVERSION for a TLV arrival, otherwise only logged). Remote silence at
+  cruise (or a departure descending into its destination) is a coverage gap and only
+  logged, unless the flight is hot (see below): in the FZ1073 replay all 6 such alerts on
+  other flights were 20-40 min gaps over the Saudi/Iraqi desert and the sea.
 - **DIVERSION**: a TLV arrival on the ground far from TLV, **or** going silent while
   descending low and far away (low-altitude coverage is poor, so the landing is often
   never seen). **RETURNED**: a TLV departure landing back at TLV after leaving.
-- **VERTICAL_RATE**: the reported rate must be backed by the altitude history (rejects
-  single bad values). Climb and descent have separate cooldowns, and a reading ≥1.5× the
+- **VERTICAL_RATE**: judged as a **flight-path angle** (rate vs ground speed), because a
+  rate threshold flagged every normal jet climb-out (+4000-4800 ft/min at 8000 ft) and
+  speed-brake descent. Limits: descent 10 deg everywhere (normal max seen ~8, glide slope 3),
+  climb 12 deg en route and 18 deg within 30 nm of an airport below 15,000 ft (bizjets reach
+  ~13). Near-airport traffic is still checked - a too-steep approach alerts. `--vrate`
+  (8000 ft/min) alerts whatever the angle. The reported rate must be backed by the altitude
+  history (rejects single bad values). Climb and descent have separate cooldowns, and a reading ≥1.5× the
   last alerted severity bypasses the cooldown. Without this, a small wobble suppressed the
   real 14,000 ft dive in the FZ1073 test.
 - **EMERGENCY**: alerts on squawk *transition* into 7500/7600/7700, not every cooldown.
-- **COURSE_CHANGE**: only above `--turn-min-alt` and away from the airport (approach turns
-  are normal). Holding patterns can still trigger it.
+- **COURSE_CHANGE**: a large reversal (>= 70 deg in 2 min) above `--turn-min-alt`. Not
+  reported within ~35 nm of a regional airport below FL250 (all 10 replay false alarms were
+  departure/arrival routings at Beirut, Amman, Damascus, TLV) nor at learned route corners
+  (`turn_zones.json`: cells where >= 4 aircraft turned onto that heading, e.g. detours around
+  closed airspace) - unless the flight is already hot. Holding patterns can still trigger it.
+- **SHARP_TURN**: implied bank angle from the turn rate and speed >= `--max-bank` (35 deg),
+  everywhere including near airports. Airliners stay below ~25-30; FZ1073's U-turn was a
+  normal-rate turn (~25 deg), which is why reversals and sharpness are separate alerts.
+  Positions must agree with the speeds, so GNSS glitches don't count as turns.
+- **OFF_COURSE / TURNING_BACK**: long before landing, an arrival > 60 nm out flying >= 100 deg
+  away from TLV for 150 s while the distance opens, or a departure flying back toward TLV
+  (within 60 deg) while closing. Route bends (Gulf flights via Saudi Arabia and Jordan) stayed
+  below 65 deg in the replay; FZ1073 reached 165 deg.
+- **TOWARD_ISRAEL**: the hijack scenario of a flight *not* bound for Israel turned toward it.
+  Above 8000 ft, a turn of >= 45 deg after which Israeli airspace (rough polygon) is <= 12 min
+  ahead on two samples in a row, from a track that did not point there; or about to enter it
+  within 3 min without looking like an arrival. Israel traffic is exempt: board/route-DB
+  TLV traffic, 4X- registrations, Israeli airline callsigns, aircraft seen low at an Israeli
+  airport, low traffic near one. Also exempt: descending into its own non-Israeli airport,
+  and learned route corners. Jordan is ~40 nm from the border, so a looser rule (30 min,
+  30 deg) flagged 12 routine Amman/Damascus movements in the replay.
+- **Hot flights**: any alert makes a flight followed and hot for `--hot-minutes` (20): queried
+  every cycle instead of every `--follow-interval`, every anomaly reported (no terminal or
+  route-corner exemptions), and two different anomalies within that time are sent at
+  priority 5 with `[also: ...]`.
 - **POSITION_JUMP**: implausible speed between consecutive positions **within 120 s**.
   Longer gaps are just movement while unheard. The Eastern Mediterranean has heavy GNSS
   jamming and spoofing, which causes jumps, fake turns and position dropouts.
@@ -95,6 +128,11 @@ scripted aircraft states. Keep or create at least these scenarios:
   05:31Z then 7500 05:38Z, turn toward Tabuk, silent while descending near Tabuk.
   Expected: VERTICAL_RATE (wobble), VERTICAL_RATE (dive, not suppressed), COURSE_CHANGE,
   EMERGENCY 7700, EMERGENCY 7500, DIVERSION.
+  The real-traffic replay (`tests/test_replay_fz1073.py`, ADS-B Exchange data) differs: 7500
+  from 05:35:20, the trace ends at 05:53:33 at 15,025 ft ~155 nm north of Tabuk (so LOST_CONTACT
+  instead of DIVERSION), and the 5-second wobble is seen only at the 30 s follow cadence, where
+  it reads as a glitch. It does yield the dive, 7700, 7500, the U-turn, OFF_COURSE ~141 nm out
+  at 05:45 and LOST_CONTACT. The dive-not-suppressed property has a synthetic unit test.
 - **429 handling**: rate-limited responses back off without stopping the local poll and
   without permanently marking a provider or endpoint as unsupported.
 
