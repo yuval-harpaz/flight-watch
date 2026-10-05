@@ -505,7 +505,8 @@ class Notifier:
 class Monitor:
     def __init__(self, args, notifier: Notifier, http: Http, schedule: Schedule | None):
         self.args, self.notifier, self.http, self.schedule = args, notifier, http, schedule
-        self.clock = time.monotonic
+        self.clock = time.monotonic  # cadence (tests and replays substitute their own clocks)
+        self.wall = time.time
         self.tracks: dict[str, Track] = {}
         self.routes: dict[str, tuple[float, str | None]] = {}
         self.route_failures = 0
@@ -636,7 +637,7 @@ class Monitor:
             if self.clock() - self.disc_round < a.discovery_interval:
                 return []
             exclude = {id(t.sched) for t in self.tracks.values() if t.followed and t.sched}
-            wanted = self.schedule.search_order(time.time(), exclude, a.departed_max_h)
+            wanted = self.schedule.search_order(self.wall(), exclude, a.departed_max_h)
             self.disc_round = self.clock()
             self.disc_queue = {p: list(wanted) for p in a.remote_providers if p not in self.disabled}
             log.debug("discovery round: %d callsigns", len(wanted))
@@ -655,13 +656,13 @@ class Monitor:
         p = PROVIDERS[provider or self.args.provider]
         data = self.http.get_json(p["base"] + p[kind].format(**fmt), priority)
         now = data.get("now")
-        server_now = now / 1000 if now and now > 1e11 else (now or time.time())
+        server_now = now / 1000 if now and now > 1e11 else (now or self.wall())
         return float(server_now), data.get("ac") or data.get("aircraft") or []
 
     def lookup_routes(self, tracks: list[Track]) -> None:
         if self.routes_off:
             return
-        now = time.time()
+        now = self.wall()
         need = [t for t in tracks if t.callsign and not t.sched and (
             t.callsign not in self.routes or now - self.routes[t.callsign][0] > ROUTE_TTL)][:100]
         if not need:
