@@ -31,6 +31,11 @@ Three data layers per cycle, in priority order:
    `e83f763b-b7d7-479e-b172-ae981ddc6de5`) → expected callsigns → global search
    (`/v2/callsign/A,B,C`), so inbound flights are found far from TLV. Slowest cadence.
 
+Each alert goes through `Monitor.alert()` (cooldowns, hot flights) to `Notifier`: a log line,
+`alerts.jsonl`, the `Announcer` (social-media-style post, threaded per flight, printed as a feed
+and appended to `posts.jsonl`), and ntfy / Telegram when configured. `tests/replay.py` and
+`tools/` (incident capture, turn-zone learning) are support code, not part of the monitor.
+
 ADS-B carries no origin/destination. Arrival/departure comes from the flight board first,
 then the callsign's route in the VRS standing data, then a heuristic near the airport
 (`ARR?` / `DEP?`).
@@ -132,8 +137,10 @@ days than airplanes.live, which showed "No data". Tapping an ntfy notification o
 
 ## Testing
 
-No network access is assumed in tests: subclass `Monitor`, override `fetch`, and feed
-scripted aircraft states. Keep or create at least these scenarios:
+No network access is assumed in tests: `tests/test_flight_watch.py` replaces the HTTP session
+with a fake feed (`/point`, `/hex`, `/callsign`, standing-data files, scripted 429s) and the
+clocks with a fake clock, then feeds physically consistent paths (`path()` / `fly()`).
+Incident replays (`tests/replay.py`) serve captured real traffic the same way. Keep or create at least these scenarios:
 
 - **Basic**: course reversal, steep descent, a position jump, squawk 7700, loss of contact
   away from the edge. Each must alert exactly once.
@@ -177,6 +184,11 @@ Quick live check: `python flight_watch.py --once -v`. Keep live experiments shor
   ("300 limit but failed once"); posts here are <= 280 incl. link labels. Keep a map of local
   post id -> returned post refs to thread replies, log failures, and never let posting block
   the poll loop.
+
+- **Unmapped airline codes on the board.** A live run (Oct 2026) logged `3F, H4, H7, NO, U8`;
+  their flights are only caught near TLV or via route data. Candidates to verify before adding
+  to `AIRLINE_ICAO`: NO = Neos `NOS`, U8 = TUS Airways `CYF`, H4 = HiSky `HYS`, H7 = HiSky Europe
+  (`HYM`?); 3F unknown. Until then `--airline-map extra.json` works.
 
 ## Out of scope unless asked
 
