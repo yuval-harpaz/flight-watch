@@ -18,7 +18,8 @@ sys.path.insert(0, os.path.dirname(__file__))
 import replay  # noqa: E402
 
 FZ1073 = "8965d1"
-NOISE_BUDGET = 60  # alerts on the other 161 aircraft (57 at capture time with default thresholds)
+NOISE_BUDGET = 16  # alerts on the other 161 aircraft: 57 at capture, 14 with angle-based steepness,
+                   # terminal/route-corner turn rules and quieter lost-contact (Oct 2026)
 
 
 def utc(hhmmss: str) -> str:
@@ -60,12 +61,18 @@ class FZ1073Replay(unittest.TestCase):
     def test_u_turn(self):
         self.first("COURSE_CHANGE", "05:41:30", "05:46:00")
 
+    def test_off_course_long_before_landing(self):
+        a = self.first("OFF_COURSE", "05:43:00", "05:47:00")
+        self.assertGreater(a["dist_nm"], 100)
+        self.assertEqual(a["priority"], 5)
+
     def test_lost_heading_away(self):
         a = self.first("LOST_CONTACT", "05:53:00", "06:15:00")
         self.assertEqual(a["traffic"], "ARR")
 
-    def test_no_false_diversions_or_emergencies_on_other_flights(self):
-        bad = [a for a in self.others if a["kind"] in ("DIVERSION", "RETURNED", "EMERGENCY")]
+    def test_no_high_priority_false_alarms_on_other_flights(self):
+        bad = [a for a in self.others if a["kind"] in ("DIVERSION", "RETURNED", "EMERGENCY", "OFF_COURSE",
+                                                       "TURNING_BACK", "TOWARD_ISRAEL")]
         self.assertFalse(bad, "\n" + replay.timeline(bad))
 
     def test_noise_budget(self):

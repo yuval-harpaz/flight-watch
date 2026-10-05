@@ -97,8 +97,33 @@ CONFIRMED = {"ARR", "DEP", "VIA"}
 # ADS-B emitter categories never followed on a guess: light, rotorcraft, glider, balloon,
 # parachutist, ultralight, UAV
 LIGHT_CATEGORIES = {"A1", "A7", "B1", "B2", "B3", "B4", "B6"}
-PRIORITY = {"EMERGENCY": 5, "LOST_CONTACT": 5, "DIVERSION": 5, "RETURNED": 4,
-            "VERTICAL_RATE": 4, "COURSE_CHANGE": 4, "POSITION_JUMP": 3, "CONTACT_RESTORED": 3}
+PRIORITY = {"EMERGENCY": 5, "LOST_CONTACT": 5, "DIVERSION": 5, "TOWARD_ISRAEL": 5, "OFF_COURSE": 5,
+            "RETURNED": 4, "TURNING_BACK": 4, "VERTICAL_RATE": 4, "SHARP_TURN": 4,
+            "COURSE_CHANGE": 4, "POSITION_JUMP": 3, "CONTACT_RESTORED": 2}
+# kinds that describe abnormal flying; two different ones on one flight within --hot-minutes
+# are reported as a pattern (priority 5)
+ANOMALIES = {"EMERGENCY", "LOST_CONTACT", "DIVERSION", "TOWARD_ISRAEL", "OFF_COURSE", "TURNING_BACK",
+             "VERTICAL_RATE", "SHARP_TURN", "COURSE_CHANGE", "POSITION_JUMP"}
+
+# Airports in and around the watch area: terminal areas (normal turns, steep-but-normal climbs),
+# "probably landing there" for aircraft going silent low nearby. IATA -> (lat, lon, Israeli)
+REGION_AIRPORTS = {
+    "TLV": (32.0114, 34.8867, True), "HFA": (32.8094, 35.0431, True), "ETM": (29.7236, 35.0114, True),
+    "VDA": (29.9403, 34.9358, True), "AMM": (31.7226, 35.9932, False), "ADJ": (31.9727, 35.9916, False),
+    "AQJ": (29.6116, 35.0181, False), "BEY": (33.8209, 35.4884, False), "DAM": (33.4115, 36.5156, False),
+    "LCA": (34.8751, 33.6249, False), "PFO": (34.7180, 32.4857, False), "ECN": (35.1547, 33.4961, False),
+    "AAC": (31.0733, 33.8358, False), "CAI": (30.1219, 31.4056, False), "SSH": (27.9773, 34.3950, False),
+    "TCP": (29.5878, 34.7781, False), "TUU": (28.3654, 36.6189, False), "ULH": (26.4834, 38.1171, False),
+    "AJF": (29.7851, 40.1000, False), "MED": (24.5534, 39.7051, False), "ALP": (36.1807, 37.2244, False),
+    "LTK": (35.4011, 35.9487, False), "AYT": (36.8987, 30.8005, False), "ADA": (36.9822, 35.2804, False),
+}
+# Rough outline of Israeli-controlled airspace over land (incl. West Bank, Golan), lat/lon.
+# Israeli airlines (ICAO): El Al, Israir, Arkia, CAL Cargo, Sun d'Or, Challenge Airlines IL, Air Haifa
+ISRAELI_AIRLINES = {"ELY", "ISR", "AIZ", "ICL", "ERO", "CHG", "HFA"}
+ISRAELI_CODES = {c for c, v in REGION_AIRPORTS.items() if v[2]} | {"LLBG", "LLHA", "LLER", "LLOV"}
+ISRAEL = [(33.09, 35.10), (33.28, 35.58), (33.33, 35.82), (32.70, 35.87), (32.30, 35.57), (31.50, 35.48),
+          (30.90, 35.40), (29.55, 34.98), (29.50, 34.90), (30.88, 34.40), (31.22, 34.25), (31.60, 34.48),
+          (32.10, 34.77), (32.83, 34.95)]
 
 
 # --------------------------------------------------------------------------- helpers
@@ -112,6 +137,91 @@ def haversine_nm(lat1, lon1, lat2, lon2) -> float:
 def heading_diff(a: float, b: float) -> float:
     d = abs(a - b) % 360
     return 360 - d if d > 180 else d
+
+
+def bearing(lat1, lon1, lat2, lon2) -> float:
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2 - lon1)
+    return math.degrees(math.atan2(math.sin(dl) * math.cos(p2),
+                                   math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl))) % 360
+
+
+def destination(lat, lon, track, nm) -> tuple[float, float]:
+    """Point `nm` nautical miles from lat/lon along `track` (great circle)."""
+    d, b = nm / 3440.065, math.radians(track)
+    p1, l1 = math.radians(lat), math.radians(lon)
+    p2 = math.asin(math.sin(p1) * math.cos(d) + math.cos(p1) * math.sin(d) * math.cos(b))
+    l2 = l1 + math.atan2(math.sin(b) * math.sin(d) * math.cos(p1), math.cos(d) - math.sin(p1) * math.sin(p2))
+    return math.degrees(p2), math.degrees(l2)
+
+
+def in_polygon(lat, lon, poly) -> bool:
+    inside = False
+    for i in range(len(poly)):
+        (y1, x1), (y2, x2) = poly[i], poly[i - 1]
+        if (y1 > lat) != (y2 > lat) and lon < (x2 - x1) * (lat - y1) / (y2 - y1) + x1:
+            inside = not inside
+    return inside
+
+
+def minutes_to(poly, lat, lon, track, gs, horizon_min) -> float | None:
+    """Minutes until the current track enters `poly` (0 = inside), None if not within the horizon."""
+    if in_polygon(lat, lon, poly):
+        return 0.0
+    if not gs or track is None:
+        return None
+    steps = max(1, int(horizon_min * 2))  # check every 30 s of flight
+    for k in range(1, steps + 1):
+        m = horizon_min * k / steps
+        if in_polygon(*destination(lat, lon, track, gs * m / 60), poly):
+            return m
+    return None
+
+
+def nearest_airport(lat, lon, israeli: bool | None = None, exclude=()) -> tuple[str | None, float]:
+    best = (None, 1e9)
+    for code, (alat, alon, isr) in REGION_AIRPORTS.items():
+        if code in exclude or (israeli is not None and isr != israeli):
+            continue
+        d = haversine_nm(lat, lon, alat, alon)
+        if d < best[1]:
+            best = (code, d)
+    return best
+
+
+def path_angle(vrate: float, gs: float) -> float:
+    """Climb (+) / descent (-) angle in degrees from ft/min and knots."""
+    return math.degrees(math.atan2(vrate, gs * 101.27))
+
+
+class TurnZones:
+    """Grid cells where many aircraft routinely turn onto a given heading (tools/learn_turn_zones.py)."""
+
+    def __init__(self, path: str | None, tolerance: float = 20):
+        self.cells: dict[tuple, list[int]] = {}
+        self.size, self.tol = 0.5, tolerance
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError) as e:
+            log.warning("turn zones not loaded (%s) - every large course change will alert", e)
+            return
+        self.size = data.get("cell", 0.5)
+        for z in data.get("zones", []):
+            key = (math.floor(z["lat"] / self.size), math.floor(z["lon"] / self.size))
+            self.cells.setdefault(key, []).append(z["out"])
+        log.info("turn zones: %d learned headings in %d cells", sum(map(len, self.cells.values())),
+                 len(self.cells))
+
+    def expected(self, lat, lon, track) -> bool:
+        """A turn ending on `track` here is routine (route corner / detour)."""
+        if track is None:
+            return False
+        i, j = math.floor(lat / self.size), math.floor(lon / self.size)
+        return any(heading_diff(track, out) <= self.tol
+                   for di in (-1, 0, 1) for dj in (-1, 0, 1) for out in self.cells.get((i + di, j + dj), ()))
 
 
 def chunks(seq, n):
@@ -295,6 +405,9 @@ class Track:
     squawk: str = ""
     category: str = ""     # ADS-B emitter category, e.g. A1 = light aircraft
     last_query: float = 0.0  # server time we last asked a remote feed for this hex and got an answer
+    hot_until: float = 0.0   # data time until which the flight is "hot" (alerted recently)
+    lost_alerted: bool = False  # the current loss of contact was alerted (not just noted)
+    israeli: bool = False    # seen low at an Israeli airport (so it is Israel traffic)
 
     @property
     def last(self) -> Sample | None:
@@ -520,6 +633,8 @@ class Monitor:
         self.last_follow = -1e9
         self.started = self.clock()
         self.starved_warned = -1e9
+        self.zones = TurnZones(args.turn_zones)
+        self.protect = args.protect == "israel"
         self.disc_queue: dict[str, list[str]] = {}  # discovery round in progress, per provider
         self.disc_round = -1e9
 
@@ -596,26 +711,35 @@ class Monitor:
         return out, done
 
     def follow(self, local_hexes: set, local: list) -> list:
-        """One combined hex request per --follow-interval for followed flights not in the local circle."""
+        """One combined hex request per --follow-interval for followed flights not in the local circle.
+
+        Hot flights (alerted within --hot-minutes) are asked for every cycle, so the critical
+        minutes of an incident are seen at the local poll's resolution."""
         a = self.args
         ids = [h for h, t in self.tracks.items() if t.followed and h not in local_hexes][:a.follow_max]
-        if not ids or self.clock() - self.last_follow < a.follow_interval:
+        hot = [h for h in ids if self.hot(self.tracks[h])]
+        due = self.clock() - self.last_follow >= a.follow_interval
+        if not ids or not (due or hot):
             return []
         batches, sent = [], False
         for prov in a.remote_providers:
-            start = self.cursor.get(prov, 0) % len(ids)
-            order = ids[start:] + ids[:start]
+            if due:
+                rest = [h for h in ids if h not in hot]
+                start = self.cursor.get(prov, 0) % len(rest) if rest else 0
+                order = hot + rest[start:] + rest[:start]
+            else:
+                order = hot
             got, done = self.remote_query(prov, "hex", order, local, a.remote_budget)
             batches += got
             for now_r, g in done:
                 sent = True
-                self.cursor[prov] = self.cursor.get(prov, 0) + len(g)
+                self.cursor[prov] = self.cursor.get(prov, 0) + len([h for h in g if h not in hot])
                 for h in g:
                     if h in self.tracks:
                         self.tracks[h].last_query = max(self.tracks[h].last_query, now_r)
-        if sent:
+        if sent and due:
             self.last_follow = self.clock()
-        elif (self.clock() - max(self.last_follow, self.starved_warned) > 10 * a.follow_interval
+        elif due and not sent and (self.clock() - max(self.last_follow, self.starved_warned) > 10 * a.follow_interval
               and self.clock() - self.started > 10 * a.follow_interval):
             self.starved_warned = self.clock()
             log.warning("follow requests starved for %.0fs: the feed allows only ~%.1f req/min "
@@ -765,12 +889,18 @@ class Monitor:
                 log.info("following %s (%s %s)", t.label(), kind, route or "")
             if t.lost and server_now - t.last_msg < a.lost_after:
                 t.lost = False
-                self.alert(t, "CONTACT_RESTORED", f"heard again at {s.alt} ft")
+                if t.lost_alerted:
+                    self.alert(t, "CONTACT_RESTORED", f"heard again at {s.alt} ft")
+            if (s.on_ground or (s.alt or 0) < 3000) and nearest_airport(s.lat, s.lon, israeli=True)[1] < 8:
+                t.israeli = True
             self.check_emergency(t, ac)
             self.check_vrate(t)
             self.check_turn(t)
+            self.check_sharp_turn(t)
             self.check_jump(t, prev)
             self.check_landing(t, kind, d)
+            self.check_destination(t, kind, d)
+            self.check_protected(t, kind, route)
             if not s.on_ground:
                 t.was_airborne = True
             t.max_dist = max(t.max_dist, d)
@@ -805,29 +935,74 @@ class Monitor:
             self.alert(t, "EMERGENCY", f"ADS-B emergency status: {em}")
 
     def check_vrate(self, t: Track) -> None:
-        s = t.last
-        if s.on_ground or s.vrate is None or s.alt is None or abs(s.vrate) < self.args.vrate:
+        """Too steep a climb or descent, as a flight-path angle (rate alone flags every fast jet).
+
+        Terminal areas allow steeper climbs (light jets, initial climb), but are still checked;
+        an extreme rate (--vrate) alerts whatever the speed."""
+        a, s = self.args, t.last
+        if s.on_ground or s.vrate is None or s.alt is None or s.alt < 1000:
+            return
+        angle = path_angle(s.vrate, s.gs) if s.gs and s.gs >= 60 else None
+        apt, ad = nearest_airport(s.lat, s.lon)
+        terminal = ad <= a.terminal_radius and s.alt < a.terminal_alt
+        limit = (a.terminal_climb_angle if terminal else a.climb_angle) if s.vrate > 0 else a.descent_angle
+        if not ((angle is not None and abs(angle) >= limit) or abs(s.vrate) >= a.vrate):
             return
         computed = t.computed_vrate(30)
-        if computed is not None and abs(computed) < self.args.vrate * 0.5:
-            return  # reported rate not backed by actual altitude change -> likely a glitch
+        if computed is not None:
+            c_angle = path_angle(computed, s.gs) if s.gs and s.gs >= 60 else 0.0
+            if abs(computed) < 0.5 * a.vrate and abs(c_angle) < 0.5 * limit:
+                return  # reported rate not backed by actual altitude change -> likely a glitch
         direction = "DESCENT" if s.vrate < 0 else "CLIMB"
         extra = f" (history: {computed:+.0f} ft/min)" if computed is not None else ""
-        self.alert(t, "VERTICAL_RATE", f"{direction} {s.vrate:+d} ft/min at {s.alt} ft{extra}",
+        ang = f", {angle:+.1f} deg" if angle is not None else ""
+        near = f", {ad:.0f} nm from {apt}" if terminal else ""
+        self.alert(t, "VERTICAL_RATE", f"{direction} {s.vrate:+d} ft/min{ang} at {s.alt} ft{near}{extra}",
                    key=f"VERTICAL_RATE:{direction}", severity=abs(s.vrate))
 
     def check_turn(self, t: Track) -> None:
-        s = t.last
-        if (s.on_ground or s.track is None or (s.alt or 0) < self.args.turn_min_alt
-                or self.dist(s) < self.args.turn_ignore_radius):
+        """Large course change (e.g. a U-turn). Routine turns are skipped: in terminal areas and at
+        learned route corners (--turn-zones). A flight that already alerted is always reported."""
+        a, s = self.args, t.last
+        if (s.on_ground or s.track is None or (s.alt or 0) < a.turn_min_alt
+                or self.dist(s) < a.turn_ignore_radius):
             return
-        old = t.sample_ago(self.args.turn_window)
+        old = t.sample_ago(a.turn_window)
         if not old or old.track is None:
             return
         d = heading_diff(s.track, old.track)
-        if d >= self.args.turn:
-            self.alert(t, "COURSE_CHANGE", f"track {old.track:.0f} -> {s.track:.0f} deg "
-                       f"({d:.0f} deg in {s.t - old.t:.0f}s) at {s.alt} ft")
+        if d < a.turn:
+            return
+        if not self.hot(t):
+            apt, ad = nearest_airport(s.lat, s.lon)
+            if ad <= a.terminal_radius + 5 and s.alt < 25000:
+                return  # departure / arrival routing
+            if self.zones.expected(s.lat, s.lon, s.track):
+                return  # route corner seen on many flights
+        self.alert(t, "COURSE_CHANGE", f"track {old.track:.0f} -> {s.track:.0f} deg "
+                   f"({d:.0f} deg in {s.t - old.t:.0f}s) at {s.alt} ft")
+
+    def check_sharp_turn(self, t: Track) -> None:
+        """Turn tighter than airliners fly (implied bank angle), anywhere - also near airports."""
+        a, s = self.args, t.last
+        if s.on_ground or s.track is None or not s.gs or s.gs < 150 or (s.alt or 0) < 1500:
+            return
+        old = t.sample_ago(25)
+        if not old or old.track is None or not old.gs:
+            return
+        dt = s.t - old.t
+        dtrk = heading_diff(s.track, old.track)
+        if dt <= 0 or dtrk < 20:
+            return
+        # positions must agree with the speeds, or the "turn" is a GNSS/position glitch
+        moved = haversine_nm(old.lat, old.lon, s.lat, s.lon)
+        expect = (s.gs + old.gs) / 2 * dt / 3600
+        if not 0.6 <= moved / expect <= 1.4:
+            return
+        bank = math.degrees(math.atan(math.radians(dtrk) / dt * s.gs * 0.5144 / 9.81))
+        if bank >= a.max_bank:
+            self.alert(t, "SHARP_TURN", f"{old.track:.0f} -> {s.track:.0f} deg in {dt:.0f}s at "
+                       f"{s.gs:.0f} kt (~{bank:.0f} deg bank) at {s.alt} ft", severity=bank)
 
     def check_jump(self, t: Track, prev: Sample | None) -> None:
         s = t.last
@@ -847,11 +1022,83 @@ class Monitor:
         if not (s.on_ground and t.was_airborne):
             return
         if kind == "ARR" and d > 15:
+            apt, ad = nearest_airport(s.lat, s.lon)
+            at = f" ({ad:.0f} nm from {apt})" if ad < 20 else ""
             self.alert(t, "DIVERSION", f"{self.args.airport} arrival on the ground "
-                       f"{d:.0f} nm away at {s.lat:.4f},{s.lon:.4f}")
+                       f"{d:.0f} nm away at {s.lat:.4f},{s.lon:.4f}{at}")
         elif kind == "DEP" and d < 15 and t.max_dist > 40:
             self.alert(t, "RETURNED", f"{self.args.airport} departure landed back at "
                        f"{self.args.airport} (had reached {t.max_dist:.0f} nm)")
+
+    def check_destination(self, t: Track, kind: str, d: float) -> None:
+        """Long before landing: an arrival flying away from the airport, or a departure flying back.
+
+        The deviation must hold over --course-hold seconds while the distance opens (arrival) or
+        closes (departure); route bends on the way (e.g. via Saudi Arabia and Jordan) stay below it."""
+        a, s = self.args, t.last
+        if (kind not in ("ARR", "DEP") or s.on_ground or s.track is None or (s.alt or 0) < 5000
+                or d < a.off_course_min_dist):
+            return
+        old = t.sample_ago(a.course_hold)
+        if not old:
+            return
+        window = [x for x in t.samples if x.t >= old.t and x.track is not None]
+        if len(window) < 3:
+            return
+        devs = [heading_diff(x.track, bearing(x.lat, x.lon, a.lat, a.lon)) for x in window]
+        was = haversine_nm(a.lat, a.lon, old.lat, old.lon)
+        if kind == "ARR" and min(devs) >= a.off_course and d > was + 3:
+            self.alert(t, "OFF_COURSE", f"{a.airport} arrival heading {s.track:.0f} deg, "
+                       f"{devs[-1]:.0f} deg away from {a.airport} for {s.t - old.t:.0f}s, "
+                       f"{d:.0f} nm out and opening ({was:.0f} -> {d:.0f} nm)")
+        elif kind == "DEP" and max(devs) <= a.turn_back and d < was - 5:
+            self.alert(t, "TURNING_BACK", f"{a.airport} departure heading back to {a.airport} "
+                       f"(track {s.track:.0f} deg) for {s.t - old.t:.0f}s, {d:.0f} nm out and "
+                       f"closing ({was:.0f} -> {d:.0f} nm)")
+
+    def arrival_guess(self, t: Track) -> bool:
+        """Looks like an Israeli-airport arrival the board/route DB did not identify."""
+        s = t.last
+        apt, ad = nearest_airport(s.lat, s.lon, israeli=True)
+        alat, alon, _ = REGION_AIRPORTS[apt]
+        return (ad < 150 and heading_diff(s.track, bearing(s.lat, s.lon, alat, alon)) <= 20
+                and ((s.vrate or 0) <= -300 or (s.alt or 0) < 20000))
+
+    def check_protected(self, t: Track, kind: str, route: str | None) -> None:
+        """A flight not bound for Israel turning toward it, or about to enter its airspace."""
+        a, s = self.args, t.last
+        if (not self.protect or s.on_ground or (s.alt or 0) < a.toward_min_alt or not s.gs
+                or s.gs < 150 or s.track is None):
+            return
+        if (kind in CONFIRMED or t.sched or t.israeli or t.reg.upper().startswith("4X")
+                or t.callsign[:3] in ISRAELI_AIRLINES
+                or (route and ISRAELI_CODES & set(route.split("-")))
+                or (s.alt < 15000 and nearest_airport(s.lat, s.lon, israeli=True)[1] < 60)):
+            return  # Israel traffic (incl. low near an Israeli airport: just left / about to land)
+        eta = minutes_to(ISRAEL, s.lat, s.lon, s.track, s.gs, a.toward_eta)
+        if eta is None:
+            return
+        apt, ad = nearest_airport(s.lat, s.lon, israeli=False)
+        if ad < 40 and (s.vrate or 0) < -300:
+            return  # descending into its own (non-Israeli) airport
+        prev = t.samples[-2] if len(t.samples) > 1 else None
+        if (not prev or prev.track is None
+                or minutes_to(ISRAEL, prev.lat, prev.lon, prev.track, prev.gs or s.gs, a.toward_eta) is None):
+            return  # must point there on two samples in a row
+        old = t.sample_ago(240)
+        turned = (old is not None and old.track is not None
+                  and heading_diff(s.track, old.track) >= a.toward_turn
+                  and minutes_to(ISRAEL, old.lat, old.lon, old.track, old.gs or s.gs, 30) is None)
+        what = f"not bound for Israel ({kind}{' ' + route if route else ''})"
+        if turned and not self.zones.expected(s.lat, s.lon, s.track):
+            msg = (f"{what} - turned {old.track:.0f} -> {s.track:.0f} deg toward Israeli airspace, "
+                   f"~{eta:.0f} min away, at {s.alt} ft")
+        elif eta <= 3 and kind != "OVR" and not self.arrival_guess(t):
+            msg = (f"{what} - {'over' if eta == 0 else 'about to enter'} Israeli airspace"
+                   f"{'' if eta == 0 else f' in ~{eta:.0f} min'}, track {s.track:.0f} deg at {s.alt} ft")
+        else:
+            return
+        self.alert(t, "TOWARD_ISRAEL", msg)
 
     def check_lost(self, now: float) -> None:
         a = self.args
@@ -865,15 +1112,18 @@ class Monitor:
             # the local poll (this cycle) inside the circle, the last follow request outside it.
             # A throttled or failed follow therefore never turns into a false LOST_CONTACT.
             silent = (t.last_query if remote else now) - t.last_msg
+            kind = self.classify(t)[0]
+            apt, ad = nearest_airport(s.lat, s.lon, exclude=(a.airport,))
             if (s.alt or 0) < a.lost_min_alt:
                 # A TLV arrival vanishing low and far from TLV is most likely landing elsewhere
                 # (low-altitude coverage is poor, so we may never see it on the ground).
                 if (t.followed and d > 30 and (s.vrate or 0) <= 0
-                        and self.classify(t)[0] == "ARR" and silent >= 3 * a.lost_after):
-                    t.lost = True
+                        and kind == "ARR" and silent >= 3 * a.lost_after):
+                    t.lost = t.lost_alerted = True
+                    near = f", {ad:.0f} nm from {apt}" if ad <= 30 else ""
                     self.alert(t, "DIVERSION", f"{a.airport} arrival went silent descending through "
                                f"{s.alt} ft, {d:.0f} nm from {a.airport} at {s.lat:.4f},{s.lon:.4f}"
-                               " - probably landing elsewhere")
+                               f"{near} - probably landing {'at ' + apt if near else 'elsewhere'}")
                 continue
             if remote:
                 if not t.followed:
@@ -885,35 +1135,69 @@ class Monitor:
                 limit = a.lost_after
             if silent < limit:
                 continue
-            t.lost = True
+            t.lost, t.lost_alerted = True, False
             trk = f"{s.track:.0f}" if s.track is not None else "?"
-            self.alert(t, "LOST_CONTACT", f"silent {silent:.0f}s; last {s.alt} ft, "
-                       f"{d:.0f} nm from {a.airport}, track {trk} deg, at {s.lat:.4f},{s.lon:.4f}")
+            where = (f"last {s.alt} ft, {d:.0f} nm from {a.airport}, track {trk} deg, "
+                     f"at {s.lat:.4f},{s.lon:.4f}")
+            descending = (s.vrate or 0) <= 0
+            if (s.alt or 0) < 12000 and descending and ad <= 30:
+                if kind == "ARR":  # a TLV arrival descending into another airport
+                    t.lost_alerted = True
+                    self.alert(t, "DIVERSION", f"{a.airport} arrival went silent {silent:.0f}s, "
+                               f"{where}, {ad:.0f} nm from {apt} - probably landing at {apt}")
+                else:
+                    log.info("%s silent %.0fs descending near %s - probably landing there",
+                             t.label(), silent, apt)
+                continue
+            if remote and not self.hot(t) and (kind == "DEP" and descending
+                                               or (s.vrate or 0) > -500 and (s.alt or 0) >= 20000):
+                # cruising far away (or a departure descending into its destination): coverage gap
+                log.info("%s silent %.0fs, %s - remote coverage gap, not alerted",
+                         t.label(), silent, where)
+                continue
+            t.lost_alerted = True
+            self.alert(t, "LOST_CONTACT", f"silent {silent:.0f}s; {where}")
 
     # ---- output
+    def hot(self, t: Track) -> bool:
+        """Alerted within --hot-minutes (data time): followed every cycle, every anomaly reported."""
+        return bool(t.last) and t.last.t < t.hot_until
+
     def alert(self, t: Track, kind: str, msg: str, key: str | None = None,
               severity: float = 0, force: bool = False) -> None:
         """Cooldown per key; a clearly worse reading (1.5x severity) or force bypasses it."""
+        a = self.args
         now = t.last.t  # time of the data, not of the poll
         key = key or kind
         last_t, last_sev = t.alerted.get(key, (-1e12, 0))
         escalated = severity and severity >= 1.5 * last_sev
-        if not (force or escalated or kind == "CONTACT_RESTORED") and now - last_t < self.args.cooldown:
+        if not (force or escalated or kind == "CONTACT_RESTORED") and now - last_t < a.cooldown:
             return
         traffic, route = self.classify(t)
-        if self.args.airport_traffic_only and traffic not in AIRPORT_TRAFFIC:
+        if a.airport_traffic_only and traffic not in AIRPORT_TRAFFIC:
             return
-        t.alerted[key] = (now, max(severity, last_sev if now - last_t < self.args.cooldown else 0))
+        recent = sorted({k.split(":")[0] for k, (tt, _) in t.alerted.items()
+                         if now - tt <= a.hot_minutes * 60 and k.split(":")[0] in ANOMALIES} - {kind})
+        pattern = kind in ANOMALIES and bool(recent)
+        t.alerted[key] = (now, max(severity, last_sev if now - last_t < a.cooldown else 0))
+        if not t.followed:
+            log.info("following %s (alerted)", t.label())
+        t.followed = True  # keep its fate visible wherever it goes
+        if kind in ANOMALIES:
+            t.hot_until = max(t.hot_until, now + a.hot_minutes * 60)
         s = t.last
         d = self.dist(s)
+        apt, ad = nearest_airport(s.lat, s.lon)
         self.notifier.send({
             "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
-            "kind": kind, "priority": PRIORITY.get(kind, 3), "message": msg,
+            "kind": kind, "priority": 5 if pattern else PRIORITY.get(kind, 3),
+            "message": msg + (f" [also: {', '.join(recent)}]" if pattern else ""),
             "hex": t.hex, "aircraft": t.label(), "callsign": t.callsign,
-            "traffic": traffic, "route": route, "remote": d > self.args.radius,
+            "traffic": traffic, "route": route, "remote": d > a.radius,
             "scheduled": t.sched.when if t.sched else None,
             "lat": s.lat, "lon": s.lon, "alt": s.alt, "track": s.track, "gs": s.gs,
-            "dist_nm": round(d, 1), "links": external_links(t, now),
+            "dist_nm": round(d, 1), "near": f"{apt} {ad:.0f} nm",
+            "recent": recent, "links": external_links(t, now),
         })
 
 
@@ -957,7 +1241,19 @@ def parse_args(argv=None):
                    help="max requests per provider per layer per cycle (follow / discover)")
     g.add_argument("--airline-map", help="JSON file of extra IATA->ICAO airline codes")
     g = p.add_argument_group("thresholds")
-    g.add_argument("--vrate", type=int, default=4000, help="alert above this |ft/min|")
+    g.add_argument("--climb-angle", type=float, default=12,
+                   help="alert on climbs steeper than this, degrees (normal traffic stays below ~9.5)")
+    g.add_argument("--descent-angle", type=float, default=10,
+                   help="alert on descents steeper than this, degrees, also near airports "
+                        "(glide slope 3, steep approaches ~6, normal maximum seen ~8)")
+    g.add_argument("--terminal-climb-angle", type=float, default=18,
+                   help="climb angle limit within --terminal-radius of an airport, below --terminal-alt")
+    g.add_argument("--terminal-radius", type=float, default=30, help="nm around airports for terminal rules")
+    g.add_argument("--terminal-alt", type=int, default=15000, help="ft; terminal rules apply below this")
+    g.add_argument("--vrate", type=int, default=8000,
+                   help="alert above this |ft/min| whatever the angle")
+    g.add_argument("--max-bank", type=float, default=35,
+                   help="SHARP_TURN above this implied bank angle, degrees (airliners turn at <= 25-30)")
     g.add_argument("--lost-after", type=float, default=60, help="seconds of silence = lost (local)")
     g.add_argument("--lost-after-remote", type=float, default=600,
                    help="seconds of silence = lost for followed flights outside the local circle")
@@ -969,6 +1265,24 @@ def parse_args(argv=None):
     g.add_argument("--turn-min-alt", type=int, default=12000, help="ignore turns below this ft")
     g.add_argument("--turn-ignore-radius", type=float, default=25, help="nm around airport to ignore")
     g.add_argument("--max-speed", type=float, default=1200, help="kt; faster jumps are flagged")
+    g.add_argument("--turn-zones", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                         "turn_zones.json"),
+                   help="learned route corners where large turns are routine ('' to disable)")
+    g.add_argument("--off-course", type=float, default=100,
+                   help="OFF_COURSE when an arrival's track stays this many degrees away from the airport")
+    g.add_argument("--turn-back", type=float, default=60,
+                   help="TURNING_BACK when a departure's track stays within this many degrees of the airport")
+    g.add_argument("--course-hold", type=float, default=150, help="seconds OFF_COURSE / TURNING_BACK must hold")
+    g.add_argument("--off-course-min-dist", type=float, default=60, help="nm; closer in, vectors are normal")
+    g.add_argument("--protect", choices=("israel", "none"), default=None,
+                   help="warn about flights not bound for Israel heading into it (default: israel "
+                        "for Israeli airports)")
+    g.add_argument("--toward-eta", type=float, default=12,
+                   help="TOWARD_ISRAEL when a turn brings Israeli airspace within this many minutes")
+    g.add_argument("--toward-turn", type=float, default=45, help="degrees of turn for TOWARD_ISRAEL")
+    g.add_argument("--toward-min-alt", type=int, default=8000, help="ft; ignore lower traffic")
+    g.add_argument("--hot-minutes", type=float, default=20,
+                   help="after an alert, follow the flight every cycle and report every anomaly")
     g.add_argument("--cooldown", type=float, default=300, help="seconds between repeat alerts")
     g = p.add_argument_group("notifications")
     g.add_argument("--jsonl", default="alerts.jsonl", help="append alerts here ('' to disable)")
@@ -986,6 +1300,8 @@ def parse_args(argv=None):
     elif a.lat is None or a.lon is None:
         p.error(f"unknown airport {a.airport}: pass --lat and --lon (and --icao)")
     a.icao = (a.icao or a.airport).upper()
+    if a.protect is None:
+        a.protect = "israel" if REGION_AIRPORTS.get(a.airport, (0, 0, False))[2] else "none"
     a.radius = min(a.radius, 250)
     a.remote_providers = [x.strip() for x in a.remote_providers.split(",") if x.strip()]
     bad = [x for x in a.remote_providers if x not in PROVIDERS]
