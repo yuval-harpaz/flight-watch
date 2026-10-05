@@ -70,7 +70,9 @@ be published to Bluesky as is (atproto `TextBuilder` + `ReplyRef`) - the next st
 Remote alerts are tagged `[REMOTE]`. Remote lost-contact uses a longer limit
 (`--lost-after-remote`, default 600 s) because volunteer coverage has big gaps over seas,
 deserts and some countries. Silence is only counted up to the last follow request that was
-actually answered, so throttled requests never produce a false `LOST_CONTACT`.
+actually answered, so throttled requests never produce a false `LOST_CONTACT`. A remote flight
+going silent at cruise altitude is only logged (a coverage gap), unless it is already alerting
+or descending.
 
 ## Rate limits
 
@@ -80,13 +82,16 @@ cloud IPs. Each feed host gets an adaptive budget (`--rate`, default 8 requests/
 cooldown of 10 s doubling per consecutive 429 (max 120 s), with ±50% jitter. The local poll keeps
 its `--interval` and always comes first; follow, discovery and route lookups only use spare
 budget and stop at the first 429. On a very strict IP the remote layers can starve - a warning
-says so. adsb.lol's route database lookup is turned off after 3 failures in a row.
+says so. Route lookups (standing data on GitHub) have their own, larger budget and are turned off
+for the run after 3 failures in a row.
 
 ## Run
 
 ```bash
+python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-python flight_watch.py                                  # TLV, every 10 s, 150 nm radius
+python flight_watch.py --once -v                        # one poll with request logging, then exit
+python flight_watch.py                                  # TLV, every 10 s, 150 nm radius; Ctrl+C stops
 python flight_watch.py --airport ETM --descent-angle 8 --interval 15
 python flight_watch.py --airport-traffic-only           # only flights to/from the airport
 python flight_watch.py --lost-after-remote 900          # quieter remote lost-contact alerts
@@ -94,7 +99,9 @@ python flight_watch.py --ntfy-topic my-random-topic-8f3k   # phone push via ntfy
 python flight_watch.py --help                           # all thresholds
 ```
 
-Telegram: set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` env vars. Alerts are also appended to `alerts.jsonl`.
+It runs until stopped (Ctrl+C). The terminal shows a status line per cycle and the announcement
+feed; alerts are appended to `alerts.jsonl` and posts to `posts.jsonl` in the current directory
+(`--jsonl ''` / `--posts ''` to disable). Telegram: set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`.
 
 ## Storage and links
 
@@ -146,8 +153,10 @@ script keeps running on the other layers.
 python -m unittest discover -s tests
 ```
 
-Offline simulations with a fake feed and clock: alerts, codeshare merging, discovery order,
-board paging, follow cadence, and 429 handling.
+Offline simulations with a fake feed and clock: every alert kind (steepness by angle, sharp
+turns vs routine turns, off-course, turning back, toward-Israel, lost contact / probable landing,
+diversion of a distant arrival), codeshare merging, discovery order, board paging, follow
+cadence, route lookups, announcements and threading, and 429 handling.
 
 ### Incident replays
 
@@ -180,6 +189,8 @@ online, so board rows are derived from the traces plus `--board` rows given by h
 
 ## Hosting (GitHub Actions cron is ≥5 min and often delayed)
 
-Run it as a long-lived process: locally with `systemd`/`tmux`, or `docker build -t flight-watch . && docker run -d --restart=always flight-watch`.
+Run it as a long-lived process from its venv: in `tmux` while testing, later as a `systemd` service
+on a VPS (`ExecStart=/path/to/flight-watch/.venv/bin/python flight_watch.py`, `Restart=always`,
+`WorkingDirectory=` where `alerts.jsonl` / `posts.jsonl` should go).
 Cheap always-on options: Oracle Cloud free-tier VM, a ~€4/month Hetzner VPS, Fly.io or Railway.
 A Raspberry Pi with an RTL-SDR receiver gives your own local feed with zero API dependency.
