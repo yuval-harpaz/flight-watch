@@ -38,6 +38,11 @@ and appended to `posts.jsonl`), and ntfy / Telegram when configured. `tests/repl
 `tools/` (incident capture, turn-zone learning, `plot_alert.py`
 3D replay of an alert) are support code, not part of the monitor.
 
+`docs/` is published with GitHub Pages (e.g. `docs/fz1073_map.html`, made by `tools/plot_alert.py
+--map`); `examples/` holds the FZ1073 alerts and 3D plot. Plot pages are stand-alone (data embedded,
+libraries from CDNs), metric, Israel time with a UTC / viewer-zone switch, and must keep the credits:
+"Powered by Esri" + the tile service's sources, the flight-data source, the route sources.
+
 ADS-B carries no origin/destination. Arrival/departure comes from the flight board first,
 then the callsign's route in the VRS standing data, then a heuristic near the airport
 (`ARR?` / `DEP?`).

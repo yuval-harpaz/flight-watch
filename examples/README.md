@@ -11,26 +11,31 @@ squawk 7700 then 7500 (hijack), a U-turn over Jordan and a diversion to Tabuk.
   something changes, ~8 s apart, sub-second during the wobble). Alerts in red with the squawk
   code, steep altitude changes in purple, stretches without positions dashed. Altitude and speed
   over time below, with buttons to zoom the chart to the alerts or to each steep change.
-- `fz1073_map.html`: the same over a street map. "? how to move" explains the mouse; "zoom to
-  alerts", "top view" and "whole flight" buttons, altitude exaggeration slider.
+- `../docs/fz1073_map.html` (published with GitHub Pages): the same over a street map. "? how to
+  move" explains the mouse; "zoom to alerts", "first sign", "top view" and "whole flight" buttons,
+  altitude exaggeration slider.
+
+Both pages show times in Israel time by default, with a switch to UTC or the viewer's own time zone,
+and metric units (m, km, km/h, m/s); the monitor's alert texts are converted too. Credits for the
+map tiles (Esri), the flight data (ADS-B Exchange) and the route sources are at the bottom.
 
 The pages load plotly.js / deck.gl from CDNs and map tiles from Esri, so they need a connection.
 The track data is embedded.
 
 | UTC | Alert |
 |---|---|
-| 05:21:44 | *(no alert)* first sign: altitude 32,850 → 31,600 → 33,475 ft in 6 s, ground speed 440 → 380 kt. Purple in the plots |
-| 05:22:04 | VERTICAL_RATE: descent -19,456 ft/min (-26°) at 32,325 ft |
-| 05:31:28 | EMERGENCY: squawk 7700, after 9 min without positions (back at 15,000 ft) |
+| 05:21:44 | *(no alert)* first sign: altitude 10,013 → 9,632 → 10,203 m in 6 s, ground speed 815 → 704 km/h. Purple in the plots |
+| 05:22:04 | VERTICAL_RATE: descent -99 m/s (-26°) at 9,853 m |
+| 05:31:28 | EMERGENCY: squawk 7700, after 9 min without positions (back at 4,572 m) |
 | 05:35:20 | EMERGENCY: squawk 7500 (hijack) |
-| 05:42:42 | COURSE_CHANGE: track 298° → 213° in 127 s at 15,000 ft |
-| 05:45:30 | OFF_COURSE: heading 104°, 169° away from TLV, 141 nm out and opening |
-| 05:50:50 | OFF_COURSE: heading 129°, 167 nm out and opening |
-| 05:53:33 | LOST_CONTACT: last seen at 15,025 ft, 30.7539 N 38.0642 E, ~155 nm north of Tabuk |
+| 05:42:42 | COURSE_CHANGE: track 298° → 213° in 127 s at 4,572 m |
+| 05:45:30 | OFF_COURSE: heading 104°, 169° away from TLV, 261 km out and opening |
+| 05:50:50 | OFF_COURSE: heading 129°, 309 km out and opening |
+| 05:53:33 | LOST_CONTACT: last seen at 4,580 m, 30.7539 N 38.0642 E, ~287 km north of Tabuk |
 
 The landing at Tabuk is not in the recorded data, hence LOST_CONTACT rather than DIVERSION.
-The recorded dive is 33,475 → 27,950 ft in 24 s; then 8.5 min without positions until 15,025 ft.
-There is also a 27-min gap at FL340 over Saudi Arabia (04:48-05:15 UTC) and a one-point altitude
+The recorded dive is 10,203 → 8,519 m in 24 s; then 8.5 min without positions until 4,580 m.
+There is also a 27-min gap at 10,400 m over Saudi Arabia (04:48-05:15 UTC) and a one-point altitude
 glitch at 03:28 UTC (purple, harmless).
 
 Regenerate (the alerts file from the replay, then the plots):
@@ -42,5 +47,5 @@ fx = replay.load(); alerts, *_ = replay.run(fx)
 open('examples/fz1073_alerts.jsonl', 'w').writelines(
     json.dumps(a, ensure_ascii=False) + '\n' for a in alerts if a['hex'] in fx['meta']['focus'])"
 python tools/plot_alert.py --alerts examples/fz1073_alerts.jsonl --pick 5 --out examples/fz1073_3d.html
-python tools/plot_alert.py --alerts examples/fz1073_alerts.jsonl --pick 5 --map --out examples/fz1073_map.html
+python tools/plot_alert.py --alerts examples/fz1073_alerts.jsonl --pick 5 --map --out docs/fz1073_map.html
 ```

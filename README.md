@@ -215,7 +215,10 @@ flight number and callsign (`LY347/ELY347`), airline, route and alert, so any of
   the first view is at least 100 km across and 0-40,000 ft, so a short track looks short.
 - **`--map`:** the same over a street map (deck.gl; Esri World Street Map tiles, `--tiles` for
   another `{z}/{x}/{y}` URL; tile.openstreetmap.org blocks pages opened from a file). Drag to pan,
-  right-drag or Ctrl+drag to tilt and rotate, scroll to zoom; altitude exaggeration slider.
+  right-drag or Ctrl+drag to tilt and rotate, scroll to zoom toward the middle of the view at the
+  alerts' height (the track is drawn high above the map, so zooming toward the ground would fly
+  under it); "? how to move" explains it all, and buttons fly to the alerts or the first sign.
+  Altitude exaggeration slider.
 
 Both show the track coloured by time, ADS-B and MLAT positions, the ground track, nearby airports
 (and Israel's outline in 3D), position jumps (orange, the monitor's `POSITION_JUMP` rules), altitude
@@ -225,7 +228,9 @@ grey) and every alert on the flight (red, labelled, with the squawk code). Butto
 alerts or back to the whole flight; the map has a "? how to move" help and a top view. Below: altitude and ground
 speed over time, alerts / jumps / steep changes / gaps marked, with buttons to zoom it to the alerts
 or to each steep change; hovering or clicking it puts a black marker on that position above.
-`examples/` has FZ1073 (30 Sep 2026) plotted both ways. By default the plot covers the alert's flight leg (between ground stops or 30 min
+Times are Israel time with a switch to UTC or the viewer's zone; units are metric (m, km, km/h,
+m/s), including the alert texts. Credits (map tiles, flight data, route sources) are at the bottom.
+`examples/` has FZ1073 (30 Sep 2026) in 3D; its map is `docs/fz1073_map.html` (GitHub Pages). By default the plot covers the alert's flight leg (between ground stops or 30 min
 silences); `--minutes` widens it. Nothing else is stored.
 
 ## Caveats
