@@ -17,8 +17,9 @@ turning back, diversions, and flights not bound for Israel turning toward it.
 | `TURNING_BACK` / `RETURNED` | a TLV departure heads back toward TLV for 150 s while closing / lands back | 4 |
 | `VERTICAL_RATE` | flight-path angle steeper than 10 deg descending or 12 deg climbing (18 deg climbing near airports), or > 8000 ft/min | 4 |
 | `SHARP_TURN` | turn tighter than ~35 deg of bank (airliners stay below ~25-30), anywhere, also near airports | 4 |
-| `COURSE_CHANGE` | >= 70 deg in 2 min above 12000 ft - except routine turns near airports and at learned route corners | 4 |
-| `POSITION_JUMP` | impossible jump (GPS spoofing or bad data) | 3 |
+| `COURSE_CHANGE` | >= 70 deg in 2 min above 12000 ft, new track held 2 min - not S-turns, holding patterns / orbits, routine turns near airports or learned route corners | 4 |
+| `HOLDING` | an airliner circling over 30 min (again every 30 min) instead of landing; military and non-airline traffic not reported | 4 |
+| `POSITION_JUMP` | impossible jump, reappearing too far after a gap, or one position off the track and back (GPS spoofing or bad data) | 3 |
 | `CONTACT_RESTORED` | an alerted loss of contact ended | 2 |
 
 Any alert makes the flight followed and "hot" for `--hot-minutes` (20): it is then queried every
@@ -198,15 +199,30 @@ online, so board rows are derived from the traces plus `--board` rows given by h
 ## Plot an alert
 
 ```bash
-python tools/plot_alert.py            # lists alerts.jsonl newest first; pick one
-python tools/plot_alert.py --pick 1 --minutes 30
+python tools/plot_alert.py                       # all alerts, newest first, in a pager (q quits); pick one
+python tools/plot_alert.py --filter LY347        # only rows containing LY347 (any case; several words: all)
+python tools/plot_alert.py --filter RETURNED Zurich
+python tools/plot_alert.py --pick 1 --minutes 120   # 2 h around the alert, across landings and gaps
+python tools/plot_alert.py --pick 1 --map        # over a street map instead of km axes
 ```
 
-Fetches the aircraft's full-rate trace (adsb.lol for the last day, else the ADS-B Exchange
-history of that UTC day) and writes `tmp_plot.html` (git-ignored): a rotatable 3D track
-coloured by time, ADS-B and MLAT positions, the ground track, Israel's outline and nearby
-airports. Every alert on that flight is marked and labelled, and the stretch that set it off is
-drawn in red. Below it is altitude and ground speed over time. Nothing else is stored.
+Fetches the aircraft's full-rate trace (adsb.lol for the last day, plus its "recent" trace for the
+latest minutes, else the ADS-B Exchange history of that UTC day) and writes `tmp_plot.html`
+(git-ignored). List numbers are those of the full list, also when filtered; the row shows the
+flight number and callsign (`LY347/ELY347`), airline, route and alert, so any of them can be filtered.
+
+- **3D (default):** rotatable plotly chart in km east / north of TLV (`--airport`), altitude in ft;
+  the first view is at least 100 km across and 0-40,000 ft, so a short track looks short.
+- **`--map`:** the same over a street map (deck.gl; Esri World Street Map tiles, `--tiles` for
+  another `{z}/{x}/{y}` URL; tile.openstreetmap.org blocks pages opened from a file). Drag to pan,
+  right-drag or Ctrl+drag to tilt and rotate, scroll to zoom; altitude exaggeration slider.
+
+Both show the track coloured by time, ADS-B and MLAT positions, the ground track, Israel's outline,
+nearby airports, position jumps (orange, the monitor's `POSITION_JUMP` rules), stretches without
+positions (dashed grey) and every alert on the flight (red, labelled). Below: altitude and ground
+speed over time, alerts / jumps / gaps marked; hovering or clicking it puts a black marker on that
+position above. By default the plot covers the alert's flight leg (between ground stops or 30 min
+silences); `--minutes` widens it. Nothing else is stored.
 
 ## Caveats
 
@@ -215,7 +231,8 @@ drawn in red. Below it is altitude and ground speed over time. Nothing else is s
   alerts here will be interference, not a real loss. Real ATC radar contact is not visible to you.
 - Coverage depends on volunteer receivers; low altitudes and areas over neighbouring countries
   are patchy. Tune `--lost-min-alt` and `--edge-margin` accordingly.
-- Holding patterns can trigger `COURSE_CHANGE`; raise `--turn-min-alt` or `--turn` if noisy.
+- A holding pattern with legs of 2 min or more can still give one `COURSE_CHANGE` on entry
+  (`--turn-confirm` sets how long the new track must hold).
 
 ## Hosting (GitHub Actions cron is ≥5 min and often delayed)
 

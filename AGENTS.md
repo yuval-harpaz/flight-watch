@@ -85,6 +85,10 @@ then the callsign's route in the VRS standing data, then a heuristic near the ai
 - **DIVERSION**: a TLV arrival on the ground far from TLV, **or** going silent while
   descending low and far away (low-altitude coverage is poor, so the landing is often
   never seen). **RETURNED**: a TLV departure landing back at TLV after leaving.
+  A landing (on the ground at taxi speed) ends the leg: `was_airborne`, `max_dist` and the
+  learned route direction reset. Before this, an arrival parked overnight and given its morning
+  departure's callsign (LOT7MA -> LOT4CG) was RETURNED: 70 false alarms in one night (6 Oct 2026),
+  and an aircraft on the ground repeated DIVERSION / RETURNED after every cooldown.
 - **VERTICAL_RATE**: judged as a **flight-path angle** (rate vs ground speed), because a
   rate threshold flagged every normal jet climb-out (+4000-4800 ft/min at 8000 ft) and
   speed-brake descent. Limits: descent 10 deg everywhere (normal max seen ~8, glide slope 3),
@@ -99,7 +103,17 @@ then the callsign's route in the VRS standing data, then a heuristic near the ai
   reported within ~35 nm of a regional airport below FL250 (all 10 replay false alarms were
   departure/arrival routings at Beirut, Amman, Damascus, TLV) nor at learned route corners
   (`turn_zones.json`: cells where >= 4 aircraft turned onto that heading, e.g. detours around
-  closed airspace) - unless the flight is already hot. Holding patterns can still trigger it.
+  closed airspace) - unless the flight is already hot. Otherwise a reversal is reported only once
+  the new track has held `--turn-confirm` (120 s): 4 of the 5 overnight alerts on 6 Oct 2026 were an
+  S-turn (6H254, 148 -> 76 -> 175 deg, vectoring) and holding / delay orbits of three TLV arrivals at
+  02:01-02:06 (BBG251 flew one 360). Dropped: turning back near the old course (also compared with
+  4 min ago, and with the pre-manoeuvre course for 10 min after a drop) and >= 300 deg one way
+  (circling). Circling is never a reversal, also when hot. OFF_COURSE / TURNING_BACK wait while a
+  turn is pending and skip circling (the outbound half of an orbit flies away from TLV), unless hot.
+  Cost: a real reversal on a flight that has not alerted yet is reported ~2 min later.
+- **HOLDING**: an airliner (airline callsign, not military) circling - >= 330 deg of turn one way
+  in 12 min within 25 nm - for `--holding-minutes` (30), again after each further 30 min. Military
+  aircraft and non-airline traffic orbit as their job (tankers, patrols, training) and are silent.
 - **SHARP_TURN**: implied bank angle from the turn rate and speed >= `--max-bank` (35 deg),
   everywhere including near airports. Airliners stay below ~25-30; FZ1073's U-turn was a
   normal-rate turn (~25 deg), which is why reversals and sharpness are separate alerts.
@@ -125,9 +139,16 @@ then the callsign's route in the VRS standing data, then a heuristic near the ai
   every cycle instead of every `--follow-interval`, every anomaly reported (no terminal or
   route-corner exemptions), and two different anomalies within that time are sent at
   priority 5 with `[also: ...]`.
-- **POSITION_JUMP**: implausible speed between consecutive positions **within 120 s**.
-  Longer gaps are just movement while unheard. The Eastern Mediterranean has heavy GNSS
-  jamming and spoofing, which causes jumps, fake turns and position dropouts.
+- **POSITION_JUMP**: implausible speed between consecutive positions **within 120 s**
+  (`--max-speed` 1200 kt, loose because of position noise). After a longer gap the plane may
+  just have moved while unheard, so only an impossible *average* counts: reappearing farther than
+  `--max-gap-speed` (750 kt; airliner ground-speed record ~700) allows. Also one position off the
+  track and the next back on it (A -> B -> C needs > 750 kt, A -> C does not; >= 5 nm off).
+  Military aircraft (readsb dbFlags) keep 1200 kt for both. Seen live: THY1KG 5 Oct 2026
+  reappeared 94 nm after 408 s (833 kt) then three MLAT jumps of ~90 nm; LY5134 6 Oct reappeared
+  139 nm away after 3.4 min. The FZ1073 replay gave no new alerts with these rules. The Eastern
+  Mediterranean has heavy GNSS jamming and spoofing, which causes jumps, fake turns and position
+  dropouts.
 - Cooldowns and link dates use the **data timestamp**, not wall-clock time.
 - Any flight that alerts becomes **followed**, so its fate stays visible.
 
@@ -191,10 +212,11 @@ and fetching a cold start's ~60 files in one cycle held up the local poll for ov
   post id -> returned post refs to thread replies, log failures, and never let posting block
   the poll loop.
 
-- **Unmapped airline codes on the board.** A live run (Oct 2026) logged `3F, H4, H7, NO, U8`;
-  their flights are only caught near TLV or via route data. Candidates to verify before adding
-  to `AIRLINE_ICAO`: NO = Neos `NOS`, U8 = TUS Airways `CYF`, H4 = HiSky `HYS`, H7 = HiSky Europe
-  (`HYM`?); 3F unknown. Until then `--airline-map extra.json` works.
+- **Board airline codes missing from `AIRLINE_ICAO`** are resolved from the standing data's
+  airline list (`StandingData.airline_by_iata`). IATA codes are reused (NO = Neos and Aus-Air, about
+  a third of codes have several airlines), so the candidate with routes through TLV wins; still
+  ambiguous means unmapped. Oct 2026: 3F = FIE, H4 = HYS, H7 = HYM, NO = NOS, U8 = CYF. The list
+  disagrees with two built-in entries (9U `MLD` absent, GQ listed as `BSY` not `SEH`): unverified.
 
 ## Out of scope unless asked
 

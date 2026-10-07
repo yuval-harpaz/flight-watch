@@ -168,7 +168,7 @@ class AlertSimulation(unittest.TestCase):
     def test_course_change(self):
         mon, feed, clock, alerts = make(["--no-routes"])
         feed.local = {"738001"}
-        for i, trk in enumerate([90] * 8 + [200] * 8):
+        for i, trk in enumerate([90] * 8 + [200] * 12):  # reported once the new track held 2 min
             feed.aircraft["738001"] = airborne(33.0, 33.5 + i * 0.01, 30000, track=trk)
             step(mon, clock, 15)
         self.assertIn("COURSE_CHANGE", [a["kind"] for a in alerts])
@@ -403,6 +403,121 @@ def kinds(alerts, hexid=None):
     return [a["kind"] for a in alerts if hexid is None or a["hex"] == hexid]
 
 
+def racetrack(laps, start=(32.5, 33.8), alt=16000, gs=250):
+    """Holding pattern every 10 s: 1-min legs, 180-deg turns at 3 deg/s (4 min a lap)."""
+    tracks = []
+    for _ in range(laps):
+        for heading in (90, 270):
+            tracks += [heading] * 6 + [heading + 30 * i for i in range(1, 7)]
+    return path(*start, tracks, [alt] * len(tracks), gs=gs)
+
+
+class HoldingTests(unittest.TestCase):
+    def test_s_turn_is_not_a_course_change(self):
+        """6H254, 6 Oct 2026: 148 -> 76 -> 175 deg at FL320 approaching TLV (vectoring)."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        tracks = [148] * 8 + [148 - 6 * i for i in range(1, 13)] + [76 + 8 * i for i in range(1, 13)] + [172] * 20
+        fly(mon, feed, clock, "4a0481", path(33.8, 32.9, tracks, [32000] * len(tracks)), flight="ISR254")
+        self.assertNotIn("COURSE_CHANGE", kinds(alerts))
+
+    def test_holding_pattern_is_not_a_course_change(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "4a0482", racetrack(4), flight="ISR724")
+        self.assertEqual(kinds(alerts), [])
+
+    def test_delay_orbit_of_an_arrival_is_quiet(self):
+        """BBG251, 6 Oct 2026: a 360-deg orbit ~60 nm out, then on towards TLV (no COURSE_CHANGE,
+        no OFF_COURSE for the outbound half)."""
+        mon, feed, clock, alerts = with_board([board_row("BZ", "251", "A", local_time(Clock(), 1), "BCN")])
+        tracks = ([143] * 8 + [143 + 12 * i for i in range(1, 15)] + [313] * 7    # out, away from TLV (70 s)
+                  + [313 + 12 * i for i in range(1, 15)] + [120] * 20)                # and back in
+        fly(mon, feed, clock, "4d2251", path(32.9, 33.5, tracks, [14000] * len(tracks), gs=300),
+            flight="BBG251", r="9H-SHO", t="B738")
+        self.assertEqual(kinds(alerts), [])
+
+    def test_airliner_holding_unusually_long(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "4a0483", racetrack(17), flight="ISR724")  # 68 min
+        holds = [a["message"] for a in alerts if a["kind"] == "HOLDING"]
+        self.assertEqual(len(holds), 2, holds)  # after 30 and 60 min
+        self.assertRegex(holds[0], r"circling for 3\d min")
+        self.assertNotIn("COURSE_CHANGE", kinds(alerts), "turns in a hold are never reversals, also when hot")
+
+    def test_military_and_non_airline_holding_is_their_job(self):
+        for ident in ({"flight": "SHUFL", "dbFlags": 1}, {"flight": "4XCJA"}):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            fly(mon, feed, clock, "738bed", racetrack(10), **ident)
+            self.assertNotIn("HOLDING", kinds(alerts), ident)
+
+
+class LandingTests(unittest.TestCase):
+    TLV = (32.0114, 34.8867)
+
+    def on_ground(self, mon, feed, clock, flight, minutes, step_s=60):
+        for _ in range(int(minutes * 60 / step_s)):
+            fly(mon, feed, clock, "48af08", [dict(lat=self.TLV[0], lon=self.TLV[1], alt_baro="ground", gs=0,
+                                                  track=90)], dt=step_s, flight=flight, r="SP-LVI", t="B38M")
+
+    def test_departure_landing_back_alerts_once(self):
+        mon, feed, clock, alerts = with_board([board_row("LO", "4", "D", local_time(Clock(), 0), "WAW")])
+        self.on_ground(mon, feed, clock, "LOT4", 3)
+        out = path(*self.TLV, [270] * 40 + [90] * 40, [20000] * 80)  # 50 nm out and back
+        fly(mon, feed, clock, "48af08", out, flight="LOT4", r="SP-LVI", t="B38M")
+        self.on_ground(mon, feed, clock, "LOT4", 20)
+        self.assertEqual(kinds(alerts, "48af08").count("RETURNED"), 1, kinds(alerts))
+
+    def test_arrival_turning_around_as_a_departure_is_not_returned(self):
+        """LOT7MA landed at TLV; 1.5 h later the parked aircraft was LOT4CG, a departure."""
+        mon, feed, clock, alerts = with_board([board_row("LO", "7", "A", local_time(Clock(), 0), "WAW"),
+                                               board_row("LO", "4", "D", local_time(Clock(), 2), "WAW")])
+        start = fw.destination(*self.TLV, 270, 60)
+        fly(mon, feed, clock, "48af08", path(*start, [90] * 48, [20000] * 48), flight="LOT7",
+            r="SP-LVI", t="B38M")
+        self.on_ground(mon, feed, clock, "LOT7", 30)
+        self.on_ground(mon, feed, clock, "LOT4", 60)
+        self.assertNotIn("RETURNED", kinds(alerts, "48af08"))
+
+
+class GapAndDetourJumps(unittest.TestCase):
+    """POSITION_JUMP beyond short hops: reappearing too far after a gap (THY1KG, 5 Oct 2026: 94 nm
+    in 408 s, ~833 kt, over the Eastern Mediterranean) and one position off the track and back."""
+
+    def reappear(self, nm, gap=300, **kw):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        states = path(32.3, 34.0, [90] * 4, [30000] * 4)
+        fly(mon, feed, clock, "4bb1e1", states, **kw)
+        feed.local.discard("4bb1e1")
+        last = feed.aircraft.pop("4bb1e1")
+        for _ in range(gap // 10 - 1):
+            step(mon, clock)
+        lat, lon = fw.destination(last["lat"], last["lon"], 90, nm)
+        fly(mon, feed, clock, "4bb1e1", path(lat, lon, [90] * 3, [30000] * 3), **kw)
+        return [a["message"] for a in alerts if a["kind"] == "POSITION_JUMP"]
+
+    def test_reappearing_too_far_after_a_gap(self):
+        jumps = self.reappear(70)  # 70 nm in 300 s: ~840 kt average
+        self.assertEqual(len(jumps), 1, jumps)
+        self.assertIn("reappeared 70", jumps[0])
+
+    def test_reappearing_where_it_could_have_flown_is_quiet(self):
+        self.assertEqual(self.reappear(40), [])  # ~480 kt: just unheard
+
+    def test_military_jets_keep_the_short_hop_limit(self):
+        self.assertEqual(self.reappear(70, dbFlags=1), [])
+
+    def test_one_position_off_the_track_and_back(self):
+        """8 nm aside at 30 s samples: each hop ~1060 kt (under --max-speed), but via it the
+        aircraft would average ~1060 kt while the direct track is 450 kt."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        states = path(32.3, 34.0, [90] * 8, [30000] * 8, dt=30)
+        lat, lon = fw.destination(states[5]["lat"], states[5]["lon"], 0, 8)
+        states[5] = {**states[5], "lat": lat, "lon": lon}
+        fly(mon, feed, clock, "4bb1e1", states, dt=30)
+        jumps = [a["message"] for a in alerts if a["kind"] == "POSITION_JUMP"]
+        self.assertEqual(len(jumps), 1, jumps)
+        self.assertIn("off the track, then back", jumps[0])
+
+
 def board_row(callsign_iata, num, direction, when_local, other="?"):
     return {"CHOPER": callsign_iata, "CHFLTN": num, "CHAORD": direction, "CHSTOL": when_local,
             "CHPTOL": when_local, "CHLOC1": other, "CHLOC1D": other, "CHRMINE": "ON TIME"}
@@ -456,7 +571,7 @@ class TurnTests(unittest.TestCase):
 
     def test_regular_turn_is_a_course_change_not_sharp(self):
         mon, feed, clock, alerts = make(["--no-routes"])
-        tracks = [90] * 6 + [90 + 7.5 * i for i in range(1, 13)] + [180] * 4  # 90 deg in 2 min
+        tracks = [90] * 6 + [90 + 7.5 * i for i in range(1, 13)] + [180] * 16  # 90 deg in 2 min, then held
         fly(mon, feed, clock, "738001", path(33.5, 31.5, tracks, [30000] * len(tracks)))
         self.assertIn("COURSE_CHANGE", kinds(alerts))
         self.assertNotIn("SHARP_TURN", kinds(alerts))
@@ -476,7 +591,7 @@ class TurnTests(unittest.TestCase):
 
     def test_learned_route_corner_is_not_reported(self):
         import tempfile
-        tracks = [90] * 6 + [90 + 7.5 * i for i in range(1, 13)] + [180] * 4
+        tracks = [90] * 6 + [90 + 7.5 * i for i in range(1, 13)] + [180] * 16
         for out, expect in ((180, False), (0, True)):
             with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
                 json.dump({"cell": 0.5, "zones": [{"lat": 33.25, "lon": 31.75, "out": out, "n": 9}]}, f)
@@ -684,6 +799,23 @@ class StandingDataTests(unittest.TestCase):
         n = len(feed.calls)
         sd.route("WZZ3W"), sd.airport("LLBG")
         self.assertEqual(len(feed.calls), n, "files are cached")
+
+    def test_board_airline_code_resolved_by_who_flies_to_tlv(self):
+        """IATA codes are reused (NO = Neos and Aus-Air): the airline with TLV routes wins."""
+        mon, feed, clock, alerts = make(["--rate", "600", "--rate-max", "6000"], with_schedule=True)
+        feed.files = dict(ROUTE_FILES)
+        feed.files["airlines/schema-01/airlines.csv"] = (
+            "Code,Name,ICAO,IATA,PositioningFlightPattern,CharterFlightPattern\n"
+            "AUS,Aus-Air,AUS,NO,,\nNOS,Neos,NOS,NO,,\nXYZ,Nowhere Air,XYZ,Q9,,\nXYW,Elsewhere,XYW,Q9,,\n")
+        feed.files["routes/schema-01/A/AUS-all.csv"] = "Callsign,Code,Number,AirlineCode,AirportCodes\nAUS1,AUS,1,AUS,YMML-YSSY\n"
+        feed.files["routes/schema-01/N/NOS-all.csv"] = ("Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                                        "NOS1382,NOS,1382,NOS,LIMC-LLBG\n")
+        mon.schedule.load([board_row("NO", "1382", "A", local_time(clock, 2), "MXP"),
+                           board_row("Q9", "1", "A", local_time(clock, 2), "XXX")],
+                          datetime.fromtimestamp(clock(), mon.schedule.tz))
+        self.assertIn("NOS1382", mon.schedule.by_callsign)
+        self.assertEqual(mon.schedule.airline_map["NO"], "NOS")
+        self.assertNotIn("Q9", mon.schedule.airline_map, "neither candidate flies to TLV: left unmapped")
 
     def test_route_downloads_are_spread_over_cycles(self):
         """A cold start sees dozens of new callsigns; fetching all their files at once held up the

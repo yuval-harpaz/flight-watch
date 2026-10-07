@@ -14,9 +14,12 @@ Three data layers, polled every --interval seconds:
 Alerts:
   LOST_CONTACT      airborne aircraft silent too long (separate limit for remote flights)
   VERTICAL_RATE     |climb/descent| above --vrate ft/min (confirmed by altitude history)
-  COURSE_CHANGE     track change above --turn degrees within --turn-window seconds
+  COURSE_CHANGE     track change above --turn degrees within --turn-window seconds, new track
+                    held --turn-confirm seconds (S-turns and holding patterns are not reversals)
+  HOLDING           an airliner circling longer than --holding-minutes (not military)
   EMERGENCY         squawk 7500/7600/7700 or an ADS-B emergency status
-  POSITION_JUMP     physically impossible position jump (typical of GPS spoofing)
+  POSITION_JUMP     physically impossible position jump (typical of GPS spoofing), reappearing
+                    too far away after a gap, or one position off the track and back
   DIVERSION         a TLV arrival lands somewhere else (incl. return to origin)
   RETURNED          a TLV departure lands back at TLV after leaving
 """
@@ -110,11 +113,11 @@ CONFIRMED = {"ARR", "DEP", "VIA"}
 LIGHT_CATEGORIES = {"A1", "A7", "B1", "B2", "B3", "B4", "B6"}
 PRIORITY = {"EMERGENCY": 5, "LOST_CONTACT": 5, "DIVERSION": 5, "TOWARD_ISRAEL": 5, "OFF_COURSE": 5,
             "RETURNED": 4, "TURNING_BACK": 4, "VERTICAL_RATE": 4, "SHARP_TURN": 4,
-            "COURSE_CHANGE": 4, "POSITION_JUMP": 3, "CONTACT_RESTORED": 2}
+            "COURSE_CHANGE": 4, "HOLDING": 4, "POSITION_JUMP": 3, "CONTACT_RESTORED": 2}
 # kinds that describe abnormal flying; two different ones on one flight within --hot-minutes
 # are reported as a pattern (priority 5)
 ANOMALIES = {"EMERGENCY", "LOST_CONTACT", "DIVERSION", "TOWARD_ISRAEL", "OFF_COURSE", "TURNING_BACK",
-             "VERTICAL_RATE", "SHARP_TURN", "COURSE_CHANGE", "POSITION_JUMP"}
+             "VERTICAL_RATE", "SHARP_TURN", "COURSE_CHANGE", "HOLDING", "POSITION_JUMP"}
 
 # Airports in and around the watch area: terminal areas (normal turns, steep-but-normal climbs),
 # "probably landing there" for aircraft going silent low nearby. IATA -> (lat, lon, Israeli)
@@ -449,6 +452,30 @@ class StandingData:
         row = hit[1].get(code) if hit and code else None
         return (row[1], row[3]) if row and len(row) > 3 and row[1] else None
 
+    def airline_by_iata(self, iata: str, airport: str) -> str | None:
+        """ICAO code of the airline behind a board's IATA code. IATA codes are reused (NO is Neos
+        and Aus-Air), so with several candidates the one with routes through `airport` wins.
+        None when unknown or still ambiguous. Raises Throttled / RequestException (try later)."""
+        if self.preload is not None:
+            return None
+        cands = sorted({r[2] for r in self._file(self.AIRLINES).values()
+                        if len(r) > 3 and r[3] == iata and re.fullmatch(r"[A-Z]{3}", r[2] or "")})
+        if len(cands) <= 1:
+            return cands[0] if cands else None
+        serving = [c for c in cands if self.serves(c, airport)]
+        return serving[0] if len(serving) == 1 else None
+
+    def serves(self, code: str, airport: str) -> bool:
+        """Any route of airline `code` through `airport` (ICAO)? Big airlines' routes are split
+        by the flight number's first digit."""
+        for name in [f"{code}-all.csv"] + [f"{code}-{d}.csv" for d in "123456789"]:
+            rows = self._file(f"routes/schema-01/{code[0]}/{name}")
+            if any(airport in (r[4] if len(r) > 4 else "").split("-") for r in rows.values()):
+                return True
+            if name.endswith("-all.csv") and rows:
+                return False  # not split: that was all of it
+        return False
+
     def airport_info(self, icao: str) -> tuple[str, str] | None:
         """(IATA, city) from files already loaded - never fetches (used while alerting)."""
         if self.preload is not None:
@@ -523,6 +550,11 @@ class Track:
     israeli: bool = False    # seen low at an Israeli airport (so it is Israel traffic)
     route_dir: int = 0       # +1 flying the route as listed, -1 the reverse leg, 0 not known yet
     military: bool = False   # readsb aircraft database flag (dbFlags bit 0)
+    pending_turn: dict | None = None  # a reversal waiting to show whether it is one (see check_turn)
+    turn_ref: tuple | None = None     # (track before a manoeuvre found not to be a reversal, until)
+    hold_since: float = 0.0  # data time the current circling (holding pattern / orbit) began
+    hold_last: float = 0.0   # last data time it was circling
+    hold_alerted: int = 0    # --holding-minutes periods of this hold already alerted
 
     @property
     def last(self) -> Sample | None:
@@ -544,6 +576,30 @@ class Track:
             if s.t <= target:
                 return s if self.samples[-1].t - s.t <= seconds * 1.5 else None
         return None
+
+    def turned(self, since: float) -> float:
+        """Signed track change summed over the samples since `since` (+ right, - left): circling
+        adds up, S-turns cancel out."""
+        total, prev = 0.0, None
+        for s in self.samples:
+            if s.t < since or s.track is None:
+                continue
+            if prev is not None:
+                total += (s.track - prev + 540) % 360 - 180
+            prev = s.track
+        return total
+
+    def circling(self, window: float = 720) -> float | None:
+        """Radius (nm) of the area it has circled in over the last `window` s - a holding pattern
+        or an orbit: >= 330 deg of turn one way, staying within 25 nm. None when not circling."""
+        s = self.last
+        recent = [x for x in self.samples if x.t >= s.t - window and not x.on_ground]
+        if len(recent) < 6 or recent[-1].t - recent[0].t < 240 or abs(self.turned(s.t - window)) < 330:
+            return None
+        lat = sum(x.lat for x in recent) / len(recent)
+        lon = sum(x.lon for x in recent) / len(recent)
+        radius = max(haversine_nm(lat, lon, x.lat, x.lon) for x in recent)
+        return radius if radius <= 25 else None
 
     def computed_vrate(self, span: float = 30) -> float | None:
         now, old = self.last, self.sample_ago(span)
@@ -580,6 +636,7 @@ class Schedule:
         self.refresh, self.window = refresh, timedelta(hours=window_h)
         self.by_callsign: dict[str, SchedFlight] = {}
         self.flights: list[SchedFlight] = []
+        self.resolve = None  # IATA airline code -> ICAO callsign prefix, for codes not in airline_map
         self.fetched = -1e9
         self.tz = ZoneInfo("Asia/Jerusalem")
 
@@ -634,6 +691,11 @@ class Schedule:
                 iata = str(row.get("CHOPER") or "").strip().upper()
                 num = str(row.get("CHFLTN") or "").strip().lstrip("0") or "0"
                 icao = self.airline_map.get(iata) or (iata if len(iata) == 3 else None)
+                if not icao and iata and iata not in unmapped and self.resolve:
+                    icao = self.resolve(iata)
+                    if icao:
+                        self.airline_map[iata] = icao
+                        log.info("airline %s -> %s (from route data: the one flying to TLV)", iata, icao)
                 if icao:
                     numbers.append((iata, num, icao))
                 else:
@@ -710,6 +772,7 @@ class Announcer:
                  "CONTACT_RESTORED": ("\U0001f4e1", "Contact restored"),
                  "SHARP_TURN": ("\U0001f504", "Sharp turn"),
                  "COURSE_CHANGE": ("\U0001f504", "Course reversal"),
+                 "HOLDING": ("⏳", "Holding unusually long"),
                  "POSITION_JUMP": ("\U0001f6f0️", "Position jump (GPS spoofing?)")}
 
     def __init__(self, args, out=None):
@@ -770,7 +833,7 @@ class Announcer:
     NAMES = {"EMERGENCY": "emergency", "LOST_CONTACT": "lost contact", "DIVERSION": "diversion",
              "TOWARD_ISRAEL": "turn toward Israel", "OFF_COURSE": "off course", "TURNING_BACK": "turning back",
              "VERTICAL_RATE": "steep climb/descent", "SHARP_TURN": "sharp turn",
-             "COURSE_CHANGE": "course reversal", "POSITION_JUMP": "position jump"}
+             "COURSE_CHANGE": "course reversal", "HOLDING": "long holding", "POSITION_JUMP": "position jump"}
     DETAILS = {  # kind -> (pattern in the alert message, compact wording)
         "LOST_CONTACT": (r"silent (\d+)s.*?track (\S+) deg", "silent {0} s, last track {1}°"),
         "VERTICAL_RATE": (r"([+-]\d+) ft/min, (-?[\d.]+) deg", "{0} ft/min ({1}°)"),
@@ -914,6 +977,8 @@ class Monitor:
         self.route_failures = 0
         self.routes_off = args.no_routes
         self.standing = None if args.no_routes else StandingData(http, args.standing_data)
+        if schedule and self.standing:
+            schedule.resolve = self.resolve_airline
         self.last_ok: float | None = None
         self.last_count = 0
         self.stats = {}
@@ -1105,6 +1170,13 @@ class Monitor:
                 return
             self.routes[cs] = (now, "-".join(codes) if codes else None)
 
+    def resolve_airline(self, iata: str) -> str | None:
+        try:
+            return self.standing.airline_by_iata(iata, self.args.icao)
+        except requests.RequestException as e:  # incl. Throttled: tried again at the next board refresh
+            log.debug("airline %s not resolved: %s", iata, e)
+            return None
+
     def airline_name(self, t: Track) -> str | None:
         info = self.standing.airline(t.callsign[:3]) if self.standing and airline_like(t) else None
         return info[0] if info else None
@@ -1245,13 +1317,19 @@ class Monitor:
             self.check_vrate(t)
             self.check_turn(t)
             self.check_sharp_turn(t)
+            self.check_holding(t)
             self.check_jump(t, prev)
             self.check_landing(t, kind, d)
             self.check_destination(t, kind, d)
             self.check_protected(t, kind, route)
             if not s.on_ground:
                 t.was_airborne = True
-            t.max_dist = max(t.max_dist, d)
+                t.max_dist = max(t.max_dist, d)
+            elif t.was_airborne and (s.gs is None or s.gs < 50):
+                # Landed (at taxi speed, so not a stray "ground" reading in flight): the leg is
+                # over. Otherwise its next flight inherits it - an arrival turning around as a
+                # departure was reported as RETURNED (LOT7MA -> LOT4CG at TLV, 6 Oct 2026).
+                t.was_airborne, t.max_dist, t.route_dir = False, 0.0, 0
 
         # Don't declare mass "lost contact" after our own outage or a feed glitch.
         gap_ok = self.last_ok is not None and server_now - self.last_ok < 3 * a.interval + 15
@@ -1312,8 +1390,11 @@ class Monitor:
         """Large course change (e.g. a U-turn). Routine turns are skipped: in terminal areas and at
         learned route corners (--turn-zones). A flight that already alerted is always reported."""
         a, s = self.args, t.last
-        if (s.on_ground or s.track is None or (s.alt or 0) < a.turn_min_alt
-                or self.dist(s) < a.turn_ignore_radius):
+        if s.on_ground or s.track is None:
+            return
+        if t.pending_turn:
+            self.confirm_turn(t)
+        if ((s.alt or 0) < a.turn_min_alt or self.dist(s) < a.turn_ignore_radius or t.pending_turn):
             return
         old = t.sample_ago(a.turn_window)
         if not old or old.track is None:
@@ -1321,14 +1402,68 @@ class Monitor:
         d = heading_diff(s.track, old.track)
         if d < a.turn:
             return
-        if not self.hot(t):
-            apt, ad = nearest_airport(s.lat, s.lon)
-            if ad <= a.terminal_radius + 5 and s.alt < 25000:
-                return  # departure / arrival routing
-            if self.zones.expected(s.lat, s.lon, s.track):
-                return  # route corner seen on many flights
-        self.alert(t, "COURSE_CHANGE", f"track {old.track:.0f} -> {s.track:.0f} deg "
-                   f"({d:.0f} deg in {s.t - old.t:.0f}s) at {s.alt} ft")
+        msg = f"track {old.track:.0f} -> {s.track:.0f} deg ({d:.0f} deg in {s.t - old.t:.0f}s) at {s.alt} ft"
+        if t.circling():
+            return  # holding pattern / orbit, also when hot: check_holding reports it if unusually long
+        if self.hot(t):
+            self.alert(t, "COURSE_CHANGE", msg)
+            return
+        apt, ad = nearest_airport(s.lat, s.lon)
+        if ad <= a.terminal_radius + 5 and s.alt < 25000:
+            return  # departure / arrival routing
+        if self.zones.expected(s.lat, s.lon, s.track):
+            return  # route corner seen on many flights
+        before = t.sample_ago(2 * a.turn_window)
+        if before and before.track is not None and heading_diff(s.track, before.track) < a.turn:
+            return  # back near the course it had before: the second half of an S-turn
+        if t.turn_ref and s.t < t.turn_ref[1] and heading_diff(s.track, t.turn_ref[0]) < a.turn:
+            return  # rolling out of an orbit / S-turn near the course it had before it (BBG251)
+        # Not yet: S-turns (vectoring) and the first half of a holding pattern look the same
+        # as a reversal for a minute or two (6 Oct 2026: 4 of 5 alerts overnight).
+        t.pending_turn = {"t": s.t, "old_t": old.t, "from": old.track, "msg": msg}
+
+    def confirm_turn(self, t: Track) -> None:
+        """A reversal is reported once the new heading has held for --turn-confirm s; dropped if it
+        turns back (S-turn) or keeps circling (holding). A flight that alerted meanwhile: at once."""
+        a, s, p = self.args, t.last, t.pending_turn
+        held = [x for x in t.samples if x.t >= s.t - a.turn_confirm and x.track is not None]
+        if self.hot(t):
+            t.pending_turn = None
+            self.alert(t, "COURSE_CHANGE", p["msg"])
+        elif abs(t.turned(p["old_t"])) >= 300 or t.circling():
+            t.pending_turn, t.turn_ref = None, (p["from"], s.t + 600)
+            log.info("%s circling, not a reversal (%s)", t.label(), p["msg"])
+        elif heading_diff(s.track, p["from"]) < a.turn:
+            t.pending_turn, t.turn_ref = None, (p["from"], s.t + 600)
+            log.debug("%s turned back, not a reversal (%s)", t.label(), p["msg"])
+        elif (s.t - p["t"] >= a.turn_confirm and held and held[0].t <= s.t - a.turn_confirm * 0.8
+              and all(heading_diff(x.track, s.track) <= 20 for x in held)):
+            t.pending_turn = None
+            self.alert(t, "COURSE_CHANGE", f"{p['msg']}; new track {s.track:.0f} held {a.turn_confirm:.0f}s")
+        elif s.t - p["t"] > 600:
+            t.pending_turn = None  # neither: no clear reversal
+
+    def check_holding(self, t: Track) -> None:
+        """An airliner circling (holding pattern / orbit) for unusually long instead of landing:
+        reported after --holding-minutes, and again after each further period. Military aircraft
+        and non-airline traffic (training, patrols, survey) circle as their job: not reported."""
+        a, s = self.args, t.last
+        if s.on_ground or t.military or not airline_like(t):
+            return
+        radius = t.circling()
+        if radius is None:
+            if t.hold_since and s.t - t.hold_last > 300:
+                t.hold_since, t.hold_alerted = 0.0, 0
+            return
+        if not t.hold_since:  # began about when the circling window did
+            t.hold_since = min(x.t for x in t.samples if x.t >= s.t - 720)
+        t.hold_last = s.t
+        minutes = (s.t - t.hold_since) / 60
+        periods = int(minutes // a.holding_minutes)
+        if periods > t.hold_alerted:
+            t.hold_alerted = periods
+            self.alert(t, "HOLDING", f"circling for {minutes:.0f} min within ~{radius:.0f} nm at {s.alt} ft "
+                       f"({self.dist(s):.0f} nm from {a.airport})", severity=minutes, force=True)
 
     def check_sharp_turn(self, t: Track) -> None:
         """Turn tighter than airliners fly (implied bank angle), anywhere - also near airports."""
@@ -1358,12 +1493,29 @@ class Monitor:
             return
         dt = s.t - prev.t
         d = haversine_nm(prev.lat, prev.lon, s.lat, s.lon)
-        if dt <= 0 or dt > 120 or d < 2:  # long gaps: it just moved while unheard
+        if dt <= 0 or d < 2:
             return
         kt = d / (dt / 3600)
-        if kt > self.args.max_speed:
+        # Over a long gap position noise is negligible, so the limit is what an aircraft can
+        # average (airliner ground-speed record ~700 kt); military jets keep the looser limit.
+        gap_limit = self.args.max_speed if t.military else self.args.max_gap_speed
+        if dt <= 120 and kt > self.args.max_speed:
             self.alert(t, "POSITION_JUMP", f"{d:.1f} nm in {dt:.0f}s (~{kt:.0f} kt) - "
                        "possible GPS spoofing or bad data")
+        elif dt > 120 and kt > gap_limit:  # shorter gaps: noise; a plausible distance: just unheard
+            self.alert(t, "POSITION_JUMP", f"reappeared {d:.1f} nm away after {dt:.0f}s without "
+                       f"position (~{kt:.0f} kt average) - possible GPS spoofing or bad data")
+        elif len(t.samples) >= 3 and t.samples[-2] is prev:
+            # one position off the track and the next back on it: A -> B -> C would need an
+            # impossible speed, A -> C directly is ordinary (spoofing / MLAT outlier)
+            a, b = t.samples[-3], prev
+            span = s.t - a.t
+            ab, ac = haversine_nm(a.lat, a.lon, b.lat, b.lon), haversine_nm(a.lat, a.lon, s.lat, s.lon)
+            if span > 0 and min(ab, d) >= 5 and (ab + d) / (span / 3600) > gap_limit \
+                    and ac / (span / 3600) <= gap_limit:
+                self.alert(t, "POSITION_JUMP", f"one position {min(ab, d):.1f} nm off the track, then back "
+                           f"({ab + d:.0f} nm in {span:.0f}s via it, ~{(ab + d) / (span / 3600):.0f} kt) - "
+                           "possible GPS spoofing or bad data")
 
     def check_landing(self, t: Track, kind: str, d: float) -> None:
         s = t.last
@@ -1384,6 +1536,8 @@ class Monitor:
         The deviation must hold over --course-hold seconds while the distance opens (arrival) or
         closes (departure); route bends on the way (e.g. via Saudi Arabia and Jordan) stay below it."""
         a, s = self.args, t.last
+        if not self.hot(t) and (t.pending_turn or t.circling()):
+            return  # a turn not yet known to be a reversal, or a holding pattern / orbit (BBG251)
         if kind not in ("ARR", "DEP"):
             return self.check_route_course(t)
         if s.on_ground or s.track is None or (s.alt or 0) < 5000 or d < a.off_course_min_dist:
@@ -1672,9 +1826,18 @@ def parse_args(argv=None):
     g.add_argument("--edge-margin", type=float, default=20, help="nm inside radius edge to ignore")
     g.add_argument("--turn", type=float, default=70, help="course change alert, degrees")
     g.add_argument("--turn-window", type=float, default=120, help="seconds for course change")
+    g.add_argument("--turn-confirm", type=float, default=120,
+                   help="a course change is reported once the new track has held this long (s); "
+                        "S-turns and holding patterns are not (flights already alerted: at once)")
+    g.add_argument("--holding-minutes", type=float, default=30,
+                   help="HOLDING: an airliner circling this long (again after each further period); "
+                        "military and non-airline traffic are not reported")
     g.add_argument("--turn-min-alt", type=int, default=12000, help="ignore turns below this ft")
     g.add_argument("--turn-ignore-radius", type=float, default=25, help="nm around airport to ignore")
     g.add_argument("--max-speed", type=float, default=1200, help="kt; faster jumps are flagged")
+    g.add_argument("--max-gap-speed", type=float, default=750,
+                   help="kt; reappearing after > 120 s without position farther than this average speed "
+                        "allows, or one position off the track and back, is a POSITION_JUMP")
     g.add_argument("--turn-zones", default=os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                          "turn_zones.json"),
                    help="learned route corners where large turns are routine ('' to disable)")
