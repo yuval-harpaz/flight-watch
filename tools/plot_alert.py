@@ -189,6 +189,37 @@ def jumps(air: list[dict], max_speed: float, gap_speed: float) -> dict[int, str]
     return out
 
 
+STEEP = 8000     # ft/min: altitude changing faster than this between positions (flight_watch --vrate)
+STEEP_FT = 300   # ...by at least this much (25-ft steps a fraction of a second apart are not)
+PURPLE = [155, 48, 217]
+
+
+def steep(air: list[dict]) -> tuple[set, list[dict]]:
+    """Altitude changing faster than airliners fly (a wobble, a dive, a glitch): the hops (index of
+    their end point) and clusters of them (hops <= 10 s apart) with a short description."""
+    hops = set()
+    for i in range(1, len(air)):
+        dt, dz = air[i]["t"] - air[i - 1]["t"], air[i]["alt"] - air[i - 1]["alt"]
+        if 0 < dt <= GAP and abs(dz) >= STEEP_FT and abs(dz) / dt * 60 > STEEP:
+            hops.add(i)
+    clusters = []
+    for i in sorted(hops):
+        if clusters and air[i - 1]["t"] - air[clusters[-1]["end"]]["t"] <= 10:
+            clusters[-1]["end"] = i
+        else:
+            clusters.append({"start": i - 1, "end": i})
+    for c in clusters:
+        alts = [air[k]["alt"] for k in range(c["start"], c["end"] + 1)]
+        turns = [alts[0]] + [b for a, b, d in zip(alts, alts[1:], alts[2:]) if (b - a) * (d - b) < 0] + [alts[-1]]
+        rate = max(abs(air[k]["alt"] - air[k - 1]["alt"]) / max(air[k]["t"] - air[k - 1]["t"], 0.1) * 60
+                   for k in range(c["start"] + 1, c["end"] + 1) if k in hops)
+        dt = air[c["end"]]["t"] - air[c["start"]]["t"]
+        c["t"] = air[c["start"]]["t"]
+        c["text"] = (f"altitude {' → '.join(f'{a:,}' for a in turns)} ft in {dt:.0f} s "
+                     f"(up to {rate:,.0f} ft/min) at {local(c['t'])}")
+    return hops, clusters
+
+
 def hover(p: dict) -> str:
     alt = "ground" if p["ground"] else f"{p['alt']} ft" if p["alt"] is not None else "alt ?"
     parts = [f"{local(p['t'])} {local(p['t'], '%Z')} ({datetime.fromtimestamp(p['t'], timezone.utc):%H:%M:%SZ})",
@@ -239,7 +270,8 @@ def build(rec: dict, alerts: list[dict], pts: list[dict], source: str, max_speed
         a["_x"], a["_y"] = km(a["lat"], a["lon"])
         alt = a.get("alt")
         a["_alt"] = alt if isinstance(alt, (int, float)) else min(air, key=lambda p: abs(p["t"] - epoch(a["time"])))["alt"]
-        a["_label"] = f"{a['kind']} {local(epoch(a['time']), '%H:%M')}"
+        code = re.search(r"squawk (\d{4})", a["message"]) if a["kind"] == "EMERGENCY" else None
+        a["_label"] = f"{a['kind']}{' ' + code.group(1) if code else ''} {local(epoch(a['time']), '%H:%M')}"
     # the first view: everything incl. the alert positions, at least 100 km across, 0-40,000 ft
     ax, ay = [p["x"] for p in air] + [a["_x"] for a in mine], [p["y"] for p in air] + [a["_y"] for a in mine]
     span = max(100.0, 1.1 * max(max(ax) - min(ax), max(ay) - min(ay)))
@@ -247,10 +279,29 @@ def build(rec: dict, alerts: list[dict], pts: list[dict], source: str, max_speed
     xr, yr = [cx - span / 2, cx + span / 2], [cy - span / 2, cy + span / 2]
     ztop = max(40000, max(p["alt"] for p in air) * 1.05)
 
+    vert, signs = steep(air)
+    first_alert = min(epoch(a["time"]) for a in mine)
+    early = [c for c in signs if first_alert - 600 <= c["t"] < first_alert]
+    for c in signs:  # the earliest steep change in the 10 min before the first alert
+        c["first"] = bool(early) and c is early[0]
+        c["label"] = ("first sign " if c["first"] else "altitude ") + local(c["t"], "%H:%M:%S")
+
+    fx = [a["_x"] for a in mine] + [air[c["start"]]["x"] for c in signs if c["t"] >= first_alert - 600]
+    fy = [a["_y"] for a in mine] + [air[c["start"]]["y"] for c in signs if c["t"] >= first_alert - 600]
+    fspan = max(100.0, 1.3 * max(max(fx) - min(fx), max(fy) - min(fy)))
+    fcx, fcy = (max(fx) + min(fx)) / 2, (max(fy) + min(fy)) / 2
+    focus_km = [[fcx - fspan / 2, fcx + fspan / 2], [fcy - fspan / 2, fcy + fspan / 2]]
+    flon = [a["lon"] for a in mine] + [air[c["start"]]["lon"] for c in signs if c["t"] >= first_alert - 600]
+    flat = [a["lat"] for a in mine] + [air[c["start"]]["lat"] for c in signs if c["t"] >= first_alert - 600]
+    focus_ll = [[min(flon), min(flat)], [max(flon), max(flat)]]
+
     def hop_info(i):
         p, q = air[i - 1], air[i]
         if i in bad:
             return "jump", bad[i]
+        if i in vert:
+            c = next(c for c in signs if c["start"] < i <= c["end"])
+            return "steep", c["text"]
         if q["t"] - p["t"] > GAP:
             d, dt = fw.haversine_nm(p["lat"], p["lon"], q["lat"], q["lon"]), q["t"] - p["t"]
             return "gap", (f"no positions {local(p['t'])}-{local(q['t'])} ({dt / 60:.1f} min): "
@@ -283,9 +334,9 @@ def build(rec: dict, alerts: list[dict], pts: list[dict], source: str, max_speed
                f"{fw.haversine_nm(lat0, lon0, p['lat'], p['lon']) * 1.852:.0f} km from {airport}"
 
     if use_map:
-        view = deck_view(air, hops, mine, rec, (lat0, lon0, airport), tip, tiles)
+        view = deck_view(air, hops, mine, rec, signs, tip, tiles, focus_ll)
     else:
-        view = plotly_view(air, hops, mine, rec, xr, yr, ztop, airport, title, sub, tip, km)
+        view = plotly_view(air, hops, mine, rec, signs, xr, yr, ztop, airport, title, sub, tip, km, focus_km)
 
     def iso(t):
         return datetime.fromtimestamp(t, TZ).isoformat()
@@ -305,6 +356,10 @@ def build(rec: dict, alerts: list[dict], pts: list[dict], source: str, max_speed
               "textangle": -90, "xanchor": "right", "yanchor": "top", "font": {"color": "red"}} for a in mine]
     shapes += [{"type": "line", "x0": iso(air[i]["t"]), "x1": iso(air[i]["t"]), "yref": "paper", "y0": 0,
                 "y1": 1, "layer": "below", "line": {"color": "#ff9900", "width": 2}} for i in sorted(bad)]
+    shapes += [{"type": "line", "x0": iso(c["t"]), "x1": iso(c["t"]), "yref": "paper", "y0": 0, "y1": 1,
+                "line": {"color": "rgb(155,48,217)", "width": 2 if c["first"] else 1}} for c in signs]
+    notes += [{"x": iso(c["t"]), "y": 1, "yref": "paper", "text": c["label"], "showarrow": False, "textangle": -90,
+               "xanchor": "right", "yanchor": "top", "font": {"color": "rgb(155,48,217)"}} for c in signs if c["first"]]
     shapes += [{"type": "rect", "x0": iso(a), "x1": iso(b), "yref": "paper", "y0": 0, "y1": 1,
                 "layer": "below", "fillcolor": "rgba(128,128,128,0.15)", "line": {"width": 0}} for a, b in gaps]
     layout2d = {"height": 340, "margin": {"l": 60, "r": 60, "t": 20, "b": 40}, "shapes": shapes,
@@ -312,22 +367,33 @@ def build(rec: dict, alerts: list[dict], pts: list[dict], source: str, max_speed
                 "yaxis2": {"title": "kt", "overlaying": "y", "side": "right", "showgrid": False,
                            "range": [0, top * 1.05]},
                 "legend": {"orientation": "h"}}
-    data = json.dumps({"t2": t2, "l2": layout2d, **view["data"]})
+    # chart presets: whole flight, the alerts, each steep altitude change (seconds long: invisible otherwise)
+    presets = [("whole flight", None),
+               ("alerts", [iso(min(epoch(a["time"]) for a in mine + [rec]) - 120),
+                           iso(max(epoch(a["time"]) for a in mine + [rec]) + 120)])]
+    presets += [(c["label"], [iso(c["t"] - 30), iso(air[c["end"]]["t"] + 30)]) for c in signs]
+    chart_buttons = " ".join(f'<button class="cz" data-i="{i}">{name}</button>' for i, (name, _) in enumerate(presets))
+    data = json.dumps({"t2": t2, "l2": layout2d, "presets": [r for _, r in presets], **view["data"]})
     links = " ".join(f'<a href="{u}" target="_blank">{k}</a>' for k, u in rec.get("links", {}).items())
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>{ident} replay</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="{PLOTLY}"></script>{view["head"]}
-<style>body{{font-family:sans-serif;margin:8px;background:#fff}} a{{margin-right:1em}}
+<style>html,body{{overflow-x:hidden}} body{{font-family:sans-serif;margin:8px;background:#fff}} a{{margin-right:1em}}
 h1{{font-size:18px;margin:4px 0}} .sub{{font-size:13px;color:#444;margin-bottom:6px}}
 #d3{{position:relative}} .legend{{font-size:12px;margin:4px 0}} .legend span{{margin-right:14px}}</style>
 </head><body>
 {view["html"]}
+<div class="legend">chart below: {chart_buttons} · drag across it to zoom in, double-click to zoom out</div>
 <div id="d2"></div>
 <p>{links}</p>
 <script>
 const D = {data};
 Plotly.newPlot("d2", D.t2, D.l2, {{responsive: true}});
+document.querySelectorAll("button.cz").forEach(b => b.onclick = () => {{
+  const r = D.presets[+b.dataset.i];
+  Plotly.relayout("d2", r ? {{"xaxis.range": r}} : {{"xaxis.autorange": true}});
+}});
 {view["js"]}
 // hovering (or clicking) the time chart puts a black marker on that position in 3D
 let shown = -1;
@@ -345,7 +411,7 @@ d2.on("plotly_click", show);
 """
 
 
-def plotly_view(air, hops, mine, rec, xr, yr, ztop, airport, title, sub, tip, km) -> dict:
+def plotly_view(air, hops, mine, rec, signs, xr, yr, ztop, airport, title, sub, tip, km, focus) -> dict:
     """Rotatable 3D with plotly: km east / north of the airport, altitude in ft."""
     def line(kind):
         x, y, z, txt = [], [], [], []
@@ -397,6 +463,16 @@ def plotly_view(air, hops, mine, rec, xr, yr, ztop, airport, title, sub, tip, km
                        "x": [p[0] for _, p in apts], "y": [p[1] for _, p in apts], "z": [0] * len(apts),
                        "text": [k for k, _ in apts], "textposition": "top center",
                        "marker": {"size": 3, "color": "#555", "symbol": "square"}, "hoverinfo": "text"})
+    vx, vy, vz, vt = line("steep")
+    if vx:
+        traces.append({"type": "scatter3d", "mode": "lines", "name": f"steep altitude change ({len(signs)})",
+                       "x": vx, "y": vy, "z": vz, "hovertext": vt, "hoverinfo": "text",
+                       "line": {"width": 7, "color": "rgb(155,48,217)"}})
+        traces.append({"type": "scatter3d", "mode": "text", "showlegend": False,
+                       "x": [air[c["start"]]["x"] for c in signs], "y": [air[c["start"]]["y"] for c in signs],
+                       "z": [air[c["start"]]["alt"] for c in signs], "text": [c["label"] for c in signs],
+                       "textposition": "bottom center", "hovertext": [c["text"] for c in signs], "hoverinfo": "text",
+                       "textfont": {"color": "rgb(155,48,217)", "size": [13 if c["first"] else 10 for c in signs]}})
     jx, jy, jz, jt = line("jump")
     if jx:
         traces.append({"type": "scatter3d", "mode": "lines", "name": f"position jumps ({len(jx) // 3})",
@@ -423,49 +499,88 @@ def plotly_view(air, hops, mine, rec, xr, yr, ztop, airport, title, sub, tip, km
                         "yaxis": {"title": f"km north of {airport}", "range": yr},
                         "zaxis": {"title": "altitude (ft)", "range": [0, ztop]},
                         "aspectmode": "manual", "aspectratio": {"x": 2, "y": 2, "z": 0.7}}}
-    return {"head": "", "html": '<div id="d3"></div>',
-            "data": {"t3": traces, "l3": layout, "cursor": cursor,
+    helptext = ("Left-drag: rotate · right-drag: move · scroll: zoom · hover a point for details; "
+                "hover the chart below to find that moment above")
+    html = (f'<div class="legend"><button id="zoomin">zoom to alerts</button> <button id="whole">whole flight'
+            f'</button> · {helptext}</div><div id="d3"></div>')
+    js = ('Plotly.newPlot("d3", D.t3, D.l3, {responsive: true});\n'
+          'function moveCursor([x, y, z]) {\n'
+          '  Plotly.restyle("d3", {x: [[x]], y: [[y]], z: [[z]]}, [D.cursor]);\n}\n'
+          'const box = (r) => ({"scene.xaxis.range": r[0], "scene.yaxis.range": r[1]});\n'
+          'document.getElementById("zoomin").onclick = () => Plotly.relayout("d3", box(D.focus));\n'
+          'document.getElementById("whole").onclick = () => Plotly.relayout("d3", box(D.whole));')
+    return {"head": "", "html": html,
+            "data": {"t3": traces, "l3": layout, "cursor": cursor, "focus": focus, "whole": [xr, yr],
                      "pos": [[p["x"], p["y"], p["alt"]] for p in air]},
-            "js": 'Plotly.newPlot("d3", D.t3, D.l3, {responsive: true});\n'
-                  'function moveCursor([x, y, z]) {\n'
-                  '  Plotly.restyle("d3", {x: [[x]], y: [[y]], z: [[z]]}, [D.cursor]);\n}'}
+            "js": js}
 
 
-def deck_view(air, hops, mine, rec, ref, tip, tiles=TILES) -> dict:
+def deck_view(air, hops, mine, rec, signs, tip, tiles=TILES, focus=None) -> dict:
     """The same over a street map (Esri World Street Map tiles by default) with deck.gl: drag to pan,
     right-drag / Ctrl+drag to tilt and rotate. Altitude exaggerated (adjustable)."""
-    lat0, lon0, airport = ref
     t0, t1 = air[0]["t"], air[-1]["t"]
     ft = 0.3048
     segs = []
     for i, kind, info in hops:
         p, q = air[i - 1], air[i]
         colour = viridis((q["t"] - t0) / max(1, t1 - t0)) if kind == "track" else \
-            [255, 153, 0] if kind == "jump" else [136, 136, 136]
-        segs.append({"a": [p["lon"], p["lat"], p["alt"] * ft], "b": [q["lon"], q["lat"], q["alt"] * ft],
-                     "c": colour, "k": kind, "tip": info})
+            [255, 153, 0] if kind == "jump" else PURPLE if kind == "steep" else [110, 110, 110]
+        a, b = [p["lon"], p["lat"], p["alt"] * ft], [q["lon"], q["lat"], q["alt"] * ft]
+        if kind != "gap":
+            segs.append({"a": a, "b": b, "c": colour, "k": kind, "tip": info})
+            continue
+        n = 30  # no data: dashed (deck.gl lines have no dash style, so draw every other piece)
+        for k in range(0, n, 2):
+            f0, f1 = k / n, (k + 1) / n
+            segs.append({"a": [x + (y - x) * f0 for x, y in zip(a, b)], "b": [x + (y - x) * f1 for x, y in zip(a, b)],
+                         "c": colour, "k": kind, "tip": info})
     data = {"segs": segs,
             "pts": [{"p": [p["lon"], p["lat"], p["alt"] * ft], "tip": tip(p),
                      "c": [255, 127, 14] if p["src"] == "mlat" else [31, 119, 180]} for p in air],
             "alerts": [{"p": [a["lon"], a["lat"], a["_alt"] * ft], "label": a["_label"],
                         "tip": f"<b>{a['_label']}</b><br>{a['message']}", "sel": a is rec} for a in mine],
             "airports": [{"p": [v[1], v[0], 0], "label": k} for k, v in fw.REGION_AIRPORTS.items()],
-            "israel": [[lo, la] for la, lo in fw.ISRAEL + fw.ISRAEL[:1]],
+            "signs": [{"p": [air[c["start"]]["lon"], air[c["start"]]["lat"], air[c["start"]]["alt"] * ft],
+                       "label": c["label"], "tip": c["text"], "first": c["first"]} for c in signs],
             "bounds": [[min(p["lon"] for p in air + [{"lon": a["lon"]} for a in mine]),
                         min(p["lat"] for p in air + [{"lat": a["lat"]} for a in mine])],
                        [max(p["lon"] for p in air + [{"lon": a["lon"]} for a in mine]),
                         max(p["lat"] for p in air + [{"lat": a["lat"]} for a in mine])]],
+            "focus": focus,
+            # the camera aims at this height (m), not the ground: zooming in on a track drawn high
+            # above the map otherwise flies underneath it
+            "focusAlt": sorted([a["_alt"] for a in mine] + [air[c["start"]]["alt"] for c in signs if c["first"]])[
+                len(mine) // 2] * ft,
             "tiles": tiles,
             "pos": [[p["lon"], p["lat"], p["alt"] * ft] for p in air]}
     ident = rec.get("flight") or rec.get("callsign") or rec["hex"].upper()
     credit = TILES_CREDIT if tiles == TILES else f"map tiles: {tiles.split('/')[2]}"
+    first = next((c for c in signs if c["first"]), None)
+    first_btn = f' <button id="firstsign">{first["label"]}</button>' if first else ""
     html = f"""<h1>{ident} {rec.get('route_text') or 'route unknown'}</h1>
 <div class="sub">{rec['kind']} - {rec['message']} ({len(air)} positions)</div>
 <div class="legend"><span style="color:#3b528b">━ track (colour = time)</span>
-<span style="color:#ff9900">━ position jumps</span><span style="color:#888">━ no data &gt; {GAP} s</span>
-<span style="color:red">● alerts</span> · altitude ×<input id="zx" type="range" min="1" max="20" value="5"
-style="vertical-align:middle;width:110px"><b id="zxv">5</b> · drag: pan, right-drag or Ctrl+drag: tilt/rotate,
-scroll: zoom</div>
+<span style="color:#ff9900">━ position jumps</span><span style="color:#9b30d9">━ steep altitude change</span>
+<span style="color:#888">╌ no data &gt; {GAP} s</span><span style="color:red">● alerts</span>
+· altitude ×<input id="zx" type="range" min="1" max="20" value="5" style="vertical-align:middle;width:110px"><b
+id="zxv">5</b> <button id="zoomin">zoom to alerts</button> <button id="top">top view</button>
+<button id="reset">whole flight</button>{first_btn}
+<button id="helpbtn">? how to move</button></div>
+<div id="help" style="display:none;font-size:13px;background:#fffbe6;border:1px solid #e0c060;padding:8px 12px;
+margin:4px 0;max-width:720px"><b>Moving around the map</b><br>
+• <b>Drag</b> with the left mouse button: move the map.<br>
+• <b>Scroll</b> (or pinch on a touchpad): zoom in and out. Double-click zooms in.<br>
+• <b>Ctrl + drag</b> (or Shift + drag, or drag with the <b>right</b> button): turn the view.
+Drag <b>sideways</b> to rotate around, <b>up and down</b> to tilt between looking straight down and
+looking from the side.<br>
+• Keyboard: arrows move, + / − zoom, Shift + arrows rotate and tilt.<br>
+• <b>zoom to alerts</b> flies to where the alerts are; <b>first sign</b> (when there is one) to the earliest
+steep altitude change; <b>top view</b> looks straight down (like a normal map); <b>whole flight</b> goes back
+to the start.<br>
+• Zooming heads for the height of the alerts, not the ground below them (the track is drawn high above
+the map), so the alerts stay in view as you zoom in.<br>
+• Hover a point or line for details; hover the chart below the map to put a black dot on that moment.<br>
+• The altitude slider stretches heights so climbs and dives are visible (×1 is true scale).</div>
 <div id="d3" style="height:640px"></div>
 <div style="font-size:11px;color:#666">{credit}</div>"""
     js = r"""
@@ -478,41 +593,62 @@ function layers() {
         const [[w, s], [e, n]] = props.tile.boundingBox;
         return new deck.BitmapLayer(props, {data: null, image: props.data, bounds: [w, s, e, n]});
       }}),
-    new deck.PathLayer({id: "israel", data: [{path: D.israel}], getPath: d => d.path,
-      getColor: [44, 160, 44], widthUnits: "pixels", getWidth: 2}),
     new deck.LineLayer({id: "shadow", data: D.segs, getSourcePosition: d => [d.a[0], d.a[1], 0],
-      getTargetPosition: d => [d.b[0], d.b[1], 0], getColor: [100, 100, 100, 90], getWidth: 2}),
+      getTargetPosition: d => [d.b[0], d.b[1], 0], getColor: [100, 100, 100, 90], getWidth: 1}),
     new deck.LineLayer({id: "drops", data: D.alerts, getSourcePosition: d => [d.p[0], d.p[1], 0],
       getTargetPosition: d => P(d.p), getColor: [255, 0, 0, 160], getWidth: 1}),
     new deck.LineLayer({id: "track", data: D.segs, pickable: true, getSourcePosition: d => P(d.a),
-      getTargetPosition: d => P(d.b), getColor: d => d.c, getWidth: d => d.k === "jump" ? 5 : d.k === "gap" ? 2 : 3,
+      getTargetPosition: d => P(d.b), getColor: d => d.c,
+      getWidth: d => d.k === "jump" ? 3 : d.k === "steep" ? 3 : d.k === "gap" ? 1.5 : 2,
       updateTriggers: {getSourcePosition: Z, getTargetPosition: Z}}),
     new deck.ScatterplotLayer({id: "pts", data: D.pts, pickable: true, getPosition: d => P(d.p),
-      getFillColor: d => d.c, radiusUnits: "pixels", getRadius: 2, updateTriggers: {getPosition: Z}}),
+      getFillColor: d => d.c, radiusUnits: "pixels", getRadius: 1.5, updateTriggers: {getPosition: Z}}),
     new deck.ScatterplotLayer({id: "airports", data: D.airports, getPosition: d => d.p,
       getFillColor: [80, 80, 80], radiusUnits: "pixels", getRadius: 3}),
     new deck.TextLayer({id: "airport-names", data: D.airports, getPosition: d => d.p, getText: d => d.label,
       getSize: 12, getColor: [60, 60, 60], getPixelOffset: [0, -12]}),
     new deck.ScatterplotLayer({id: "alerts", data: D.alerts, pickable: true, getPosition: d => P(d.p),
-      getFillColor: [255, 0, 0], radiusUnits: "pixels", getRadius: d => d.sel ? 5 : 4,
+      getFillColor: [255, 0, 0], radiusUnits: "pixels", getRadius: d => d.sel ? 4 : 3,
       updateTriggers: {getPosition: Z}}),
     new deck.TextLayer({id: "alert-names", data: D.alerts, getPosition: d => P(d.p), getText: d => d.label,
       getSize: d => d.sel ? 15 : 12, getColor: [220, 0, 0], getPixelOffset: [0, -14],
       fontWeight: 600, updateTriggers: {getPosition: Z}}),
+    new deck.TextLayer({id: "signs", data: D.signs, pickable: true, getPosition: d => P(d.p), getText: d => d.label,
+      getSize: d => d.first ? 15 : 11, getColor: [155, 48, 217], getPixelOffset: [0, 16], fontWeight: 600,
+      updateTriggers: {getPosition: Z}}),
     new deck.ScatterplotLayer({id: "cursor", data: cursor ? [cursor] : [], getPosition: d => P(d),
-      getFillColor: [0, 0, 0], radiusUnits: "pixels", getRadius: 6, updateTriggers: {getPosition: Z}}),
+      getFillColor: [0, 0, 0], radiusUnits: "pixels", getRadius: 5, updateTriggers: {getPosition: Z}}),
   ];
 }
 const el = document.getElementById("d3");
 const fit = new deck.WebMercatorViewport({width: el.clientWidth, height: el.clientHeight})
   .fitBounds(D.bounds, {padding: 60});
-const map = new deck.DeckGL({container: "d3",
-  initialViewState: {longitude: fit.longitude, latitude: fit.latitude, zoom: Math.min(fit.zoom, 10),
-                     pitch: 50, bearing: 0, maxPitch: 85},
-  controller: true, layers: layers(),
+const aim = (alt) => [0, 0, (alt === undefined ? D.focusAlt : alt) * Z];  // camera target height
+const start = {longitude: fit.longitude, latitude: fit.latitude, zoom: Math.min(fit.zoom, 10),
+               pitch: 50, bearing: 0, maxPitch: 85, position: aim()};
+let view = start, aimAlt;  // current view; height aimed at (undefined: the alerts')
+const map = new deck.DeckGL({container: "d3", initialViewState: start,
+  controller: true, layers: layers(), onViewStateChange: ({viewState}) => { view = viewState; },
   getTooltip: ({object}) => object && object.tip ? {html: object.tip} : null});
+const go = (v, alt) => {
+  aimAlt = alt;
+  map.setProps({initialViewState: {...view, ...v, position: aim(alt), transitionDuration: 700,
+                                   transitionInterpolator: new deck.FlyToInterpolator(), _t: Date.now()}});
+};
+document.getElementById("top").onclick = () => go({pitch: 0, bearing: 0}, aimAlt);
+document.getElementById("reset").onclick = () => go(start);
+const near = new deck.WebMercatorViewport({width: el.clientWidth, height: el.clientHeight})
+  .fitBounds(D.focus, {padding: 120});
+document.getElementById("zoomin").onclick = () =>
+  go({longitude: near.longitude, latitude: near.latitude, zoom: Math.min(near.zoom, 9), pitch: 50, bearing: 0});
+const fs = document.getElementById("firstsign"), sign = D.signs.find(s => s.first);
+if (fs) fs.onclick = () => go({longitude: sign.p[0], latitude: sign.p[1], zoom: 12, pitch: 55, bearing: 0}, sign.p[2]);
+document.getElementById("helpbtn").onclick = () => {
+  const h = document.getElementById("help"); h.style.display = h.style.display === "none" ? "block" : "none";
+};
 document.getElementById("zx").oninput = (e) => {
-  Z = +e.target.value; document.getElementById("zxv").textContent = Z; map.setProps({layers: layers()});
+  Z = +e.target.value; document.getElementById("zxv").textContent = Z;
+  map.setProps({layers: layers(), initialViewState: {...view, position: aim(aimAlt), _t: Date.now()}});
 };
 function moveCursor(p) { cursor = p; map.setProps({layers: layers()}); }
 """

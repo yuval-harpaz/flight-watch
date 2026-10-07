@@ -217,11 +217,15 @@ flight number and callsign (`LY347/ELY347`), airline, route and alert, so any of
   another `{z}/{x}/{y}` URL; tile.openstreetmap.org blocks pages opened from a file). Drag to pan,
   right-drag or Ctrl+drag to tilt and rotate, scroll to zoom; altitude exaggeration slider.
 
-Both show the track coloured by time, ADS-B and MLAT positions, the ground track, Israel's outline,
-nearby airports, position jumps (orange, the monitor's `POSITION_JUMP` rules), stretches without
-positions (dashed grey) and every alert on the flight (red, labelled). Below: altitude and ground
-speed over time, alerts / jumps / gaps marked; hovering or clicking it puts a black marker on that
-position above. By default the plot covers the alert's flight leg (between ground stops or 30 min
+Both show the track coloured by time, ADS-B and MLAT positions, the ground track, nearby airports
+(and Israel's outline in 3D), position jumps (orange, the monitor's `POSITION_JUMP` rules), altitude
+changing faster than 8,000 ft/min (purple; the one in the 10 min before the first alert is labelled
+"first sign" - FZ1073's wobble 20 s before its dive alert), stretches without positions (dashed
+grey) and every alert on the flight (red, labelled, with the squawk code). Buttons zoom to the
+alerts or back to the whole flight; the map has a "? how to move" help and a top view. Below: altitude and ground
+speed over time, alerts / jumps / steep changes / gaps marked, with buttons to zoom it to the alerts
+or to each steep change; hovering or clicking it puts a black marker on that position above.
+`examples/` has FZ1073 (30 Sep 2026) plotted both ways. By default the plot covers the alert's flight leg (between ground stops or 30 min
 silences); `--minutes` widens it. Nothing else is stored.
 
 ## Caveats
