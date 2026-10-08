@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>TLV flights</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="flightboard.js"></script>
+<style>
+body{font-family:sans-serif;margin:8px;background:#fff;color:#222}
+h1{font-size:18px;margin:4px 0}
+.bar{font-size:13px;margin:6px 0;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+.bar label{white-space:nowrap}
+#msg{font-size:13px;color:#555;margin:4px 0}
+.wrap{overflow-x:auto}
+table{border-collapse:collapse;font-size:13px;min-width:760px;width:100%}
+th,td{padding:4px 6px;border-bottom:1px solid #e6e6e6;text-align:left;white-space:nowrap}
+th{position:sticky;top:0;background:#f5f5f5;cursor:pointer;user-select:none}
+tbody tr{cursor:pointer} tbody tr:hover{background:#f3f8ff}
+.dir{font-weight:bold} .ARR .dir{color:#1f6fb2} .DEP .dir{color:#7a4bb3}
+.cs{color:#888;font-size:11px}
+.old td{color:#999}
+.badge{display:inline-block;padding:1px 6px;border-radius:9px;font-size:12px}
+.b-ok{background:#e9f6ec;color:#1d6b33} .b-early{background:#e6f2fb;color:#1f5f99}
+.b-late{background:#fff1dc;color:#9a5b00} .b-overdue{background:#fde3e1;color:#a01a12;font-weight:bold}
+.b-soon{background:#e8e6fb;color:#3d2f99} .b-done{background:#f0f0f0;color:#555}
+.b-cancel{background:#f0f0f0;color:#888;text-decoration:line-through}
+.b-done.b-late{background:#fff1dc;color:#9a5b00}
+.raw{color:#888;font-size:11px}
+a.map{text-decoration:none}
+.credits{font-size:11px;color:#666;margin:10px 0}
+</style></head><body>
+<h1>Ben Gurion (TLV) arrivals and departures</h1>
+<div class="bar">
+  <label>show <select id="view"></select></label>
+  <label><select id="dir"><option value="">arrivals and departures</option>
+    <option value="ARR">arrivals</option><option value="DEP">departures</option></select></label>
+  <label><input type="checkbox" id="hide"> hide landed / departed / cancelled</label>
+  <label>search <input id="q" size="14" placeholder="flight, city, airline"></label>
+  <label>times <select id="zone"><option value="Asia/Jerusalem">Israel</option><option value="UTC">UTC</option>
+    <option value="local">this computer's time zone</option></select></label>
+  <button id="reload">refresh</button>
+  <a href="flight_map.html">map: next arrival ▸</a>
+</div>
+<div id="msg">loading the flight board…</div>
+<div class="wrap"><table>
+<thead><tr><th data-k="est">time</th><th data-k="dir"></th><th data-k="flight">flight</th><th data-k="airline">airline</th>
+<th data-k="city">from / to</th><th data-k="sched">scheduled</th><th data-k="est">estimated</th>
+<th data-k="delay">delay</th><th data-k="situation">status</th><th data-k="terminal">terminal</th><th></th></tr></thead>
+<tbody id="rows"></tbody></table></div>
+<div class="credits">Flight board: Israel Airports Authority (<a href="https://data.gov.il/dataset/flydata">data.gov.il</a>),
+refreshed by them several times a day and here every 5 minutes. Delay = estimated − scheduled time.
+Open a flight to see it on the map (live positions: <a href="https://adsb.lol">adsb.lol</a>,
+<a href="https://opendatacommons.org/licenses/odbl/">ODbL</a>). ·
+<a href="https://github.com/yuval-harpaz/flight-watch">flight-watch</a></div>
+<script>
+"use strict";
+let flights = [], updated = NaN, ZONE = "Asia/Jerusalem", sortKey = "est", sortDir = 1;
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const params = new URLSearchParams(location.search);
+
+function views(now) {
+  // "now" by default; each day the board still holds (it keeps about a day back), or everything
+  const days = [...new Set(flights.map(f => FB.fmt(f.est, ZONE, "date")))].sort();
+  const today = FB.fmt(now, ZONE, "date");
+  const opts = [["now", "now (−3 h … +12 h)"]].concat(days.map(d => [d, d === today ? d + " (today)" : d]),
+                                                    [["all", "everything on the board"]]);
+  const keep = $("view").value || params.get("view") || "now";
+  $("view").innerHTML = opts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("");
+  $("view").value = opts.some(o => o[0] === keep) ? keep : "now";
+}
+
+function render() {
+  const now = Date.now() / 1000, view = $("view").value, dir = $("dir").value, q = $("q").value.trim().toLowerCase();
+  let rows = flights.map(f => ({f, s: FB.situation(f, now)}));
+  rows = rows.filter(({f, s}) => {
+    if (view === "now" && !(f.est >= now - 3 * 3600 && f.est <= now + 12 * 3600)) return false;
+    if (view !== "now" && view !== "all" && FB.fmt(f.est, ZONE, "date") !== view) return false;
+    if (dir && f.dir !== dir) return false;
+    if ($("hide").checked && /done|cancel/.test(s.cls)) return false;
+    if (q && ![f.flight, ...f.codeshares, f.airline, f.city, f.other, f.otherName, f.country]
+              .some(x => String(x).toLowerCase().includes(q))) return false;
+    return true;
+  });
+  const val = ({f, s}) => ({est: f.est, sched: f.sched, dir: f.dir, flight: f.flight, airline: f.airline,
+                            city: f.city, delay: s.delay, situation: s.label, terminal: f.terminal}[sortKey]);
+  rows.sort((a, b) => (val(a) > val(b) ? 1 : val(a) < val(b) ? -1 : a.f.est - b.f.est) * sortDir);
+  const today = FB.fmt(now, ZONE, "date");
+  const t = x => (FB.fmt(x, ZONE, "date") === today ? "" : FB.fmt(x, ZONE, "dhm").slice(0, 6)) + FB.fmt(x, ZONE, "hm");
+  $("rows").innerHTML = rows.map(({f, s}) => {
+    const url = "flight_map.html?" + new URLSearchParams({f: f.flight, d: f.dir[0], s: f.schedText});
+    const cls = s.cls.split(" ").map(c => "b-" + c).join(" ");
+    return `<tr class="${f.dir}${/done|cancel/.test(s.cls) ? " old" : ""}" data-url="${esc(url)}">
+<td><b>${esc(t(f.est))}</b></td><td class="dir">${f.dir === "ARR" ? "▼ arr" : "▲ dep"}</td>
+<td>${esc(f.flight)}${f.codeshares.length ? `<div class="cs">${esc(f.codeshares.join(" "))}</div>` : ""}</td>
+<td>${esc(f.airline)}</td><td>${esc(f.city)} <span class="raw">${esc(f.other)}${f.country ? " · " + esc(f.country) : ""}</span></td>
+<td>${esc(t(f.sched))}</td><td>${esc(t(f.est))}</td>
+<td>${s.delay ? (s.delay > 0 ? "+" : "") + s.delay + " min" : ""}</td>
+<td><span class="badge ${cls}">${esc(s.label)}</span> <span class="raw">${esc(f.status)}</span></td>
+<td>${esc(f.terminal ?? "")}${f.dir === "DEP" && f.counters ? ` <span class="raw">${esc(f.zone)} ${esc(f.counters)}</span>` : ""}</td>
+<td><a class="map" href="${esc(url)}" title="show on the map">🗺</a></td></tr>`;
+  }).join("");
+  const n = {ARR: 0, DEP: 0};
+  rows.forEach(({f}) => n[f.dir]++);
+  $("msg").textContent = `${rows.length} flights (${n.ARR} arrivals, ${n.DEP} departures)` +
+    (isFinite(updated) ? ` · board updated ${FB.fmt(updated, ZONE, "dhm")} ${FB.fmt(updated, ZONE, "z")}` : "") +
+    ` · times ${FB.fmt(now, ZONE, "z")}`;
+}
+
+async function load() {
+  $("msg").textContent = "loading the flight board…";
+  try {
+    const [records, up] = await Promise.all([FB.fetchBoard(), FB.boardUpdated()]);
+    flights = FB.flights(records);
+    updated = up;
+    views(Date.now() / 1000);
+    render();
+  } catch (e) {
+    $("msg").textContent = "could not load the flight board: " + e.message;
+  }
+}
+
+$("rows").addEventListener("click", e => {
+  const tr = e.target.closest("tr");
+  if (tr && !e.target.closest("a")) location.href = tr.dataset.url;
+});
+document.querySelectorAll("th[data-k]").forEach(th => th.onclick = () => {
+  sortDir = sortKey === th.dataset.k ? -sortDir : 1;
+  sortKey = th.dataset.k;
+  render();
+});
+for (const id of ["view", "dir", "hide"]) $(id).onchange = render;
+$("q").oninput = render;
+$("zone").onchange = e => { ZONE = e.target.value; views(Date.now() / 1000); render(); };
+$("reload").onclick = load;
+if (params.get("dir")) $("dir").value = params.get("dir");
+load();
+setInterval(load, 5 * 60 * 1000);
+setInterval(render, 60 * 1000);  // "past estimate" and "now" move on between board refreshes
+</script></body></html>

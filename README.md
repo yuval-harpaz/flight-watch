@@ -233,6 +233,37 @@ m/s), including the alert texts. Credits (map tiles, flight data, route sources)
 `examples/` has FZ1073 (30 Sep 2026) in 3D; its map is `docs/fz1073_map.html` (GitHub Pages). By default the plot covers the alert's flight leg (between ground stops or 30 min
 silences); `--minutes` widens it. Nothing else is stored.
 
+## Flight pages (board + live map)
+
+`docs/flights.html` lists Ben Gurion arrivals and departures from the live flight board
+(data.gov.il, fetched by the page itself, refreshed every 5 minutes): scheduled and estimated
+time, delay, the board's status plus a plain one (delayed landing, late departure, not landed /
+not departed N min past the estimate, landed late, cancelled), terminal and check-in counters.
+"show" picks now (−3 h … +12 h, the default), any single day the board still holds (it keeps
+about a day back and a few days ahead) or everything; filter by direction, search, hide
+completed flights; Israel time with a UTC / own-zone switch.
+
+Clicking a flight opens `docs/flight_map.html` for it: today's track, the route (great circle
+between the two airports), where it will be in 5 minutes at its speed, altitude (m), speed
+(km/h), vertical speed, squawk, distance and time to TLV, updated every 10 s. Opened without a
+flight it shows the arrival closest to landing (the shortest time to TLV among airborne
+arrivals; one already on the ground is skipped) and moves on to the next one after it lands.
+"next arrival" skips to the next, "← flight list" goes back.
+
+Live positions come from adsb.lol, which does not allow other web sites to read it (no CORS
+headers), so the map needs the local helper, which serves the pages and relays the feed with the
+monitor's request budget and 429 backoff:
+
+```bash
+python tools/serve.py          # then open http://localhost:8765/  (Ctrl+C stops)
+```
+
+The flight list also works straight from GitHub Pages or a file; the map then shows the board
+data and a hint to start the helper. `docs/flightboard.js` holds the logic both pages share; it
+mirrors the monitor's flight-board code (codeshares, operating carrier, callsigns, Israel time)
+and `tests/test_pages.py` runs it under node against the Python to keep them identical.
+Alerts are not shown on the pages yet.
+
 ## Caveats
 
 - GNSS jamming/spoofing is common in the Eastern Mediterranean. It causes position jumps, fake
