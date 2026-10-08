@@ -193,8 +193,9 @@ python tests/replay.py --descent-angle 8 --max-bank 30   # try other thresholds 
 
 `tests/test_replay_fz1073.py` requires the incident's alerts and caps alerts on the other
 flights (`NOISE_BUDGET`). Capture another incident with `tools/capture_incident.py` (see its
-`--help`); it uses the ADS-B Exchange globe history. The flight board of a past day is not
-online, so board rows are derived from the traces plus `--board` rows given by hand.
+`--help`); it uses the ADS-B Exchange globe history. Board rows are derived from the traces plus
+`--board` rows given by hand; the board as it was on a past day (since 10 Apr 2026) is in the
+over.org.il archive (see Flight pages) and could replace the hand-written rows.
 
 ## Plot an alert
 
@@ -232,6 +233,45 @@ Times are Israel time with a switch to UTC or the viewer's zone; units are metri
 m/s), including the alert texts. Credits (map tiles, flight data, route sources) are at the bottom.
 `examples/` has FZ1073 (30 Sep 2026) in 3D; its map is `docs/fz1073_map.html` (GitHub Pages). By default the plot covers the alert's flight leg (between ground stops or 30 min
 silences); `--minutes` widens it. Nothing else is stored.
+
+## Flight pages (board + live map)
+
+`docs/flights.html` lists Ben Gurion arrivals and departures from the live flight board
+(data.gov.il, fetched by the page itself, refreshed every 5 minutes): scheduled and estimated
+time, delay, the board's status plus a plain one (delayed landing, late departure, not landed /
+not departed N min past the estimate, landed late, cancelled), terminal and check-in counters.
+"show" picks now (−3 h … +12 h, the default), any single day the board still holds (it keeps
+about a day back and a few days ahead) or everything; filter by direction, search, hide
+completed flights; Israel time with a UTC / own-zone switch.
+
+"board: as it was at…" shows the board at any past moment since 10 Apr 2026 (Israel time), and
+`flights.html?at=2026-09-30T08:45` links to one. The page rebuilds it in the browser from the
+archive of [גרסאות לעם / over.org.il](https://www.over.org.il/versions/31c812a6-9b0c-4f32-8317-e5f268c28f60),
+which records every change of every board row (checked about every 15 minutes); nothing is
+stored here. Loading takes ~10 s (four pages of 1,000 rows). The archive does not record when a
+row left the board, so a past board covers flights scheduled from a day before to three days
+after that moment. Map links are hidden for a past board, as the map is live.
+
+Clicking a flight opens `docs/flight_map.html` for it: today's track, the route (great circle
+between the two airports), where it will be in 5 minutes at its speed, altitude (m), speed
+(km/h), vertical speed, squawk, distance and time to TLV, updated every 10 s. Opened without a
+flight it shows the arrival closest to landing (the shortest time to TLV among airborne
+arrivals; one already on the ground is skipped) and moves on to the next one after it lands.
+"next arrival" skips to the next, "← flight list" goes back.
+
+Live positions come from adsb.lol, which does not allow other web sites to read it (no CORS
+headers), so the map needs the local helper, which serves the pages and relays the feed with the
+monitor's request budget and 429 backoff:
+
+```bash
+python tools/serve.py          # then open http://localhost:8765/  (Ctrl+C stops)
+```
+
+The flight list also works straight from GitHub Pages or a file; the map then shows the board
+data and a hint to start the helper. `docs/flightboard.js` holds the logic both pages share; it
+mirrors the monitor's flight-board code (codeshares, operating carrier, callsigns, Israel time)
+and `tests/test_pages.py` runs it under node against the Python to keep them identical.
+Alerts are not shown on the pages yet.
 
 ## Caveats
 
