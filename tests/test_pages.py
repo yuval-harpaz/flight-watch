@@ -166,6 +166,53 @@ def fw_epoch(hhmm: str) -> float:
     return datetime.fromisoformat(f"2026-10-08T{hhmm}:00").replace(tzinfo=fw.ZoneInfo("Asia/Jerusalem")).timestamp()
 
 
+@unittest.skipUnless(NODE, "node not installed")
+class CorsWorker(unittest.TestCase):
+    """tools/cors_worker.js (Cloudflare Worker): relays only the feed paths the pages use, adds CORS."""
+    def run_worker(self, requests_):
+        src = os.path.abspath(os.path.join(ROOT, "tools", "cors_worker.js"))
+        script = f"""
+          const src = require("fs").readFileSync({json.dumps(src)}, "utf8");
+          const calls = [];
+          globalThis.fetch = async (u, o) => {{ calls.push(u);
+            return u.includes("429") ? new Response("busy", {{status: 429}})
+                                     : new Response('{{"ac":[]}}', {{headers: {{"Content-Type": "application/json"}}}}); }};
+          (async () => {{
+            const w = (await import("data:text/javascript," + encodeURIComponent(src))).default;
+            const out = [];
+            for (const [method, path, origin] of {json.dumps(requests_)}) {{
+              const h = origin ? {{Origin: origin}} : {{}};
+              const r = await w.fetch(new Request("https://relay.example" + path, {{method, headers: h}}), {{}}, {{waitUntil() {{}}}});
+              out.push([r.status, r.headers.get("Access-Control-Allow-Origin")]);
+            }}
+            process.stdout.write(JSON.stringify({{out, calls}}));
+          }})();"""
+        r = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=60)
+        if r.returncode:
+            raise AssertionError(r.stderr)
+        return json.loads(r.stdout)
+
+    def test_relays_feed_paths_with_cors_only(self):
+        pages, other = "https://yuval-harpaz.github.io", "https://evil.example"
+        got = self.run_worker([
+            ["GET", "/v2/hex/738071,8965d1", pages],
+            ["GET", "/v2/callsign/WZZ4603", "http://localhost:8765"],
+            ["GET", "/data/traces/71/trace_recent_738071.json", pages],
+            ["OPTIONS", "/v2/hex/738071", pages],
+            ["GET", "/v2/hex/738071", other],          # another site: refused
+            ["GET", "/v2/point/32/34/250", pages],     # not a path the pages use: not relayed
+            ["GET", "/https://example.com/", pages],
+            ["POST", "/v2/hex/738071", pages],
+            ["GET", "/v2/callsign/X429", pages],       # upstream 429 passed on
+        ])
+        self.assertEqual(got["out"], [[200, pages], [200, "http://localhost:8765"], [200, pages], [204, pages],
+                                      [403, None], [404, pages], [404, pages], [405, pages], [429, pages]])
+        self.assertEqual(got["calls"], ["https://api.adsb.lol/v2/hex/738071,8965d1",
+                                        "https://api.adsb.lol/v2/callsign/WZZ4603",
+                                        "https://adsb.lol/data/traces/71/trace_recent_738071.json",
+                                        "https://api.adsb.lol/v2/callsign/X429"])
+
+
 class FakeUpstream:
     """Stands in for requests.Session inside serve.Relay's Http."""
     def __init__(self):
