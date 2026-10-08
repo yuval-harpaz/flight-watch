@@ -2,7 +2,7 @@
 <html lang="en"><head><meta charset="utf-8"><title>TLV flight map</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://unpkg.com/deck.gl@9.1.14/dist.min.js"></script>
-<script src="flightboard.js?v=b42bf2ce"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
+<script src="flightboard.js?v=d134abfe"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
 <style>
 html,body{margin:0;height:100%;font-family:sans-serif;color:#222;background:#fff}
 #top{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;padding:6px 8px;font-size:13px;border-bottom:1px solid #ddd}
@@ -116,30 +116,58 @@ async function show(f, ac, auto, none, hex) {
   try {
     if (hex) {  // one aircraft, the way alert posts link to it: live whatever the board says
       if (!ac) ac = (await FB.byHex(hex)).ac;
-      if (!ac) cur.msg = "not in the live feed now: landed, or out of coverage";
+      if (!ac) {
+        const legs = FB.legs(await FB.trace(hex));
+        cur.trail = legs.length ? legs[legs.length - 1] : [];
+        cur.msg = "not in the live feed now: landed, or out of coverage" + (cur.trail.length ? " - the blue line is its last flight today" : "");
+      }
     } else if (!f.callsigns.length) {  // e.g. an airline code missing from FB.AIRLINE_ICAO
       cur.msg = `no callsign is known for airline code ${f.flight.replace(/\d+$/, "")}, so it cannot be looked up live`;
     } else if (!ac && !FB.liveUseful(f, Date.now() / 1000)) {  // landed, cancelled, or far from its time
-      cur.msg = /CANCEL/.test(f.status) ? "cancelled" : f.status === "LANDED" ? "Landed. The grey arc is the planned route; the flown track can't be shown " +
-                "after landing (the board does not name the aircraft, and the live feed knows only aircraft " +
-                "flying now). FR24 has the flight's history."
+      cur.msg = /CANCEL/.test(f.status) ? "cancelled" : f.status === "LANDED" ? await flownTrack(f)
               : "not flying now - live data is shown from shortly before its time";
     } else {
       if (!ac) ac = (await FB.byCallsign(f.callsigns.concat(f.altCallsigns)))[0] || null;
+      if (!ac && /LANDED|DEPARTED/.test(f.status)) cur.msg = await flownTrack(f);
       if (!ac) cur.msg = cur.msg || "not in the live feed: not airborne yet, already landed, or out of coverage";
     }
     cur.ac = ac;
     if (ac) cur.seen = Date.now() / 1000 - (ac.seen || 0);
-  } catch (e) { cur.err = e; }
+  } catch (e) {
+    cur.err = e;
+    if (/HTTP 429/.test(e.message)) {  // the feed is busy: look again in 20 s, unless another flight is shown by then
+      const me = cur;
+      setTimeout(() => { if (cur === me) show(f, null, auto, none, hex); }, 20000);
+    }
+  }
   titles();
   render();
-  routeEnds(f, ac).then(ends => { cur.ends = ends; render(); });
+  routeEnds(f, ac).then(ends => { cur.ends = ends; cur.endsDone = true; render(); });
   if (ac) {
     const pts = await FB.trace(ac.hex);
     cur.trail = FB.currentLeg(pts);
     render();
     timer = setInterval(poll, POLL_S * 1000);
   }
+}
+
+/** A flight no longer in the feed: its aircraft from the relay's callsign map (aircraft near TLV,
+ *  noted every 5 min), then that aircraft's leg to / from TLV in today's trace. Returns the note. */
+async function flownTrack(f) {
+  const cs = f.callsigns.concat(f.altCallsigns);
+  let hit = null;
+  try {
+    const map = await FB.hexOf(cs);
+    hit = cs.map(c => map[c]).find(m => m && Math.abs(m.seen - f.est) < 12 * 3600);
+    const leg = hit && FB.legAt(await FB.trace(hit.hex), hit.seen, f.dir);
+    if (leg) {
+      cur.trail = leg;
+      cur.flownHex = hit.hex;
+      return (f.status === "LANDED" ? "Landed. " : "") + "The blue line is the flown track (aircraft " + hit.hex + ").";
+    }
+  } catch (e) { /* no relay, or it is busy: say so below */ }
+  return (f.status === "LANDED" ? "Landed. " : "") + "The flown track is not known " +
+         "(the board does not name the aircraft, and it was not noted near TLV in the last 36 h). FR24 has the flight's history.";
 }
 
 async function routeEnds(f, ac) {
@@ -153,6 +181,7 @@ async function routeEnds(f, ac) {
   const other = codes ? codes.filter(c => c !== FB.HOME.icao) : [];
   const far = other.length ? await FB.airport(f.dir === "ARR" ? other[0] : other[other.length - 1]) : null;
   const home = {icao: FB.HOME.icao, iata: "TLV", city: FB.HOME.name, lat: FB.HOME.lat, lon: FB.HOME.lon};
+  if (far && f.other && far.iata && far.iata !== f.other) return [home];  // crowd-sourced route disagrees with the board (ELY5064: BCN, board HER)
   return far ? (f.dir === "ARR" ? [far, home] : [home, far]) : [home];
 }
 
@@ -211,8 +240,9 @@ function render() {
               ["squawk", /^7[567]00$/.test(sq) ? `<span class="warn">${sq} ${{"7500": "hijack", "7600": "radio failure", "7700": "emergency"}[sq]}</span>` : esc(sq || "-")],
               ["last seen", isFinite(cur.seen) ? Math.max(0, Math.round(now - cur.seen)) + " s ago" : "?"]);
   }
-  const hex = ac ? ac.hex : cur.hex;
+  const hex = ac ? ac.hex : cur.hex, day = cur.trail.length ? new Date(cur.trail[0].t * 1000).toISOString().slice(0, 10) : "";
   const links = [hex && `<a href="https://globe.adsbexchange.com/?icao=${esc(hex)}" target="_blank">live (ADSBx)</a>`,
+                 !ac && cur.flownHex && `<a href="https://globe.adsbexchange.com/?icao=${esc(cur.flownHex)}&showTrace=${day}" target="_blank">replay (ADSBx)</a>`,
                  f.flight && `<a href="https://www.flightradar24.com/data/flights/${esc(f.flight.toLowerCase())}" target="_blank">FR24</a>`]
                 .filter(Boolean).join(" · ");
   $("info").innerHTML = `<table>${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>` +
@@ -251,16 +281,16 @@ function draw() {
     new deck.TextLayer({id: "plane-label", data: pos ? [{p: pos}] : [], getPosition: d => d.p, getText: () => label,
       getSize: 13, getPixelOffset: [0, -18], fontSettings: {sdf: true}, outlineWidth: 4, outlineColor: [255, 255, 255, 230]}),
   ]});
-  if (!fitted && (pos || ends.length === 2)) {
+  if (!fitted && (pos || ends.length === 2 || trail.length > 1)) {
     // the aircraft, TLV and (when known) the other airport in view, at least ~100 km across
-    const pts = ends.map(e => [e.lon, e.lat]).concat(pos ? [pos] : []);
+    const pts = ends.map(e => [e.lon, e.lat]).concat(pos ? [pos] : trail.map(p => [p.lon, p.lat]));
     const lo = [Math.min(...pts.map(p => p[0])) - 0.5, Math.min(...pts.map(p => p[1])) - 0.5];
     const hi = [Math.max(...pts.map(p => p[0])) + 0.5, Math.max(...pts.map(p => p[1])) + 0.5];
     const el = $("map");
     const v = new deck.WebMercatorViewport({width: el.clientWidth, height: el.clientHeight})
       .fitBounds([lo, hi], {padding: Math.min(80, el.clientWidth / 6)});
     map.setProps({initialViewState: {longitude: v.longitude, latitude: v.latitude, zoom: Math.min(v.zoom, 9)}});
-    fitted = !!pos && ends.length > 0;
+    fitted = !!pos || ends.length === 2 || (cur.endsDone && trail.length > 1);  // once: re-fitting on every update would undo the viewer's zoom
   }
 }
 

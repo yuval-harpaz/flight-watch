@@ -258,6 +258,34 @@ FB.currentLeg = function (pts) {
   });
   return pts.slice(start);
 };
+/** All legs in the points: split at ground points and at gaps the aircraft spent stopped. */
+FB.legs = function (pts) {
+  const legs = [];
+  let leg = [];
+  pts.filter(p => p.lat != null).forEach(p => {
+    const q = leg[leg.length - 1];
+    if (p.alt === "ground" || (q && p.t - q.t > 600 && FB.haversineNm(q.lat, q.lon, p.lat, p.lon) / ((p.t - q.t) / 3600) < 200)) {
+      if (leg.length > 1) legs.push(leg);
+      leg = p.alt === "ground" ? [] : [p];
+    } else leg.push(p);
+  });
+  if (leg.length > 1) legs.push(leg);
+  return legs;
+};
+/** The leg of a TLV flight around time `seen`: an arrival's ends near TLV, a departure's starts
+ *  there; the one closest in time to `seen` (when the callsign was last heard near TLV). */
+FB.legAt = function (pts, seen, dir) {
+  const near = p => FB.haversineNm(p.lat, p.lon, FB.HOME.lat, FB.HOME.lon) < 30;
+  const off = l => seen < l[0].t ? l[0].t - seen : seen > l[l.length - 1].t ? seen - l[l.length - 1].t : 0;
+  const cands = FB.legs(pts).filter(l => dir === "ARR" ? near(l[l.length - 1]) : dir === "DEP" ? near(l[0]) : true);
+  return cands.sort((a, b) => off(a) - off(b))[0] || null;
+};
+/** Which aircraft (hex) last flew these callsigns, from the relay's 36 h callsign map:
+ *  {callsign: {hex, seen}}; {} without a relay. */
+FB.hexOf = async function (callsigns) {
+  if (!FB.RELAY || !callsigns.length) return {};
+  return FB.getJSON(FB.RELAY + "/hexof/" + callsigns.join(","));
+};
 FB.onGround = ac => ac && (ac.alt_baro === "ground" || ((ac.gs || 0) < 50 && (+ac.alt_baro || 0) < 500));
 
 // ------------------------------------------------------------------ standing data (routes, airports)

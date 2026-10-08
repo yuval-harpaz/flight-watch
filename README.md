@@ -277,7 +277,10 @@ data and links (ADS-B Exchange live, FR24) with a short note, as the browser ref
 is live through the HTTPS relay named by `FB.RELAY` in `docs/flightboard.js`, which adds CORS:
 `tools/cors_worker.js`, a Cloudflare Worker (free plan; paste it into a new Worker, see its header),
 or `tools/serve.py` on a server (`--host 0.0.0.0` behind an HTTPS proxy). The worker relays only
-the feed paths the pages use, for the GitHub Pages and localhost origins, with a 5-30 s cache. `docs/flightboard.js` holds the logic both pages share; it
+the feed paths the pages use, for the GitHub Pages and localhost origins, with a 5-30 s cache,
+and serves its last answer of up to 2 minutes when adsb.lol answers 429. With a KV namespace
+(binding `CALLSIGNS`) and a Cron Trigger every 5 minutes it also keeps which aircraft flew each
+callsign near TLV in the last 36 hours, so the map shows the flown track of a landed flight. `docs/flightboard.js` holds the logic both pages share; it
 mirrors the monitor's flight-board code (codeshares, operating carrier, callsigns, Israel time)
 and `tests/test_pages.py` runs it under node against the Python to keep them identical.
 Alerts are not shown on the pages yet.
