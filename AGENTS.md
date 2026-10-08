@@ -258,8 +258,17 @@ and fetching a cold start's ~60 files in one cycle held up the local poll for ov
   `FB.RELAY` is the owner's Cloudflare Worker (https://flight-watch-relay.yuvharpaz.workers.dev, code
   `tools/cors_worker.js`; redeploy by pasting it after changes; workers.dev is not reachable from the
   cloud sandbox). It relays only `/v2/hex|callsign/*` and `/data/traces/*`, only for the Pages /
-  localhost origins, with a 5-30 s cache (tested under node in `tests/test_pages.py`). Fallback if
-  adsb.lol limits Cloudflare: an HTTPS `tools/serve.py` on the VPS. opendata.adsb.fi sends no CORS
+  localhost origins, with a 5-30 s cache (tested under node in `tests/test_pages.py`). adsb.lol does
+  answer 429 to Cloudflare's shared addresses (seen 8 Oct 2026 on `/v2/callsign/CFG4308`), so the
+  worker serves its last answer of up to 2 min on an upstream error and the map retries a 429 after
+  20 s. Fallback if that is not enough: an HTTPS `tools/serve.py` on the VPS.
+  **Callsign map** (`/hexof/<cs,...>`): the board does not name the aircraft and the feed finds a
+  callsign only while it flies, so a landed flight had no track. The worker's Cron Trigger (every
+  5 min) asks `/v2/point/<TLV>/250` once and keeps callsign -> [hex, last seen] for 36 h in one KV
+  value (binding `CALLSIGNS`; 288 writes a day of the free 1,000). The owner agreed to this small,
+  expiring store (8 Oct 2026). The map then draws that aircraft's leg to / from TLV from today's
+  trace (`FB.legs` / `FB.legAt`). The route database is ignored when it disagrees with the board's
+  airport (ELY5064 listed BCN, board HER). opendata.adsb.fi sends no CORS
   header either (checked Oct 2026: 200 without `Access-Control-Allow-Origin`, OPTIONS -> 405).
   Whether adsb.lol rate-limits Cloudflare's shared egress addresses is untested. Without a relay the map skips
   pointless lookups (`FB.liveUseful`: landed, cancelled, far from its time) and turns a refused

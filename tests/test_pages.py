@@ -102,6 +102,22 @@ class BoardLogicMatchesPython(unittest.TestCase):
         ground = [dict(out_leg[0], alt="ground")]
         self.assertEqual(node("FB.currentLeg(DATA).length", ground + out_leg), 5)
 
+    def test_leg_of_a_landed_flight(self):
+        t = 1791400000
+        def p(i, lat, lon, alt):
+            return {"t": t + i * 60, "lat": lat, "lon": lon, "alt": alt}
+        out = [p(i, 32.0 + i * 0.2, 34.85 - i * 0.2, 3000 + 3000 * i) for i in range(6)]        # TLV departure
+        back = [p(300 + i, 33.0 - i * 0.2, 33.85 + i * 0.2, 30000 - 5000 * i) for i in range(6)]  # arrival 5 h later
+        ground = [p(306, 32.0, 34.88, "ground")]
+        pts = out + back + ground
+        legs = node("FB.legs(DATA).map(l => l.length)", pts)
+        self.assertEqual(legs, [6, 6])                       # split by the unseen stop; ground ends the arrival
+        seen = t + 306 * 60                                  # the callsign last heard taxiing in
+        arr = node(f"FB.legAt(DATA, {seen}, 'ARR')[0].t", pts)
+        self.assertEqual(arr, back[0]["t"])
+        dep = node(f"FB.legAt(DATA, {t}, 'DEP')[0].t", pts)
+        self.assertEqual(dep, out[0]["t"])
+
     def test_geometry_matches(self):
         self.assertAlmostEqual(node("FB.haversineNm(32.0114, 34.8867, 25.2528, 55.3644)"),
                                fw.haversine_nm(32.0114, 34.8867, 25.2528, 55.3644), places=6)
@@ -180,24 +196,39 @@ def fw_epoch(hhmm: str) -> float:
 
 @unittest.skipUnless(NODE, "node not installed")
 class CorsWorker(unittest.TestCase):
-    """tools/cors_worker.js (Cloudflare Worker): relays only the feed paths the pages use, adds CORS."""
-    def run_worker(self, requests_):
+    """tools/cors_worker.js (Cloudflare Worker): relays only the feed paths the pages use, adds CORS,
+    serves a recent answer when adsb.lol says 429, and keeps the callsign -> hex map (/hexof)."""
+    def run_worker(self, body):
+        """Run `body` (async JS) with the worker `w`, `req(path, origin, method)`, fake `fetch`
+        (`UP.status`, `UP.point` aircraft, `calls`), cache (`caches.default`), KV `env.CALLSIGNS`
+        and clock (`clock.now`, ms). Returns what the body returns."""
         src = os.path.abspath(os.path.join(ROOT, "tools", "cors_worker.js"))
         script = f"""
           const src = require("fs").readFileSync({json.dumps(src)}, "utf8");
-          const calls = [];
-          globalThis.fetch = async (u, o) => {{ calls.push(u);
-            return u.includes("429") ? new Response("busy", {{status: 429}})
-                                     : new Response('{{"ac":[]}}', {{headers: {{"Content-Type": "application/json"}}}}); }};
+          const clock = {{now: 1791400000000}}; Date.now = () => clock.now;
+          const calls = [], UP = {{status: 200, point: []}};
+          globalThis.fetch = async (u) => {{ calls.push(u);
+            if (u.includes("429") || UP.status !== 200) return new Response("busy", {{status: UP.status === 200 ? 429 : UP.status}});
+            const body = u.includes("/v2/point/") ? {{ac: UP.point}} : {{ac: [], n: calls.length}};
+            return new Response(JSON.stringify(body), {{headers: {{"Content-Type": "application/json"}}}}); }};
+          const store = new Map();
+          globalThis.caches = {{default: {{
+            match: async k => store.has(k.url) ? store.get(k.url).clone() : undefined,
+            put: async (k, r) => {{ store.set(k.url, r); }} }}}};
+          const kv = new Map();
+          const env = {{CALLSIGNS: {{get: async (k, o) => kv.has(k) ? JSON.parse(kv.get(k)) : null,
+                                     put: async (k, v) => {{ kv.set(k, v); }} }}}};
+          const ctx = {{waitUntil: p => p}};
           (async () => {{
             const w = (await import("data:text/javascript," + encodeURIComponent(src))).default;
-            const out = [];
-            for (const [method, path, origin] of {json.dumps(requests_)}) {{
-              const h = origin ? {{Origin: origin}} : {{}};
-              const r = await w.fetch(new Request("https://relay.example" + path, {{method, headers: h}}), {{}}, {{waitUntil() {{}}}});
-              out.push([r.status, r.headers.get("Access-Control-Allow-Origin")]);
-            }}
-            process.stdout.write(JSON.stringify({{out, calls}}));
+            const req = async (path, origin, method) => {{
+              const r = await w.fetch(new Request("https://relay.example" + path,
+                {{method: method || "GET", headers: origin ? {{Origin: origin}} : {{}}}}), env, ctx);
+              await new Promise(ok => setTimeout(ok, 0));   // let cache.put finish
+              return [r.status, r.headers.get("Access-Control-Allow-Origin"), r.headers.get("X-Stale"), await r.text()];
+            }};
+            const out = await (async () => {{ {body} }})();
+            process.stdout.write(JSON.stringify(out));
           }})();"""
         r = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=60)
         if r.returncode:
@@ -205,25 +236,57 @@ class CorsWorker(unittest.TestCase):
         return json.loads(r.stdout)
 
     def test_relays_feed_paths_with_cors_only(self):
-        pages, other = "https://yuval-harpaz.github.io", "https://evil.example"
-        got = self.run_worker([
-            ["GET", "/v2/hex/738071,8965d1", pages],
-            ["GET", "/v2/callsign/WZZ4603", "http://localhost:8765"],
-            ["GET", "/data/traces/71/trace_recent_738071.json", pages],
-            ["OPTIONS", "/v2/hex/738071", pages],
-            ["GET", "/v2/hex/738071", other],          # another site: refused
-            ["GET", "/v2/point/32/34/250", pages],     # not a path the pages use: not relayed
-            ["GET", "/https://example.com/", pages],
-            ["POST", "/v2/hex/738071", pages],
-            ["GET", "/v2/callsign/X429", pages],       # upstream 429 passed on
-            ["GET", "/", None],                        # someone opening the address: a short help text
-        ])
+        pages = "https://yuval-harpaz.github.io"
+        got = self.run_worker("""
+            const P = "https://yuval-harpaz.github.io", out = [];
+            for (const [path, origin, method] of [
+                ["/v2/hex/738071,8965d1", P], ["/v2/callsign/WZZ4603", "http://localhost:8765"],
+                ["/data/traces/71/trace_recent_738071.json", P], ["/v2/hex/738071", P, "OPTIONS"],
+                ["/v2/hex/738071", "https://evil.example"],   // another site: refused
+                ["/v2/point/32/34/250", P],                   // not a path the pages use: not relayed
+                ["/https://example.com/", P], ["/v2/hex/738071", P, "POST"],
+                ["/v2/callsign/X429", P],                     // upstream 429 passed on (nothing cached)
+                ["/", null]])                                 // someone opening the address: a help text
+              out.push((await req(path, origin, method)).slice(0, 2));
+            return {out, calls};""")
         self.assertEqual(got["out"], [[200, pages], [200, "http://localhost:8765"], [200, pages], [204, pages],
                                       [403, None], [404, pages], [404, pages], [405, pages], [429, pages], [200, None]])
         self.assertEqual(got["calls"], ["https://api.adsb.lol/v2/hex/738071,8965d1",
                                         "https://api.adsb.lol/v2/callsign/WZZ4603",
                                         "https://adsb.lol/data/traces/71/trace_recent_738071.json",
                                         "https://api.adsb.lol/v2/callsign/X429"])
+
+    def test_cached_answer_and_a_recent_one_when_adsb_lol_says_429(self):
+        got = self.run_worker("""
+            const P = "https://yuval-harpaz.github.io", path = "/v2/callsign/CFG4308", out = [];
+            out.push(await req(path, P));                       // fetched
+            clock.now += 3000; out.push(await req(path, P));    // fresh: from the cache
+            clock.now += 10000; UP.status = 429;
+            out.push(await req(path, P));                       // 429 upstream: the 13 s old answer
+            clock.now += 200000; out.push(await req(path, P));  // too old by now: the 429 itself
+            return {out: out.map(r => [r[0], r[2], r[3]]), calls: calls.length};""")
+        self.assertEqual([o[0] for o in got["out"]], [200, 200, 200, 429])
+        self.assertEqual(got["out"][1][2], got["out"][0][2])     # same answer, not asked again
+        self.assertEqual(got["out"][2][1], "13")                 # X-Stale: its age in seconds
+        self.assertEqual(got["calls"], 3)
+
+    def test_callsign_map_from_the_scheduled_run(self):
+        got = self.run_worker("""
+            UP.point = [{hex: "4b1805", flight: "CFG4308 ", seen: 2}, {hex: "738062", flight: "ELY5064"},
+                        {hex: "abc123"}];                                      // no callsign: skipped
+            await w.scheduled({}, env, ctx);
+            const first = JSON.parse((await req("/hexof/CFG4308,ELY5064,NONE", "https://yuval-harpaz.github.io"))[3]);
+            clock.now += 37 * 3600e3; UP.point = [{hex: "738062", flight: "ELY5064"}];
+            await w.scheduled({}, env, ctx);                                   // CFG4308 too old now
+            const later = JSON.parse((await req("/hexof/CFG4308,ELY5064", null))[3]);
+            UP.status = 429; await w.scheduled({}, env, ctx);                  // a busy feed changes nothing
+            const busy = JSON.parse((await req("/hexof/ELY5064", null))[3]);
+            return {first, later, busy, point: calls.filter(u => u.includes("/v2/point/")).length};""")
+        self.assertEqual(got["first"], {"CFG4308": {"hex": "4b1805", "seen": 1791399998},
+                                        "ELY5064": {"hex": "738062", "seen": 1791400000}})
+        self.assertEqual(list(got["later"]), ["ELY5064"])
+        self.assertEqual(got["busy"]["ELY5064"]["hex"], "738062")
+        self.assertEqual(got["point"], 3)
 
 
 class FakeUpstream:
