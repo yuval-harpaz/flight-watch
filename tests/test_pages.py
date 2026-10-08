@@ -90,6 +90,18 @@ class BoardLogicMatchesPython(unittest.TestCase):
             py = datetime.fromisoformat(s).replace(tzinfo=fw.ZoneInfo("Asia/Jerusalem")).timestamp()
             self.assertEqual(node(f"FB.israelEpoch({json.dumps(s)})"), py, s)
 
+    def test_current_leg_starts_after_a_stop_even_one_not_seen(self):
+        t = 1791400000
+        out_leg = [{"t": t + i * 60, "lat": 32.0 + i * 0.1, "lon": 34.8 - i * 0.1, "alt": 5000 + 1000 * i} for i in range(5)]
+        # unseen stop: 3.6 h later, 330 nm away (~92 kt on average), then the way back
+        back = [{"t": t + 4 * 60 + 13000 + i * 60, "lat": 34.8 - i * 0.1, "lon": 29.7 + i * 0.1, "alt": 39000} for i in range(3)]
+        self.assertEqual(node("FB.currentLeg(DATA).length", out_leg + back), 3)
+        # a 30 min coverage gap at cruise speed is the same leg
+        gap = [{"t": t + 4 * 60 + 1800, "lat": 32.4 - 3.5, "lon": 34.4 + 3.5, "alt": 37000}]  # ~240 nm in 30 min
+        self.assertEqual(node("FB.currentLeg(DATA).length", out_leg + gap), 6)
+        ground = [dict(out_leg[0], alt="ground")]
+        self.assertEqual(node("FB.currentLeg(DATA).length", ground + out_leg), 5)
+
     def test_geometry_matches(self):
         self.assertAlmostEqual(node("FB.haversineNm(32.0114, 34.8867, 25.2528, 55.3644)"),
                                fw.haversine_nm(32.0114, 34.8867, 25.2528, 55.3644), places=6)

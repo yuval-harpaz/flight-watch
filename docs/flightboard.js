@@ -245,6 +245,19 @@ FB.trace = async function (hex) {
   out.sort((a, b) => a.t - b.t);
   return out.filter((p, i) => !i || p.t > out[i - 1].t);
 };
+/** The points of the current leg: after the last time on the ground, or after a gap the aircraft
+ *  could not have spent flying (> 10 min at under 200 kt on average): a stop where coverage is
+ *  missing, e.g. LY5064 8 Oct 2026, TLV 03:05Z - unseen at Heraklion - next heard 06:41Z inbound. */
+FB.currentLeg = function (pts) {
+  pts = pts.filter(p => p.lat != null);
+  let start = 0;
+  pts.forEach((p, i) => {
+    const q = pts[i - 1];
+    if (p.alt === "ground") start = i + 1;
+    else if (q && p.t - q.t > 600 && FB.haversineNm(q.lat, q.lon, p.lat, p.lon) / ((p.t - q.t) / 3600) < 200) start = i;
+  });
+  return pts.slice(start);
+};
 FB.onGround = ac => ac && (ac.alt_baro === "ground" || ((ac.gs || 0) < 50 && (+ac.alt_baro || 0) < 500));
 
 // ------------------------------------------------------------------ standing data (routes, airports)
