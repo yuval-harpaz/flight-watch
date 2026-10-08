@@ -280,11 +280,12 @@ or `tools/serve.py` on a server (`--host 0.0.0.0` behind an HTTPS proxy). The wo
 the feed paths the pages use, for the GitHub Pages and localhost origins, with a 5-30 s cache,
 and serves its last answer of up to 2 minutes when adsb.lol answers 429. With a KV namespace
 (binding `CALLSIGNS`) and a Cron Trigger every 5 minutes it also keeps which aircraft flew each
-callsign near TLV in the last 36 hours, so the map shows the flown track of a landed flight. The
-monitor fills it (adsb.lol refuses Cloudflare's requests): set the same random value as the
-worker's secret `LEARN_TOKEN` and as `RELAY_TOKEN` in the monitor's environment, and it sends the
-callsigns it hears every 5 minutes (`--share-interval`, `--share-url ''` to stop). The worker's
-`/status` shows the last send. `docs/flightboard.js` holds the logic both pages share; it
+callsign near TLV in the last 36 hours, so the map shows the flown track of a landed flight.
+adsb.lol refuses the worker's own requests, so a GitHub workflow fills it every 10 minutes
+(`.github/workflows/share_callsigns.yml`): set one random value as the worker's secret
+`LEARN_TOKEN` and as the repository secret `RELAY_TOKEN` (Settings -> Secrets and variables ->
+Actions). The monitor also sends what it hears when it runs with `RELAY_TOKEN` in its environment
+(`--share-interval`, `--share-url ''` to stop). The worker's `/status` shows the last send. `docs/flightboard.js` holds the logic both pages share; it
 mirrors the monitor's flight-board code (codeshares, operating carrier, callsigns, Israel time)
 and `tests/test_pages.py` runs it under node against the Python to keep them identical.
 Alerts are not shown on the pages yet.

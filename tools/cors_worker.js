@@ -13,8 +13,9 @@
  * 429 (it limits Cloudflare's shared addresses) the last answer of up to 2 min is served instead.
  *
  * The callsign map (/hexof) keeps callsign -> [hex, last seen] for 36 h, in one KV value. It is filled
- * by the monitor (flight_watch.py with RELAY_TOKEN set), which POSTs what it hears near TLV to /learn
- * every 5 min with "Authorization: Bearer <LEARN_TOKEN>". adsb.lol answers 429 to Cloudflare, so the
+ * through POST /learn with "Authorization: Bearer <LEARN_TOKEN>": every 10 min by the GitHub workflow
+ * .github/workflows/share_callsigns.yml (tools/share_callsigns.py, secret RELAY_TOKEN), and also by
+ * the monitor (flight_watch.py) while it runs with RELAY_TOKEN set. adsb.lol answers 429 to Cloudflare, so the
  * optional Cron Trigger (one /v2/point request around TLV every 5 min) failed every time (8 Oct 2026). The board does
  * not name the aircraft, and once a flight has landed the live feed no longer finds it by callsign;
  * with the hex the map page draws the flown track of a landed flight. Nothing else is stored.

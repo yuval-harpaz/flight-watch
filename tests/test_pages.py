@@ -322,6 +322,47 @@ class CorsWorker(unittest.TestCase):
         self.assertEqual(got["status"]["lastPush"]["callsigns"], 1)   # received in the last push (an older hearing: map kept)
 
 
+class ShareCallsignsScript(unittest.TestCase):
+    """tools/share_callsigns.py (run by the GitHub workflow): adsb.lol near TLV -> the relay's /learn."""
+    def run_main(self, answers, token="s3cret"):
+        import io
+        import urllib.error
+        from unittest import mock
+        import share_callsigns as sc
+        sent, sleeps = [], []
+
+        def opener(req, timeout=None):
+            sent.append(req)
+            code, body = answers.pop(0)
+            if code != 200:
+                raise urllib.error.HTTPError(req.full_url, code, "x", {}, io.BytesIO(b"busy"))
+            return io.BytesIO(json.dumps(body).encode())
+
+        with mock.patch.dict(os.environ, {"RELAY_TOKEN": token}):
+            return sc.main(opener, sleeps.append), sent, sleeps
+
+    FEED = {"now": 1791400000000, "ac": [{"hex": "738062", "flight": "ELY5064 ", "seen": 3.4},
+                                         {"hex": "4b1805", "flight": "CFG4308"}, {"hex": "abc123"}]}
+
+    def test_sends_what_is_near_tlv(self):
+        code, sent, _ = self.run_main([(200, self.FEED), (200, {"stored": 2})])
+        self.assertEqual(code, 0)
+        self.assertIn("/v2/point/32.0114/34.8867/250", sent[0].full_url)
+        post = sent[1]
+        self.assertEqual(post.get_method(), "POST")
+        self.assertEqual(post.get_header("Authorization"), "Bearer s3cret")
+        self.assertEqual(json.loads(post.data), {"ELY5064": ["738062", 1791399997], "CFG4308": ["4b1805", 1791400000]})
+
+    def test_busy_feed_is_a_warning_and_a_refusing_relay_an_error(self):
+        code, sent, sleeps = self.run_main([(429, None), (429, None)])
+        self.assertEqual((code, len(sent), sleeps), (0, 2, [30]))     # one retry, nothing sent
+        code, _, _ = self.run_main([(429, None), (200, self.FEED), (200, {"stored": 2})])
+        self.assertEqual(code, 0)
+        code, _, _ = self.run_main([(200, self.FEED), (403, None)])
+        self.assertEqual(code, 1)                                     # wrong token: a red run
+        self.assertEqual(self.run_main([], token="")[0], 1)            # no secret set
+
+
 class FakeUpstream:
     """Stands in for requests.Session inside serve.Relay's Http."""
     def __init__(self):
