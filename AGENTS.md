@@ -263,9 +263,13 @@ and fetching a cold start's ~60 files in one cycle held up the local poll for ov
   worker serves its last answer of up to 2 min on an upstream error and the map retries a 429 after
   20 s. Fallback if that is not enough: an HTTPS `tools/serve.py` on the VPS.
   **Callsign map** (`/hexof/<cs,...>`): the board does not name the aircraft and the feed finds a
-  callsign only while it flies, so a landed flight had no track. The worker's Cron Trigger (every
-  5 min) asks `/v2/point/<TLV>/250` once and keeps callsign -> [hex, last seen] for 36 h in one KV
-  value (binding `CALLSIGNS`; 288 writes a day of the free 1,000). The owner agreed to this small,
+  callsign only while it flies, so a landed flight had no track. The worker keeps callsign -> [hex,
+  last seen] for 36 h in one KV value (binding `CALLSIGNS`). Its Cron Trigger (`/v2/point/<TLV>/250`
+  every 5 min) got 429 on every run from Cloudflare (8 Oct 2026), so the **monitor** fills it:
+  `Monitor.share_callsigns` POSTs the pairs heard since the last send to `/learn` every
+  `--share-interval` (300 s), with `Authorization: Bearer $RELAY_TOKEN` (env only; the worker's
+  secret `LEARN_TOKEN` has the same value). No extra adsb.lol requests; a failure is logged and never
+  stops the poll. 288 KV writes a day of the free 1,000 (remove the cron to avoid 288 more). The owner agreed to this small,
   expiring store (8 Oct 2026). The map then draws that aircraft's leg to / from TLV from today's
   trace (`FB.legs` / `FB.legAt`). The route database is ignored when it disagrees with the board's
   airport (ELY5064 listed BCN, board HER). opendata.adsb.fi sends no CORS

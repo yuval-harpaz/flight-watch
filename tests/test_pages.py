@@ -295,6 +295,33 @@ class CorsWorker(unittest.TestCase):
         self.assertEqual(got["point"], 3)
 
 
+    def test_monitor_fills_the_map_through_learn(self):
+        got = self.run_worker("""
+            const post = async (body, token) => {
+              const r = await w.fetch(new Request("https://relay.example/learn", {method: "POST", body,
+                headers: token ? {Authorization: "Bearer " + token} : {}}), env, ctx);
+              return [r.status, await r.text()];
+            };
+            const none = await post("{}", "s3cret");                  // no secret set in the worker yet
+            env.LEARN_TOKEN = "s3cret";
+            const wrong = await post("{}", "guess");
+            const bad = await post("not json", "s3cret");
+            const now = clock.now / 1000;
+            const ok = await post(JSON.stringify({"ELY5064": ["738062", now - 30], "cfg4308 ": ["4B1805", now],
+                                                  "BAD!": ["738062", now], "OLD1": ["abcdef", now - 40 * 3600],
+                                                  "NOHEX": ["zz", now]}), "s3cret");
+            await post(JSON.stringify({"ELY5064": ["111111", now - 600]}), "s3cret");   // older: kept as was
+            const map = JSON.parse((await req("/hexof/ELY5064,CFG4308,OLD1", null))[3]);
+            const status = JSON.parse((await req("/status", null))[3]);
+            return {codes: [none[0], wrong[0], bad[0], ok[0]], stored: JSON.parse(ok[1]).stored, map, status};""")
+        self.assertEqual(got["codes"], [503, 403, 400, 200])
+        self.assertEqual(got["stored"], 2)
+        self.assertEqual({k: v["hex"] for k, v in got["map"].items()}, {"ELY5064": "738062", "CFG4308": "4b1805"})
+        self.assertEqual(got["status"]["callsigns"], 2)
+        self.assertTrue(got["status"]["learnToken"])
+        self.assertEqual(got["status"]["lastPush"]["callsigns"], 1)   # received in the last push (an older hearing: map kept)
+
+
 class FakeUpstream:
     """Stands in for requests.Session inside serve.Relay's Http."""
     def __init__(self):

@@ -56,6 +56,7 @@ class FakeFeed:
         self.route_status = 200   # standing-data host: 200 serves self.files, else this status
         self.files = {}           # standing-data path ("routes/schema-01/W/WZZ-3.csv") -> CSV text
         self.headers = {}
+        self.learned = []         # (json body, Authorization header) of POSTs to the relay's /learn
 
     def ac(self, hexid):
         a = dict(self.aircraft[hexid], hex=hexid)
@@ -79,6 +80,9 @@ class FakeFeed:
             ids = set(path.rsplit("/", 1)[1].split(","))
             return FakeResponse(200, {"now": now_ms, "ac": [
                 self.ac(h) for h, a in self.aircraft.items() if a.get("flight", "").strip() in ids]})
+        if path == "/learn" and method == "POST":
+            self.learned.append((kw.get("json"), (kw.get("headers") or {}).get("Authorization")))
+            return FakeResponse(200, {"stored": len(kw.get("json") or {})})
         if "/standing-data/" in path:
             rel = path.split("/standing-data/main/", 1)[1]
             if self.route_status != 200:
@@ -410,6 +414,47 @@ def racetrack(laps, start=(32.5, 33.8), alt=16000, gs=250):
         for heading in (90, 270):
             tracks += [heading] * 6 + [heading + 30 * i for i in range(1, 7)]
     return path(*start, tracks, [alt] * len(tracks), gs=gs)
+
+
+class ShareCallsigns(unittest.TestCase):
+    """The monitor tells the map page's relay which aircraft flew which callsign (tools/cors_worker.js
+    /learn): the board does not name the aircraft, and the worker gets 429 from adsb.lol itself."""
+    def test_sends_new_pairs_every_interval_only_with_a_token(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"RELAY_TOKEN": "s3cret"}):
+            mon, feed, clock, _ = make(["--share-interval", "60"])
+            path_ = path(32.3, 34.5, [180] * 3, [9000] * 3)
+            fly(mon, feed, clock, "738062", path_, flight="ELY5064")
+            self.assertEqual(len(feed.learned), 1)                      # first cycle: what it heard
+            body, auth = feed.learned[0]
+            self.assertEqual(list(body), ["ELY5064"])
+            self.assertEqual(body["ELY5064"][0], "738062")              # [hex, data time heard]
+            self.assertLessEqual(body["ELY5064"][1], mon.tracks["738062"].last_msg)
+            self.assertEqual(auth, "Bearer s3cret")
+            feed.local.discard("738062")                                # ELY5064 no longer heard
+            fly(mon, feed, clock, "4b1805", path(32.2, 34.6, [90] * 6, [5000] * 6), flight="CFG4308")
+            self.assertEqual(len(feed.learned), 2)                      # 60 s later, only new hearings
+            self.assertIn("CFG4308", feed.learned[1][0])
+            feed.local.clear(); feed.aircraft.clear()                   # nothing heard any more:
+            for _ in range(8):                                          # (the last hearings go out once)
+                step(mon, clock)
+            sent = len(feed.learned)
+            for _ in range(8):
+                step(mon, clock)
+            self.assertEqual(len(feed.learned), sent)                   # nothing new, nothing sent
+        with mock.patch.dict(os.environ, {"RELAY_TOKEN": ""}):
+            mon, feed, clock, _ = make()
+            fly(mon, feed, clock, "738062", path_, flight="ELY5064")
+            self.assertEqual(feed.learned, [])                          # no token: nothing sent
+
+    def test_a_failing_relay_does_not_stop_the_poll(self):
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"RELAY_TOKEN": "s3cret"}):
+            mon, feed, clock, alerts = make(["--share-interval", "10"])
+            feed.limited.add("/learn")
+            fly(mon, feed, clock, "738062", path(32.3, 34.5, [180] * 4, [9000] * 4), flight="ELY5064")
+            self.assertIn("738062", mon.tracks)                         # still polled every cycle
+            self.assertGreater(sum(1 for m, p in feed.calls if "/point/" in p), 3)
 
 
 class HoldingTests(unittest.TestCase):
