@@ -270,6 +270,17 @@ class LocalHelper(unittest.TestCase):
         self.assertIn(b"cooling down", body)
         self.assertEqual(len(self.up.calls), 1)
 
+    def test_pages_ask_for_the_current_flightboard_js(self):
+        # GitHub Pages lets browsers cache files for 10 min: a new page with the old flightboard.js
+        # broke ("FB.blocked is not a function"). The ?v= tag must follow the file's content.
+        import hashlib
+        with open(JS, "rb") as f:
+            v = hashlib.sha256(f.read()).hexdigest()[:8]
+        for page in ("flights.html", "flight_map.html"):
+            with open(os.path.join(ROOT, "docs", page), encoding="utf-8") as f:
+                self.assertIn(f'src="flightboard.js?v={v}"', f.read(),
+                              f"{page}: set flightboard.js?v={v} (sha256 of docs/flightboard.js)")
+
     def test_serves_the_pages(self):
         for path in ("/", "/flights.html", "/flight_map.html", "/flightboard.js"):
             code, _, body = self.get(path)

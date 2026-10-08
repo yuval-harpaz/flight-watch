@@ -54,7 +54,9 @@ board logic is a port of `Schedule.load` (slot grouping, lowest flight number = 
 callsign variants), `FB.AIRLINE_ICAO` is a copy of `AIRLINE_ICAO`, `FB.israelEpoch` reads board
 times as Python does (fold=0 at DST changes), and `tests/test_pages.py` runs the JS under node on
 the same rows and fails when they differ - change both together. Not ported yet: Python's
-`Schedule.resolve` (unknown airline codes via route data) and every alert check.
+`Schedule.resolve` (unknown airline codes via route data) and every alert check. The pages load
+`flightboard.js?v=<first 8 hex of its sha256>`: GitHub Pages lets browsers cache files for 10 min, and a
+new page with the old script failed ("FB.blocked is not a function"); a test fails until `v` is updated.
 
 ## Data sources: decisions and history
 
