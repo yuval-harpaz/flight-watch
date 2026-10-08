@@ -2,7 +2,7 @@
 <html lang="en"><head><meta charset="utf-8"><title>TLV flight map</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://unpkg.com/deck.gl@9.1.14/dist.min.js"></script>
-<script src="flightboard.js?v=60739634"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
+<script src="flightboard.js?v=b42bf2ce"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
 <style>
 html,body{margin:0;height:100%;font-family:sans-serif;color:#222;background:#fff}
 #top{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;padding:6px 8px;font-size:13px;border-bottom:1px solid #ddd}
@@ -23,7 +23,8 @@ html,body{margin:0;height:100%;font-family:sans-serif;color:#222;background:#fff
   <button id="next" title="the arriving flight closest to landing that is not this one">next arrival ▸</button>
   <label>times <select id="zone"><option value="Asia/Jerusalem">Israel</option><option value="UTC">UTC</option>
     <option value="local">this computer's time zone</option></select></label>
-  <span class="note">units: m, km, km/h</span>
+  <span class="note">units: m, km, km/h · <span style="color:#1f6fb2">━</span> flown track ·
+    <span style="color:#888">━</span> planned route · <span style="color:#dc3c28">━</span> next 5 min</span>
   <span id="status" class="note"></span>
 </div>
 <div id="main"><div id="map"></div><div id="info">loading…</div>
@@ -119,7 +120,9 @@ async function show(f, ac, auto, none, hex) {
     } else if (!f.callsigns.length) {  // e.g. an airline code missing from FB.AIRLINE_ICAO
       cur.msg = `no callsign is known for airline code ${f.flight.replace(/\d+$/, "")}, so it cannot be looked up live`;
     } else if (!ac && !FB.liveUseful(f, Date.now() / 1000)) {  // landed, cancelled, or far from its time
-      cur.msg = /CANCEL/.test(f.status) ? "cancelled" : f.status === "LANDED" ? "landed - no live data needed"
+      cur.msg = /CANCEL/.test(f.status) ? "cancelled" : f.status === "LANDED" ? "Landed. The grey arc is the planned route; the flown track can't be shown " +
+                "after landing (the board does not name the aircraft, and the live feed knows only aircraft " +
+                "flying now). FR24 has the flight's history."
               : "not flying now - live data is shown from shortly before its time";
     } else {
       if (!ac) ac = (await FB.byCallsign(f.callsigns.concat(f.altCallsigns)))[0] || null;
@@ -133,10 +136,7 @@ async function show(f, ac, auto, none, hex) {
   routeEnds(f, ac).then(ends => { cur.ends = ends; render(); });
   if (ac) {
     const pts = await FB.trace(ac.hex);
-    // this leg only: after the last time on the ground (an arrival's take-off, a departure's gate)
-    let start = 0;
-    pts.forEach((p, i) => { if (p.alt === "ground") start = i + 1; });
-    cur.trail = pts.slice(start).filter(p => p.lat != null);
+    cur.trail = FB.currentLeg(pts);
     render();
     timer = setInterval(poll, POLL_S * 1000);
   }
@@ -236,7 +236,8 @@ function draw() {
         const [[w, s], [e, n]] = props.tile.boundingBox;
         return new deck.BitmapLayer(props, {data: null, image: props.data, bounds: [w, s, e, n]});
       }}),
-    new deck.PathLayer({id: "route", data: route, getPath: d => d.path, getColor: [90, 90, 90, 120], widthMinPixels: 2}),
+    new deck.PathLayer({id: "route", data: route.map(r => ({...r, tip: "planned route (route database)"})), pickable: true,
+      getPath: d => d.path, getColor: [90, 90, 90, 120], widthMinPixels: 2}),
     new deck.PathLayer({id: "trail", data: trail.length > 1 ? [{path: trail.map(p => [p.lon, p.lat])}] : [],
       getPath: d => d.path, getColor: [31, 111, 178, 220], widthMinPixels: 3}),
     new deck.LineLayer({id: "ahead", data: ahead, getSourcePosition: d => d.a, getTargetPosition: d => d.b,
