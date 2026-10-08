@@ -206,6 +206,7 @@ class CorsWorker(unittest.TestCase):
         script = f"""
           const src = require("fs").readFileSync({json.dumps(src)}, "utf8");
           const clock = {{now: 1791400000000}}; Date.now = () => clock.now;
+          console.log = () => {{}};   // the worker's log lines (Cloudflare Logs) would mix with the result
           const calls = [], UP = {{status: 200, point: []}};
           globalThis.fetch = async (u) => {{ calls.push(u);
             if (u.includes("429") || UP.status !== 200) return new Response("busy", {{status: UP.status === 200 ? 429 : UP.status}});
@@ -281,7 +282,12 @@ class CorsWorker(unittest.TestCase):
             const later = JSON.parse((await req("/hexof/CFG4308,ELY5064", null))[3]);
             UP.status = 429; await w.scheduled({}, env, ctx);                  // a busy feed changes nothing
             const busy = JSON.parse((await req("/hexof/ELY5064", null))[3]);
-            return {first, later, busy, point: calls.filter(u => u.includes("/v2/point/")).length};""")
+            const status = JSON.parse((await req("/status", null))[3]);
+            return {first, later, busy, status, point: calls.filter(u => u.includes("/v2/point/")).length};""")
+        self.assertEqual(got["status"]["kv"], True)          # /status: what the owner checks in a browser
+        self.assertEqual(got["status"]["callsigns"], 1)
+        self.assertEqual(got["status"]["lastRun"]["upstreamHTTP"], 429)
+        self.assertEqual(got["status"]["lastRun"]["aircraft"], 0)
         self.assertEqual(got["first"], {"CFG4308": {"hex": "4b1805", "seen": 1791399998},
                                         "ELY5064": {"hex": "738062", "seen": 1791400000}})
         self.assertEqual(list(got["later"]), ["ELY5064"])
