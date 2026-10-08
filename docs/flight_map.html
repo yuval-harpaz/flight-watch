@@ -49,7 +49,9 @@ const map = new deck.DeckGL({container: "map", controller: true,
   getTooltip: ({object}) => object && object.tip ? {html: object.tip} : null});
 
 function feedError(e) {
-  if (/HTTP 429/.test(e.message)) return "<div class='note'>the live feed is busy (HTTP 429) - the next update retries</div>";
+  if (/HTTP 429/.test(e.message)) return "<div class='note'>The live feed is busy (HTTP 429) - it is asked again in a while." +
+    (cur && cur.fromTrace ? " Meanwhile the blue line is the aircraft's track from adsb.lol's trace files, the dot its last point" +
+                            " (" + esc(FB.fmt(cur.trail[cur.trail.length - 1].t, ZONE, "hm")) + "); ADSBx shows it live." : "") + "</div>";
   if (FB.blocked(e) && !FB.local()) return "<div class='note'>Live positions can't be loaded right now" +
     (FB.RELAY ? " (the relay did not answer)" : ": the feed (adsb.lol) does not let other web sites read it") +
     ". The links below show the flight live.</div>";
@@ -102,9 +104,9 @@ async function pick() {
 const offBoard = hex => ({id: "hex|" + hex, flight: "", dir: "", city: "", other: "", country: "", airline: "",
                           codeshares: [], callsigns: [], altCallsigns: [], status: "", schedText: "", offBoard: true});
 
-async function show(f, ac, auto, none, hex) {
+async function show(f, ac, auto, none, hex, tries = 0) {
   clearInterval(timer);
-  fitted = false;
+  if (!tries) fitted = false;  // a retry keeps the viewer's zoom
   const home = {icao: FB.HOME.icao, iata: "TLV", city: FB.HOME.name, lat: FB.HOME.lat, lon: FB.HOME.lon};
   cur = {f, ac, auto, hex, trail: [], ends: [home], seen: ac ? Date.now() / 1000 - (ac.seen || 0) : NaN,
          msg: none ? "no arriving flight is airborne in the live feed right now" : ""};
@@ -135,9 +137,10 @@ async function show(f, ac, auto, none, hex) {
     if (ac) cur.seen = Date.now() / 1000 - (ac.seen || 0);
   } catch (e) {
     cur.err = e;
-    if (/HTTP 429/.test(e.message)) {  // the feed is busy: look again in 20 s, unless another flight is shown by then
-      const me = cur;
-      setTimeout(() => { if (cur === me) show(f, null, auto, none, hex); }, 20000);
+    if (/HTTP 429/.test(e.message)) {  // the feed is busy (adsb.lol limits the relay's Cloudflare addresses)
+      if (!hex && f.callsigns.length) await busyTrack(f);
+      const me = cur, wait = Math.min(120, 20 * 2 ** tries);  // 20, 40, 80, 120 s ...
+      setTimeout(() => { if (cur === me) show(f, null, auto, none, hex, tries + 1); }, wait * 1000);
     }
   }
   titles();
@@ -149,6 +152,21 @@ async function show(f, ac, auto, none, hex) {
     render();
     timer = setInterval(poll, POLL_S * 1000);
   }
+}
+
+/** The live feed answered 429: the aircraft from the relay's callsign map (filled every 10 min),
+ *  if noted within 3 h of the flight's time, and its current leg from adsb.lol's trace files
+ *  (another host than the live API). Shown as the track up to its last point; ADSBx links live. */
+async function busyTrack(f) {
+  const cs = f.callsigns.concat(f.altCallsigns);
+  try {
+    const map = await FB.hexOf(cs);
+    const hit = cs.map(c => map[c]).find(m => m && Math.abs(m.seen - f.est) < 3 * 3600);
+    if (!hit) return;
+    cur.hex = hit.hex;
+    const leg = FB.currentLeg(await FB.trace(hit.hex));
+    if (leg.length > 1) { cur.trail = leg; cur.fromTrace = true; }
+  } catch (e) { /* the relay is busy too: the links stay */ }
 }
 
 /** A flight no longer in the feed: its aircraft from the relay's callsign map (aircraft near TLV,
@@ -255,11 +273,13 @@ function render() {
 
 function draw() {
   const {ac, ends, trail} = cur;
-  const pos = ac && ac.lat != null ? [ac.lon, ac.lat] : null;
+  const last = !ac && cur.fromTrace && trail.length ? trail[trail.length - 1] : null;
+  const pos = ac && ac.lat != null ? [ac.lon, ac.lat] : last ? [last.lon, last.lat] : null;
   const route = ends.length === 2 ? [{path: FB.greatCircle(ends[0], ends[1], 96)}] : [];
-  const ahead = pos && ac.gs > 50 && ac.track != null && !FB.onGround(ac)
+  const ahead = ac && pos && ac.gs > 50 && ac.track != null && !FB.onGround(ac)
     ? [{a: pos, b: FB.destination(ac.lat, ac.lon, ac.track, ac.gs * 5 / 60).reverse()}] : [];
-  const label = ac ? `${String(ac.flight || ac.hex).trim()} ${ac.alt_baro === "ground" ? "ground" : Math.round((ac.alt_baro || 0) * FB.M) + " m"}` : "";
+  const label = ac ? `${String(ac.flight || ac.hex).trim()} ${ac.alt_baro === "ground" ? "ground" : Math.round((ac.alt_baro || 0) * FB.M) + " m"}`
+              : last ? `${cur.hex} ${last.alt === "ground" ? "ground" : Math.round((+last.alt || 0) * FB.M) + " m"} at ${FB.fmt(last.t, ZONE, "hm")}` : "";
   map.setProps({layers: [
     new deck.TileLayer({id: "tiles", data: TILES, minZoom: 0, maxZoom: 19, tileSize: 256,
       renderSubLayers: props => {
