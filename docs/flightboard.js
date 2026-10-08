@@ -195,11 +195,25 @@ FB.situation = function (f, now) {
 FB.local = function () {
   return typeof location !== "undefined" && /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
 };
+// FB.RELAY: an HTTPS address of tools/serve.py (or any relay of /v2/* and /data/traces/* that
+// adds CORS headers), for the pages on GitHub Pages; "" = none, so live data works only locally.
+FB.RELAY = "";
 FB.feedBase = function () {
   const q = typeof location !== "undefined" ? new URLSearchParams(location.search).get("feed") : null;
-  return q ? q.replace(/\/$/, "") : FB.local() ? "" : "https://api.adsb.lol";
+  return q ? q.replace(/\/$/, "") : FB.local() ? "" : FB.RELAY || "https://api.adsb.lol";
 };
-FB.traceBase = function () { return FB.local() ? "" : "https://adsb.lol"; };
+FB.traceBase = function () { return FB.local() ? "" : FB.RELAY || "https://adsb.lol"; };
+/** True when the browser could not read the feed at all (CORS refused, offline): fetch throws a
+ *  TypeError then, while an HTTP error status is an Error with "HTTP nnn". */
+FB.blocked = e => e instanceof TypeError;
+/** Is asking the live feed worth it? Not for a cancelled flight, an arrival landed over 30 min
+ *  ago, or a flight far from its time; the page then shows the board alone. */
+FB.liveUseful = function (f, now) {
+  if (/CANCEL/.test(f.status)) return false;
+  if (f.dir === "ARR") return f.status === "LANDED" ? now - f.est < 1800 : f.est - now < 16 * 3600 && now - f.est < 6 * 3600;
+  if (f.status === "DEPARTED") return now - f.est < 16 * 3600;  // may still be on its way
+  return f.est - now < 2 * 3600;                                  // a departure from 2 h before its time
+};
 FB.getJSON = async function (url) {
   const r = await fetch(url);
   if (!r.ok) throw new Error(url.split("?")[0] + ": HTTP " + r.status);

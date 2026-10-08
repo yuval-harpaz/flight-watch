@@ -184,7 +184,8 @@ the same rows and fails when they differ - change both together. Not ported yet:
 
 ## Links in alerts (no local storage)
 
-`fr24_flight` (`/data/flights/fz1073`, flight number from the board or callsign → IATA),
+`map` (our `docs/flight_map.html?hex=<hex>&f=<flight>&d=<A|D>` on GitHub Pages, `--viewer-url`; first
+link in posts), `fr24_flight` (`/data/flights/fz1073`, flight number from the board or callsign → IATA),
 `fr24_aircraft` (by registration), `live_adsbx` / `live`, `replay_adsbx` / `replay`
 (`?icao=<hex>&showTrace=<UTC date>`). ADS-B Exchange replays proved more reliable for older
 days than airplanes.live, which showed "No data". Tapping an ntfy notification opens live ADSBx.
@@ -249,8 +250,13 @@ and fetching a cold start's ~60 files in one cycle held up the local poll for ov
   disagrees with two built-in entries (9U `MLD` absent, GQ listed as `BSY` not `SEH`): unverified.
 
 - **Flight pages, next steps.** Show alerts on the map / list (needs the checks in JS, or the
-  monitor's `alerts.jsonl` served by the helper); port `Schedule.resolve`; host the relay on the
-  VPS so the GitHub Pages map works without a local helper. Past boards come from the
+  monitor's `alerts.jsonl` served by the helper); port `Schedule.resolve`. **Live data on GitHub
+  Pages needs a relay with CORS** (posts link the Pages map): adsb.lol sends no CORS header on any
+  endpoint (`/v2/*`, `/data/traces/*`, Oct 2026), so a page there can't read it whatever it tries.
+  Set `FB.RELAY` to an HTTPS `tools/serve.py` (VPS) or a similar relay. adsb.fi's opendata API was
+  not reachable from the cloud sandbox, so its CORS is unchecked. Without a relay the map skips
+  pointless lookups (`FB.liveUseful`: landed, cancelled, far from its time) and turns a refused
+  feed (`FB.blocked`, a fetch TypeError) into a quiet note with ADSBx / FR24 links. Past boards come from the
   over.org.il archive (nothing stored here); a past map would need ADS-B Exchange history, which
   is not free to read from a page - use the `replay_adsbx` links instead.
 

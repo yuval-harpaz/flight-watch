@@ -138,6 +138,18 @@ class Situations(unittest.TestCase):
         f = {"dir": d, "status": status, "sched": fw_epoch(sched), "est": fw_epoch(est)}
         return node(f"FB.situation(DATA.f, {fw_epoch(now)})", {"f": f})
 
+    def test_live_lookup_only_when_it_can_help(self):
+        def useful(d, status, est, now):
+            return node(f"FB.liveUseful(DATA, {fw_epoch(now)})", {"dir": d, "status": status, "est": fw_epoch(est)})
+        self.assertFalse(useful("ARR", "LANDED", "07:15", "09:20"))   # the W64603 case: landed 2 h ago
+        self.assertTrue(useful("ARR", "LANDED", "09:00", "09:20"))    # just landed: still taxiing
+        self.assertTrue(useful("ARR", "ON TIME", "13:00", "09:00"))   # airborne on a long flight
+        self.assertFalse(useful("ARR", "CANCELED", "09:30", "09:00"))
+        self.assertFalse(useful("DEP", "ON TIME", "18:00", "09:00"))  # still hours from its time
+        self.assertTrue(useful("DEP", "DEPARTED", "07:00", "09:00"))  # may still be on its way
+        self.assertTrue(node("FB.blocked(new TypeError('Failed to fetch'))"))     # CORS / offline
+        self.assertFalse(node("FB.blocked(new Error('x: HTTP 429'))"))
+
     def test_statuses(self):
         s = self.label("ARR", "ON TIME", "10:00", "10:40", "09:00")
         self.assertEqual((s["label"], s["cls"], s["delay"]), ("Delayed landing +40 min", "late", 40))

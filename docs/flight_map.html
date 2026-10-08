@@ -49,6 +49,8 @@ const map = new deck.DeckGL({container: "map", controller: true,
 
 function feedError(e) {
   if (/HTTP 429/.test(e.message)) return "<div class='note'>the live feed is busy (HTTP 429) - the next update retries</div>";
+  if (FB.blocked(e) && !FB.local()) return "<div class='note'>Live positions can't be shown on this site: the feed " +
+    "(adsb.lol) does not let other web sites read it. The links below show the flight live.</div>";
   const hint = FB.local() ? "" : "<br><span class='note'>api.adsb.lol does not let other web sites read it. Run " +
     "<code>python tools/serve.py</code> and open <a href='http://localhost:8765/flight_map.html'>" +
     "localhost:8765/flight_map.html</a>.</span>";
@@ -94,27 +96,38 @@ async function pick() {
 }
 
 // ---------------------------------------------------------------- one flight
-async function show(f, ac, auto, none) {
+/** A flight that is not on the board (an aircraft given by ?hex=, e.g. from an alert post). */
+const offBoard = hex => ({id: "hex|" + hex, flight: "", dir: "", city: "", other: "", country: "", airline: "",
+                          codeshares: [], callsigns: [], altCallsigns: [], status: "", schedText: "", offBoard: true});
+
+async function show(f, ac, auto, none, hex) {
   clearInterval(timer);
   fitted = false;
   const home = {icao: FB.HOME.icao, iata: "TLV", city: FB.HOME.name, lat: FB.HOME.lat, lon: FB.HOME.lon};
-  cur = {f, ac, auto, trail: [], ends: [home], seen: ac ? Date.now() / 1000 - (ac.seen || 0) : NaN,
+  cur = {f, ac, auto, hex, trail: [], ends: [home], seen: ac ? Date.now() / 1000 - (ac.seen || 0) : NaN,
          msg: none ? "no arriving flight is airborne in the live feed right now" : ""};
-  const url = new URLSearchParams({f: f.flight, d: f.dir[0], s: f.schedText});
+  const url = new URLSearchParams(f.offBoard ? {} : {f: f.flight, d: f.dir[0], s: f.schedText});
+  if (hex) url.set("hex", hex);
   if (!auto) history.replaceState(null, "", "?" + url);
-  $("title").textContent = `${f.flight} ${f.dir === "ARR" ? f.city + " → TLV" : "TLV → " + f.city}`;
-  document.title = f.flight + " - TLV flight map";
+  titles();
   render();
   try {
-    if (!f.callsigns.length) {  // e.g. an airline code missing from FB.AIRLINE_ICAO
+    if (hex) {  // one aircraft, the way alert posts link to it: live whatever the board says
+      if (!ac) ac = (await FB.byHex(hex)).ac;
+      if (!ac) cur.msg = "not in the live feed now: landed, or out of coverage";
+    } else if (!f.callsigns.length) {  // e.g. an airline code missing from FB.AIRLINE_ICAO
       cur.msg = `no callsign is known for airline code ${f.flight.replace(/\d+$/, "")}, so it cannot be looked up live`;
+    } else if (!ac && !FB.liveUseful(f, Date.now() / 1000)) {  // landed, cancelled, or far from its time
+      cur.msg = /CANCEL/.test(f.status) ? "cancelled" : f.status === "LANDED" ? "landed - no live data needed"
+              : "not flying now - live data is shown from shortly before its time";
     } else {
       if (!ac) ac = (await FB.byCallsign(f.callsigns.concat(f.altCallsigns)))[0] || null;
-      cur.ac = ac;
-      if (ac) cur.seen = Date.now() / 1000 - (ac.seen || 0);
       if (!ac) cur.msg = cur.msg || "not in the live feed: not airborne yet, already landed, or out of coverage";
     }
+    cur.ac = ac;
+    if (ac) cur.seen = Date.now() / 1000 - (ac.seen || 0);
   } catch (e) { cur.err = e; }
+  titles();
   render();
   routeEnds(f, ac).then(ends => { cur.ends = ends; render(); });
   if (ac) {
@@ -132,10 +145,21 @@ async function routeEnds(f, ac) {
   // the route data (by callsign) for both ends; TLV is one of them in any case
   const cs = ac && ac.flight ? String(ac.flight).trim() : f.callsigns[0];
   const codes = cs ? await FB.route(cs) : null;
+  if (f.offBoard) {  // not a TLV flight: its own route, first to last airport
+    const [a, b] = codes && codes.length > 1 ? await Promise.all([FB.airport(codes[0]), FB.airport(codes[codes.length - 1])]) : [];
+    return a && b ? [a, b] : [];
+  }
   const other = codes ? codes.filter(c => c !== FB.HOME.icao) : [];
   const far = other.length ? await FB.airport(f.dir === "ARR" ? other[0] : other[other.length - 1]) : null;
   const home = {icao: FB.HOME.icao, iata: "TLV", city: FB.HOME.name, lat: FB.HOME.lat, lon: FB.HOME.lon};
   return far ? (f.dir === "ARR" ? [far, home] : [home, far]) : [home];
+}
+
+function titles() {
+  const {f, ac} = cur, name = f.offBoard ? String(ac && ac.flight || "").trim() || cur.hex.toUpperCase() : f.flight;
+  $("title").textContent = f.offBoard ? name + (ac && ac.r ? " · " + ac.r : "")
+                                      : `${f.flight} ${f.dir === "ARR" ? f.city + " → TLV" : "TLV → " + f.city}`;
+  document.title = name + " - TLV flight map";
 }
 
 async function poll() {
@@ -157,16 +181,19 @@ async function poll() {
       clearInterval(timer);
       setTimeout(pick, 60 * 1000);
     }
-  } catch (e) { cur.err = e; }
+  } catch (e) {
+    cur.err = e;
+    if (FB.blocked(e) && !FB.local()) clearInterval(timer);  // the browser can't read the feed: stop asking
+  }
   render();
 }
 
 // ---------------------------------------------------------------- drawing
 function render() {
   if (!cur) return;
-  const {f, ac} = cur, now = Date.now() / 1000, s = FB.situation(f, now);
+  const {f, ac} = cur, now = Date.now() / 1000, s = f.offBoard ? null : FB.situation(f, now);
   const t = x => FB.fmt(x, ZONE, "dhm");
-  const rows = [["flight", `${esc(f.flight)}${f.codeshares.length ? " <span class='note'>" + esc(f.codeshares.join(" ")) + "</span>" : ""}`],
+  const rows = f.offBoard ? [["flight", "<span class='note'>not on the TLV flight board</span>"]] : [["flight", `${esc(f.flight)}${f.codeshares.length ? " <span class='note'>" + esc(f.codeshares.join(" ")) + "</span>" : ""}`],
                 ["airline", esc(f.airline)],
                 [f.dir === "ARR" ? "from" : "to", `${esc(f.city)} (${esc(f.other)})${f.country ? ", " + esc(f.country) : ""}`],
                 ["scheduled", esc(t(f.sched))], ["estimated", esc(t(f.est))],
@@ -178,14 +205,18 @@ function render() {
     rows.push(["aircraft", esc([String(ac.flight || "").trim(), ac.r, ac.t, ac.hex].filter(Boolean).join(" · "))],
               ["altitude", alt + (ac.baro_rate ? ` <span class="note">${(ac.baro_rate * FB.M / 60).toFixed(1)} m/s</span>` : "")],
               ["speed", ac.gs != null ? Math.round(ac.gs * FB.KM) + " km/h" + (ac.track != null ? ", track " + Math.round(ac.track) + "°" : "") : "?"],
-              ["to TLV", Math.round(dist * FB.KM) + " km" + (f.dir === "ARR" && ac.gs > 50 && !FB.onGround(ac) ? `, about ${esc(FB.fmt(now + dist / ac.gs * 3600, ZONE, "hm"))} at this speed` : "")],
+              ["to TLV", ac.lat == null ? "? <span class='note'>no current position</span>" : Math.round(dist * FB.KM) + " km" +
+                (f.dir === "ARR" && ac.gs > 50 && !FB.onGround(ac) ? `, about ${esc(FB.fmt(now + dist / ac.gs * 3600, ZONE, "hm"))} at this speed` : "")],
               ["squawk", /^7[567]00$/.test(sq) ? `<span class="warn">${sq} ${{"7500": "hijack", "7600": "radio failure", "7700": "emergency"}[sq]}</span>` : esc(sq || "-")],
               ["last seen", isFinite(cur.seen) ? Math.max(0, Math.round(now - cur.seen)) + " s ago" : "?"]);
   }
-  const links = ac ? `<a href="https://globe.adsbexchange.com/?icao=${ac.hex}" target="_blank">live (ADSBx)</a> · ` : "";
+  const hex = ac ? ac.hex : cur.hex;
+  const links = [hex && `<a href="https://globe.adsbexchange.com/?icao=${esc(hex)}" target="_blank">live (ADSBx)</a>`,
+                 f.flight && `<a href="https://www.flightradar24.com/data/flights/${esc(f.flight.toLowerCase())}" target="_blank">FR24</a>`]
+                .filter(Boolean).join(" · ");
   $("info").innerHTML = `<table>${rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>` +
     (cur.msg ? `<div class="note">${esc(cur.msg)}</div>` : "") + (cur.err ? feedError(cur.err) : "") +
-    `<div class="note">${links}<a href="https://www.flightradar24.com/data/flights/${esc(f.flight.toLowerCase())}" target="_blank">FR24</a>` +
+    `<div class="note">${links}` +
     `${cur.auto ? " · picked automatically: the arrival closest to landing" : ""}</div>`;
   $("status").textContent = ac ? `updated every ${POLL_S} s` : "";
   draw();
@@ -239,7 +270,13 @@ setInterval(() => cur && render(), 5000);  // "last seen" keeps counting between
   try {
     flights = FB.flights(await FB.fetchBoard());
   } catch (e) { $("info").textContent = "could not load the flight board: " + e.message; return; }
-  const want = params.get("f");
+  const want = params.get("f"), hex = (params.get("hex") || "").toLowerCase().replace(/[^0-9a-f~]/g, "");
+  if (hex) {  // an aircraft (alert posts link this way); its board flight when the post names it
+    const now = Date.now() / 1000, near = (a, b) => Math.abs(a.est - now) - Math.abs(b.est - now);
+    const f = want && (flights.find(x => x.flight === want && x.dir[0] === params.get("d") && x.schedText === params.get("s")) ||
+                       flights.filter(x => x.flight === want && x.dir[0] === params.get("d")).sort(near)[0]);
+    return show(f || offBoard(hex), null, false, false, hex);
+  }
   if (want) {
     const f = flights.find(x => x.flight === want && x.dir[0] === params.get("d") && x.schedText === params.get("s")) ||
               flights.find(x => x.flight === want);

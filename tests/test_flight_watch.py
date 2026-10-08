@@ -928,6 +928,21 @@ class AnnouncerTests(unittest.TestCase):
         self.assertTrue(all(set(s) <= {"text", "link", "url"} for s in post["segments"]))  # TextBuilder-ready
         self.assertEqual(len(printed), 1)
 
+    def test_post_links_our_map_page_first(self):
+        t = fw.Track("8965d1", callsign="FDB1073",
+                     sched=fw.SchedFlight("FZ1073", "ARR", "DXB", "DUBAI", "2026-09-30 09:24", "FINAL"))
+        links = fw.external_links(t, 1790000000, fw.VIEWER_URL)
+        self.assertEqual(links["map"], fw.VIEWER_URL + "?hex=8965d1&f=FZ1073&d=A")
+        self.assertEqual(fw.external_links(fw.Track("738bed"), 1790000000, fw.VIEWER_URL)["map"],
+                         fw.VIEWER_URL + "?hex=738bed")              # not on the board: the aircraft alone
+        self.assertNotIn("map", fw.external_links(t, 1790000000, ""))  # --viewer-url ''
+        ann, _ = self.make()
+        rec = alert_rec("TOWARD_ISRAEL", "not bound for Israel " + "x" * 400)
+        rec["links"] = {"map": links["map"], **rec["links"]}
+        post = ann.announce(rec)
+        self.assertEqual([s["link"] for s in post["segments"] if "link" in s], ["Map", "Live", "Replay", "FR24"])
+        self.assertLessEqual(len(post["text"]), fw.Announcer.LIMIT)
+
     def test_post_names_airline_military_and_unknown_route(self):
         ann, _ = self.make()
         post = ann.announce(alert_rec("EMERGENCY", "squawk 7700 (GENERAL EMERGENCY)", airline="Flydubai"))

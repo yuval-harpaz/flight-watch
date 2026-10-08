@@ -40,6 +40,7 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import requests
@@ -75,6 +76,7 @@ PROVIDERS = {
 # kept in memory only. A local checkout of the repository can be used instead (--standing-data).
 STANDING_DATA = "https://raw.githubusercontent.com/vradarserver/standing-data/main"
 ROUTE_TTL = 6 * 3600
+VIEWER_URL = "https://yuval-harpaz.github.io/flight-watch/flight_map.html"  # docs/ on GitHub Pages
 ROUTE_FILES_PER_CYCLE = 3  # new standing-data files per poll (a cold start needs ~60)
 FLYDATA_URL = "https://data.gov.il/api/3/action/datastore_search"
 FLYDATA_RESOURCE = "e83f763b-b7d7-479e-b172-ae981ddc6de5"  # Ben Gurion flight board
@@ -258,10 +260,16 @@ def iata_flight(callsign: str) -> str | None:
     return ICAO_TO_IATA[m.group(1)] + m.group(2) if m and m.group(1) in ICAO_TO_IATA else None
 
 
-def external_links(t: "Track", when: float) -> dict:
-    """Links to the flight on existing sites (nothing is stored locally)."""
+def external_links(t: "Track", when: float, viewer: str = "") -> dict:
+    """Links to the flight on existing sites (nothing is stored locally), and to our map page
+    (docs/flight_map.html) when `viewer` is its address."""
     day = time.strftime("%Y-%m-%d", time.gmtime(when))
     links = {}
+    if viewer:
+        q = {"hex": t.hex}
+        if t.sched:  # the page then shows the board's data too
+            q.update(f=t.sched.flight, d=t.sched.direction[0])
+        links["map"] = viewer + "?" + urlencode(q)
     flight = t.sched.flight if t.sched else iata_flight(t.callsign)
     if flight:
         links["fr24_flight"] = f"https://www.flightradar24.com/data/flights/{flight.lower()}"
@@ -815,7 +823,8 @@ class Announcer:
         when = datetime.fromisoformat(rec["time"].replace("Z", "+00:00")).astimezone(self.tz)
         stamp = f"{when:%H:%M} {when.tzname()}"
         detail = self.detail(rec)
-        links = [("Live", rec["links"].get("live_adsbx")), ("Replay", rec["links"].get("replay_adsbx")),
+        links = [("Map", rec["links"].get("map")), ("Live", rec["links"].get("live_adsbx")),
+                 ("Replay", rec["links"].get("replay_adsbx")),
                  ("FR24", rec["links"].get("fr24_flight"))]
         links = [(k, v) for k, v in links if v]
         lead = f"{emoji} {head}: {ident} - {', '.join(x for x in (level, where) if x)}. "
@@ -919,7 +928,7 @@ class Notifier:
         self.tg_token = os.getenv("TELEGRAM_BOT_TOKEN")
         self.tg_chat = os.getenv("TELEGRAM_CHAT_ID")
 
-    LINK_NAMES = {"fr24_flight": "FR24 flight", "fr24_aircraft": "FR24 aircraft",
+    LINK_NAMES = {"map": "Map (flight-watch)", "fr24_flight": "FR24 flight", "fr24_aircraft": "FR24 aircraft",
                   "live_adsbx": "Live (ADSBx)", "live": "Live (airplanes.live)",
                   "replay_adsbx": "Replay (ADSBx)", "replay": "Replay (airplanes.live)"}
 
@@ -1758,7 +1767,7 @@ class Monitor:
             "near_nm": round(ad, 1), "bearing": round(bearing(a.lat, a.lon, s.lat, s.lon)),
             "flight": self.flight_number(t), "airline": self.airline_name(t),
             "military": t.military, "reg": t.reg, "type": t.actype, "squawk": t.squawk, "route_text": self.route_text(t, traffic, route),
-            "recent": recent, "links": external_links(t, now),
+            "recent": recent, "links": external_links(t, now, self.args.viewer_url),
         })
 
 
@@ -1868,6 +1877,8 @@ def parse_args(argv=None):
                    help="announce alerts from this priority; lower ones only as replies in a thread")
     g.add_argument("--announce-max-per-hour", type=int, default=20,
                    help="cap on announcements per hour (priority 5 is never held back)")
+    g.add_argument("--viewer-url", default=os.getenv("VIEWER_URL", VIEWER_URL),
+                   help="our flight map page, linked from alerts and posts as 'Map' ('' to leave out)")
     g.add_argument("--thread-hours", type=float, default=6,
                    help="later alerts on a flight reply to its thread for this long")
     g.add_argument("--ntfy-topic", default=os.getenv("NTFY_TOPIC"), help="ntfy topic name")
