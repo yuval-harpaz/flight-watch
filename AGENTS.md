@@ -270,7 +270,9 @@ and fetching a cold start's ~60 files in one cycle held up the local poll for ov
   trace (`FB.legs` / `FB.legAt`). The route database is ignored when it disagrees with the board's
   airport (ELY5064 listed BCN, board HER). opendata.adsb.fi sends no CORS
   header either (checked Oct 2026: 200 without `Access-Control-Allow-Origin`, OPTIONS -> 405).
-  Whether adsb.lol rate-limits Cloudflare's shared egress addresses is untested. Without a relay the map skips
+  The worker's `/status` shows its version, whether KV is bound, the number of callsigns and the
+  last cron run's upstream HTTP status (kept as `_run` in the same KV value, so still one write per
+  run): a run answered 429 changes no callsigns. Without a relay the map skips
   pointless lookups (`FB.liveUseful`: landed, cancelled, far from its time) and turns a refused
   feed (`FB.blocked`, a fetch TypeError) into a quiet note with ADSBx / FR24 links. Past boards come from the
   over.org.il archive (nothing stored here); a past map would need ADS-B Exchange history, which

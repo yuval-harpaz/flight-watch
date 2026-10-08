@@ -34,7 +34,8 @@ const ROUTES = [  // [path pattern, upstream host, fresh seconds]
 const STALE_S = 120;              // serve an answer this old when upstream fails
 const HOME = [32.0114, 34.8867];  // TLV
 const KEEP_S = 36 * 3600;         // callsign map: forget entries older than this
-const UA = {"User-Agent": "flight-watch-pages-relay/0.2"};
+const VERSION = "0.3";            // shown at / and /status, to check which code is deployed
+const UA = {"User-Agent": "flight-watch-pages-relay/" + VERSION};
 
 function cors(origin) {
   const h = {"Access-Control-Allow-Methods": "GET", "Vary": "Origin"};
@@ -42,19 +43,28 @@ function cors(origin) {
   return h;
 }
 
-/** Ask adsb.lol for all aircraft near TLV and merge callsign -> [hex, seen] into KV. */
+/** Ask adsb.lol for all aircraft near TLV and merge callsign -> [hex, seen] into KV. The run's
+ *  outcome is kept in the same value ("_run": [time, upstream HTTP status, aircraft]; one write
+ *  per run either way) and shown at /status. */
 async function learnCallsigns(env, now) {
-  if (!env.CALLSIGNS) return 0;
-  const r = await fetch(`https://api.adsb.lol/v2/point/${HOME[0]}/${HOME[1]}/250`, {headers: UA});
-  if (!r.ok) return 0;  // 429 etc.: the next run tries again
+  if (!env.CALLSIGNS) { console.log("no KV binding named CALLSIGNS"); return 0; }
+  let r, status;
+  try {
+    r = await fetch(`https://api.adsb.lol/v2/point/${HOME[0]}/${HOME[1]}/250`, {headers: UA});
+    status = r.status;
+  } catch (e) { status = 0; }
   const map = (await env.CALLSIGNS.get("map", "json")) || {};
   let n = 0;
-  for (const ac of (await r.json()).ac || []) {
-    const cs = String(ac.flight || "").trim().toUpperCase();
-    if (/^[A-Z0-9]{2,8}$/.test(cs) && ac.hex) { map[cs] = [ac.hex, Math.round(now - (ac.seen || 0))]; n++; }
+  if (r && r.ok) {  // 429 etc.: only the outcome is noted; the next run tries again
+    for (const ac of (await r.json()).ac || []) {
+      const cs = String(ac.flight || "").trim().toUpperCase();
+      if (/^[A-Z0-9]{2,8}$/.test(cs) && ac.hex) { map[cs] = [ac.hex, Math.round(now - (ac.seen || 0))]; n++; }
+    }
   }
-  for (const [cs, [, seen]] of Object.entries(map)) if (now - seen > KEEP_S) delete map[cs];
+  for (const [cs, [, seen]] of Object.entries(map)) if (cs !== "_run" && now - seen > KEEP_S) delete map[cs];
+  map._run = [Math.round(now), status, n];
   await env.CALLSIGNS.put("map", JSON.stringify(map));
+  console.log(`adsb.lol /v2/point: HTTP ${status}, ${n} aircraft, ${Object.keys(map).length - 1} callsigns kept`);
   return n;
 }
 
@@ -72,10 +82,17 @@ export default {
     if (origin && !ORIGINS.some(o => o.test(origin))) return json(403, {error: "origin not allowed"});
     const url = new URL(request.url);
     if (url.pathname === "/") return new Response(  // a person opening the address: what it is
-      "flight-watch relay: live ADS-B data from adsb.lol with CORS, for the flight-watch map pages.\n" +
-      "Try /v2/callsign/ELY315 or /v2/hex/738071 (JSON).\nhttps://github.com/yuval-harpaz/flight-watch\n",
+      `flight-watch relay ${VERSION}: live ADS-B data from adsb.lol with CORS, for the flight-watch map pages.\n` +
+      "Try /v2/callsign/ELY315 or /v2/hex/738071 (JSON); /status shows the callsign map.\n" +
+      "https://github.com/yuval-harpaz/flight-watch\n",
       {headers: {...cors(origin), "Content-Type": "text/plain; charset=utf-8"}});
 
+    if (url.pathname === "/status") {  // is the callsign map being filled? (for the owner)
+      const map = env.CALLSIGNS ? (await env.CALLSIGNS.get("map", "json")) || {} : null;
+      const run = map && map._run;
+      return json(200, {version: VERSION, kv: !!env.CALLSIGNS, callsigns: map ? Object.keys(map).filter(k => k !== "_run").length : 0,
+        lastRun: run ? {at: new Date(run[0] * 1000).toISOString(), upstreamHTTP: run[1], aircraft: run[2]} : null});
+    }
     const hexof = /^\/hexof\/([0-9A-Za-z,]{1,1000})$/.exec(url.pathname);
     if (hexof) {
       const map = env.CALLSIGNS ? (await env.CALLSIGNS.get("map", {type: "json", cacheTtl: 60})) || {} : {};
