@@ -259,7 +259,10 @@ between the two airports), where it will be in 5 minutes at its speed, altitude 
 (km/h), vertical speed, squawk, distance and time to TLV, updated every 10 s. Opened without a
 flight it shows the arrival closest to landing (the shortest time to TLV among airborne
 arrivals; one already on the ground is skipped) and moves on to the next one after it lands.
-"next arrival" skips to the next, "← flight list" goes back. `flight_map.html?hex=<icao hex>`
+"next arrival" skips to the next, "← flight list" goes back, "↻ refresh" asks for the latest data
+now, and "ADS-B Exchange ↗" / "FR24 ↗" open the flight live on those sites. When the live feed is
+busy (adsb.lol answers 429 to the relay), the map shows our data so far: the aircraft's track from
+adsb.lol's trace files up to its last point, with its time. `flight_map.html?hex=<icao hex>`
 shows one aircraft, also one that is not on the board (alert posts link this way). The live feed is
 not asked for a cancelled flight, an arrival landed over 30 minutes ago, or a flight hours from its
 time: the page then shows the board data alone.
