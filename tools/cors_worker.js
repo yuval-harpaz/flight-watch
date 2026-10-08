@@ -12,8 +12,11 @@
  * cached: many viewers of one flight cost one upstream request per 5 s, and when adsb.lol answers
  * 429 (it limits Cloudflare's shared addresses) the last answer of up to 2 min is served instead.
  *
- * The callsign map (/hexof): every 5 min a scheduled run asks adsb.lol once for all aircraft within
- * 250 nm of TLV and keeps callsign -> [hex, last seen] for 36 h, in one KV value. The board does
+ * The callsign map (/hexof) keeps callsign -> [hex, last seen] for 36 h, in one KV value. It is filled
+ * through POST /learn with "Authorization: Bearer <LEARN_TOKEN>": every 10 min by the GitHub workflow
+ * .github/workflows/share_callsigns.yml (tools/share_callsigns.py, secret RELAY_TOKEN), and also by
+ * the monitor (flight_watch.py) while it runs with RELAY_TOKEN set. adsb.lol answers 429 to Cloudflare, so the
+ * optional Cron Trigger (one /v2/point request around TLV every 5 min) failed every time (8 Oct 2026). The board does
  * not name the aircraft, and once a flight has landed the live feed no longer finds it by callsign;
  * with the hex the map page draws the flown track of a landed flight. Nothing else is stored.
  *
@@ -21,9 +24,11 @@
  * paste this file, Deploy. Then set FB.RELAY in docs/flightboard.js to the worker's address.
  * For /hexof: Storage & Databases -> KV -> Create namespace (e.g. "flight-watch-callsigns");
  * the worker -> Settings -> Bindings -> Add -> KV namespace, variable name CALLSIGNS;
- * Settings -> Trigger events -> Add -> Cron Triggers -> every 5 minutes (the expression is below).
- * Without them the relay still works and /hexof answers {}.
- * Free plan: 100,000 requests a day; KV 1,000 writes a day (this uses 288) and 100,000 reads.
+ * Settings -> Variables and Secrets -> Add -> type Secret, name LEARN_TOKEN, a long random value (the
+ * same value as RELAY_TOKEN for the monitor). A Cron Trigger is optional (expression below).
+ * Without these the relay still works and /hexof answers {}. /status shows what is set.
+ * Free plan: 100,000 requests a day; KV 1,000 writes a day (288 for pushes every 5 min, 288 more
+ * with the Cron Trigger: remove it when the monitor pushes) and 100,000 reads.
  */
 // Cron Trigger expression: */5 * * * *
 const ORIGINS = [/^https:\/\/yuval-harpaz\.github\.io$/, /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/];
@@ -34,7 +39,7 @@ const ROUTES = [  // [path pattern, upstream host, fresh seconds]
 const STALE_S = 120;              // serve an answer this old when upstream fails
 const HOME = [32.0114, 34.8867];  // TLV
 const KEEP_S = 36 * 3600;         // callsign map: forget entries older than this
-const VERSION = "0.3";            // shown at / and /status, to check which code is deployed
+const VERSION = "0.4";            // shown at / and /status, to check which code is deployed
 const UA = {"User-Agent": "flight-watch-pages-relay/" + VERSION};
 
 function cors(origin) {
@@ -53,18 +58,29 @@ async function learnCallsigns(env, now) {
     r = await fetch(`https://api.adsb.lol/v2/point/${HOME[0]}/${HOME[1]}/250`, {headers: UA});
     status = r.status;
   } catch (e) { status = 0; }
+  const pairs = {};
+  if (r && r.ok)  // 429 etc.: only the outcome is noted; the next run tries again
+    for (const ac of (await r.json()).ac || []) pairs[String(ac.flight || "")] = [ac.hex, now - (ac.seen || 0)];
+  const n = await merge(env, pairs, now, "_run", status);
+  console.log(`adsb.lol /v2/point: HTTP ${status}, ${n} aircraft`);
+  return n;
+}
+
+/** Merge {callsign: [hex, seen]} into the KV map (one write), forget entries older than KEEP_S
+ *  and note the outcome under `key` ("_run": the cron, "_push": the monitor's /learn). */
+async function merge(env, pairs, now, key, status) {
   const map = (await env.CALLSIGNS.get("map", "json")) || {};
   let n = 0;
-  if (r && r.ok) {  // 429 etc.: only the outcome is noted; the next run tries again
-    for (const ac of (await r.json()).ac || []) {
-      const cs = String(ac.flight || "").trim().toUpperCase();
-      if (/^[A-Z0-9]{2,8}$/.test(cs) && ac.hex) { map[cs] = [ac.hex, Math.round(now - (ac.seen || 0))]; n++; }
-    }
+  for (const [raw, v] of Object.entries(pairs || {})) {
+    const cs = raw.trim().toUpperCase(), hex = Array.isArray(v) ? String(v[0] || "").toLowerCase() : "";
+    const seen = Array.isArray(v) ? Math.min(+v[1] || 0, now + 60) : 0;
+    if (!/^[A-Z0-9]{2,8}$/.test(cs) || !/^~?[0-9a-f]{6}$/.test(hex) || now - seen > KEEP_S) continue;
+    if (!map[cs] || map[cs][1] <= seen) map[cs] = [hex, Math.round(seen)];
+    n++;
   }
-  for (const [cs, [, seen]] of Object.entries(map)) if (cs !== "_run" && now - seen > KEEP_S) delete map[cs];
-  map._run = [Math.round(now), status, n];
+  for (const [cs, v] of Object.entries(map)) if (!cs.startsWith("_") && now - v[1] > KEEP_S) delete map[cs];
+  map[key] = [Math.round(now), status, n];
   await env.CALLSIGNS.put("map", JSON.stringify(map));
-  console.log(`adsb.lol /v2/point: HTTP ${status}, ${n} aircraft, ${Object.keys(map).length - 1} callsigns kept`);
   return n;
 }
 
@@ -78,9 +94,18 @@ export default {
     if (request.method === "OPTIONS") return new Response(null, {status: 204, headers: cors(origin)});
     const json = (status, obj, extra) => new Response(JSON.stringify(obj), {status,
       headers: {...cors(origin), "Content-Type": "application/json", "Cache-Control": "no-store", ...extra}});
+    const url = new URL(request.url);
+    if (url.pathname === "/learn" && request.method === "POST") {  // the monitor sends what it hears near TLV
+      if (!env.CALLSIGNS || !env.LEARN_TOKEN) return json(503, {error: "KV binding CALLSIGNS or secret LEARN_TOKEN missing"});
+      if (request.headers.get("Authorization") !== "Bearer " + env.LEARN_TOKEN) return json(403, {error: "wrong token"});
+      const body = await request.text();
+      if (body.length > 300000) return json(413, {error: "too large"});
+      let pairs;
+      try { pairs = JSON.parse(body); } catch (e) { return json(400, {error: "not JSON"}); }
+      return json(200, {stored: await merge(env, pairs, Date.now() / 1000, "_push", 200)});
+    }
     if (request.method !== "GET") return json(405, {error: "GET only"});
     if (origin && !ORIGINS.some(o => o.test(origin))) return json(403, {error: "origin not allowed"});
-    const url = new URL(request.url);
     if (url.pathname === "/") return new Response(  // a person opening the address: what it is
       `flight-watch relay ${VERSION}: live ADS-B data from adsb.lol with CORS, for the flight-watch map pages.\n` +
       "Try /v2/callsign/ELY315 or /v2/hex/738071 (JSON); /status shows the callsign map.\n" +
@@ -89,9 +114,11 @@ export default {
 
     if (url.pathname === "/status") {  // is the callsign map being filled? (for the owner)
       const map = env.CALLSIGNS ? (await env.CALLSIGNS.get("map", "json")) || {} : null;
-      const run = map && map._run;
-      return json(200, {version: VERSION, kv: !!env.CALLSIGNS, callsigns: map ? Object.keys(map).filter(k => k !== "_run").length : 0,
-        lastRun: run ? {at: new Date(run[0] * 1000).toISOString(), upstreamHTTP: run[1], aircraft: run[2]} : null});
+      const at = x => x ? new Date(x[0] * 1000).toISOString() : null, run = map && map._run, push = map && map._push;
+      return json(200, {version: VERSION, kv: !!env.CALLSIGNS, learnToken: !!env.LEARN_TOKEN,
+        callsigns: map ? Object.keys(map).filter(k => !k.startsWith("_")).length : 0,
+        lastPush: push ? {at: at(push), callsigns: push[2]} : null,
+        lastRun: run ? {at: at(run), upstreamHTTP: run[1], aircraft: run[2]} : null});
     }
     const hexof = /^\/hexof\/([0-9A-Za-z,]{1,1000})$/.exec(url.pathname);
     if (hexof) {

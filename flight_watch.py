@@ -76,6 +76,7 @@ PROVIDERS = {
 # kept in memory only. A local checkout of the repository can be used instead (--standing-data).
 STANDING_DATA = "https://raw.githubusercontent.com/vradarserver/standing-data/main"
 ROUTE_TTL = 6 * 3600
+RELAY_URL = "https://flight-watch-relay.yuvharpaz.workers.dev"  # tools/cors_worker.js (Cloudflare)
 VIEWER_URL = "https://yuval-harpaz.github.io/flight-watch/flight_map.html"  # docs/ on GitHub Pages
 ROUTE_FILES_PER_CYCLE = 3  # new standing-data files per poll (a cold start needs ~60)
 FLYDATA_URL = "https://data.gov.il/api/3/action/datastore_search"
@@ -989,6 +990,7 @@ class Monitor:
         if schedule and self.standing:
             schedule.resolve = self.resolve_airline
         self.last_ok: float | None = None
+        self.shared_at = 0.0  # data time of the last callsign push to the relay (share_callsigns)
         self.last_count = 0
         self.stats = {}
         self.multi: dict[tuple, bool] = {}   # (provider, kind) -> accepts comma-separated ids
@@ -1350,12 +1352,32 @@ class Monitor:
             self.check_lost(server_now)
 
         self.last_ok, self.last_count = server_now, len(local)
+        self.share_callsigns(server_now)
         self.tracks = {h: t for h, t in self.tracks.items()
                        if server_now - t.last_msg < (3 * 3600 if t.followed else 1800)}
         b = self.http.budget(PROVIDERS[a.provider]["base"].split("/")[2])
         self.stats = {"local": len(local), "followed": sum(t.followed for t in self.tracks.values()),
                       "scheduled": len(self.schedule.flights) if self.schedule else 0,
                       "rate": b.rate}
+
+    def share_callsigns(self, now: float) -> None:
+        """Every --share-interval, send the relay (tools/cors_worker.js /learn) callsign -> hex of the
+        aircraft heard since the last send. The flight board does not name the aircraft, so the map
+        page finds a landed flight's track this way; the worker cannot ask adsb.lol itself (429 to
+        Cloudflare). One small POST at LOW priority; a failure is logged and never stops the poll."""
+        a, token = self.args, os.getenv("RELAY_TOKEN")
+        if not (a.share_url and token) or now - self.shared_at < a.share_interval:
+            return
+        pairs = {t.callsign.strip().upper(): [t.hex, round(t.last_msg)] for t in self.tracks.values()
+                 if t.callsign.strip() and t.last_msg > self.shared_at}
+        self.shared_at = now
+        if not pairs:
+            return
+        try:
+            r = self.http.post(a.share_url, LOW, json=pairs, headers={"Authorization": f"Bearer {token}"})
+            log.debug("shared %d callsigns with the relay: %s", len(pairs), r.text[:80])
+        except requests.RequestException as e:  # Throttled included
+            log.warning("could not share callsigns with the relay: %s", e)
 
     # ---- checks
     def check_emergency(self, t: Track, ac: dict) -> None:
@@ -1877,6 +1899,10 @@ def parse_args(argv=None):
                    help="announce alerts from this priority; lower ones only as replies in a thread")
     g.add_argument("--announce-max-per-hour", type=int, default=20,
                    help="cap on announcements per hour (priority 5 is never held back)")
+    g.add_argument("--share-url", default=os.getenv("RELAY_LEARN_URL", RELAY_URL + "/learn"),
+                   help="send the map page's relay callsign -> aircraft pairs heard near the airport "
+                        "(only with RELAY_TOKEN set in the environment; '' to disable)")
+    g.add_argument("--share-interval", type=float, default=300, help="seconds between those sends")
     g.add_argument("--viewer-url", default=os.getenv("VIEWER_URL", VIEWER_URL),
                    help="our flight map page, linked from alerts and posts as 'Map' ('' to leave out)")
     g.add_argument("--thread-hours", type=float, default=6,

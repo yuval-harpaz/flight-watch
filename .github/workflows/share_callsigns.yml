@@ -1,0 +1,26 @@
+# Every 10 min: the aircraft near TLV now -> the relay's callsign map (tools/share_callsigns.py).
+# The map page (docs/flight_map.html) uses it to draw a landed flight's track; the Cloudflare
+# worker cannot ask adsb.lol itself (429). Needs the repository secret RELAY_TOKEN (the worker's
+# LEARN_TOKEN). GitHub may start scheduled runs late or skip some; "Run workflow" runs it now.
+name: share callsigns
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: share-callsigns
+  cancel-in-progress: false
+jobs:
+  share:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tools/share_callsigns.py
+          sparse-checkout-cone-mode: false
+      - run: python3 tools/share_callsigns.py
+        env:
+          RELAY_TOKEN: ${{ secrets.RELAY_TOKEN }}

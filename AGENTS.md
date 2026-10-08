@@ -263,9 +263,19 @@ and fetching a cold start's ~60 files in one cycle held up the local poll for ov
   worker serves its last answer of up to 2 min on an upstream error and the map retries a 429 after
   20 s. Fallback if that is not enough: an HTTPS `tools/serve.py` on the VPS.
   **Callsign map** (`/hexof/<cs,...>`): the board does not name the aircraft and the feed finds a
-  callsign only while it flies, so a landed flight had no track. The worker's Cron Trigger (every
-  5 min) asks `/v2/point/<TLV>/250` once and keeps callsign -> [hex, last seen] for 36 h in one KV
-  value (binding `CALLSIGNS`; 288 writes a day of the free 1,000). The owner agreed to this small,
+  callsign only while it flies, so a landed flight had no track. The worker keeps callsign -> [hex,
+  last seen] for 36 h in one KV value (binding `CALLSIGNS`). Its Cron Trigger (`/v2/point/<TLV>/250`
+  every 5 min) got 429 on every run from Cloudflare (8 Oct 2026). It is filled through `POST /learn`
+  (`Authorization: Bearer <token>`; the worker's secret `LEARN_TOKEN`, `RELAY_TOKEN` elsewhere):
+  - **GitHub Actions** `.github/workflows/share_callsigns.yml` every 10 min runs
+    `tools/share_callsigns.py` (stdlib only): one `/v2/point/<TLV>/250` request, then `/learn`.
+    The owner did not want the map to depend on a local Python process (8 Oct 2026). Scheduled runs
+    can start late or be skipped; an arrival is within 250 nm for ~35-40 min, so it is usually seen.
+    adsb.lol busy = warning only; a refused `/learn` = red run. GitHub disables schedules after 60
+    days without commits. 144 KV writes a day.
+  - **The monitor**, while it runs with `RELAY_TOKEN` set: `Monitor.share_callsigns` POSTs the pairs
+    heard since the last send every `--share-interval` (300 s), LOW priority, never stopping the poll.
+  Remove the Cron Trigger (it only gets 429 and costs 288 writes a day of the free 1,000). The owner agreed to this small,
   expiring store (8 Oct 2026). The map then draws that aircraft's leg to / from TLV from today's
   trace (`FB.legs` / `FB.legAt`). The route database is ignored when it disagrees with the board's
   airport (ELY5064 listed BCN, board HER). opendata.adsb.fi sends no CORS
