@@ -89,6 +89,16 @@ the same rows and fails when they differ - change both together. Not ported yet:
 - Flight-board quirks: codeshare rows (e.g. DAL7441 on an El Al flight) never transmit, so
   search one callsign per physical flight. Departures stay "DEPARTED" long after landing.
   The board has >3000 rows, so paginate.
+- **Board history**: over.org.il ("גרסאות לעם", github.com/zomer-g/ckan-version-tracker) archives
+  the board every ~15 min since 2026-04-10T22:08Z. Its append table `append_flydata_31c812a6`
+  holds each distinct row state with `first_seen`; the board at time T is
+  `SELECT DISTINCT ON (CHOPER,CHFLTN,CHAORD,CHSTOL) ... WHERE first_seen <= T ORDER BY ...,
+  first_seen DESC` via `/api/append/31c812a6-9b0c-4f32-8317-e5f268c28f60/datastore_search_sql`
+  (CORS `*`, at most 1,000 rows per answer, so page with LIMIT/OFFSET; ~2 s each, an occasional
+  failure is retried once). Removed rows are not marked, hence the CHSTOL window T-1 d ... T+3 d
+  (`FB.snapshotSQL`). In it FZ1073 on 30 Sep read FINAL est 09:24 at 05:45Z, then DELAYED from
+  07:03Z (13:00, 14:00, 18:15) and LANDED 18:34 with the replacement aircraft: the board showed
+  the diversion only as a delay.
 
 ## Alert logic and why
 
@@ -240,9 +250,9 @@ and fetching a cold start's ~60 files in one cycle held up the local poll for ov
 
 - **Flight pages, next steps.** Show alerts on the map / list (needs the checks in JS, or the
   monitor's `alerts.jsonl` served by the helper); port `Schedule.resolve`; host the relay on the
-  VPS so the GitHub Pages map works without a local helper. "Previous data" is currently the
-  past days the board itself still holds (about one); keeping older board snapshots would mean
-  storing them (the owner prefers storing almost nothing) - ask first.
+  VPS so the GitHub Pages map works without a local helper. Past boards come from the
+  over.org.il archive (nothing stored here); a past map would need ADS-B Exchange history, which
+  is not free to read from a page - use the `replay_adsbx` links instead.
 
 ## Out of scope unless asked
 

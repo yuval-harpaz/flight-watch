@@ -28,10 +28,11 @@ NODE = shutil.which("node")
 
 
 def node(expr: str, data=None):
-    """Evaluate `expr` with FB (flightboard.js) and DATA (json) in node; returns its JSON value."""
+    """Evaluate `expr` with FB (flightboard.js) and DATA (json) in node; returns its JSON value
+    (awaited when it is a promise)."""
     script = (f"const FB = require({json.dumps(os.path.abspath(JS))});"
               f"const DATA = {json.dumps(data)};"
-              f"process.stdout.write(JSON.stringify((() => {expr})()));")
+              f"Promise.resolve((() => {expr})()).then(v => process.stdout.write(JSON.stringify(v)));")
     out = subprocess.run([NODE, "-e", script], capture_output=True, text=True, timeout=60,
                          env={**os.environ, "TZ": "UTC"})
     if out.returncode:
@@ -94,6 +95,41 @@ class BoardLogicMatchesPython(unittest.TestCase):
                                fw.haversine_nm(32.0114, 34.8867, 25.2528, 55.3644), places=6)
         self.assertAlmostEqual(node("FB.bearing(32.0114, 34.8867, 41.2753, 28.7519)"),
                                fw.bearing(32.0114, 34.8867, 41.2753, 28.7519), places=6)
+
+
+@unittest.skipUnless(NODE, "node not installed")
+class BoardArchive(unittest.TestCase):
+    """A past board is rebuilt from over.org.il's archive: the latest state of each row seen by then."""
+    def test_snapshot_query(self):
+        t = datetime(2026, 9, 30, 8, 45, tzinfo=fw.ZoneInfo("Asia/Jerusalem")).timestamp()
+        sql = node(f"FB.snapshotSQL({t}, 1000, 2000)")
+        self.assertIn('SELECT DISTINCT ON ("CHOPER","CHFLTN","CHAORD","CHSTOL")', sql)
+        self.assertIn("first_seen <= '2026-09-30T05:45:00.000Z'", sql)        # the moment, in UTC
+        self.assertIn(""""CHSTOL" >= '2026-09-29T08:45:00'""", sql)           # rows for a day before ...
+        self.assertIn(""""CHSTOL" < '2026-10-03T08:45:00'""", sql)            # ... to 3 days after, Israel time
+        self.assertTrue(sql.endswith("ORDER BY \"CHOPER\",\"CHFLTN\",\"CHAORD\",\"CHSTOL\",first_seen DESC "
+                                     "LIMIT 1000 OFFSET 2000"), sql)
+        for f in fw.FLYDATA_FIELDS.split(","):  # every column the monitor reads
+            self.assertIn(f'"{f}"', sql)
+
+    def test_pages_until_a_short_page_and_retries_once(self):
+        out = node("""(async () => {
+            const urls = []; let failed = false;
+            const fake = async u => {
+              urls.push(decodeURIComponent(u.split("?sql=")[1]));
+              if (urls.length === 2 && !failed) { failed = true; throw new Error("Failed to fetch"); }
+              const n = urls.length <= 3 ? 1000 : 7;   // two full pages (one retried), then a short one
+              return {ok: true, json: async () => ({result: {records: Array(n).fill(DATA)}})};
+            };
+            const rows = await FB.fetchBoardAt(FB.HISTORY_START + 86400, fake);
+            let early = null;
+            try { await FB.fetchBoardAt(FB.HISTORY_START - 60, fake); } catch (e) { early = e.message; }
+            return {n: rows.length, offsets: urls.map(u => +u.split("OFFSET ")[1]), early};
+        })()""", ROWS[0])
+        self.assertEqual(out["n"], 2007)
+        self.assertEqual(out["offsets"], [0, 1000, 1000, 2000])
+        self.assertIn("10 Apr 2026", out["early"])
+        self.assertEqual(len(node("FB.flights(DATA)", [ROWS[0]] * 3)), 1)  # repeated states of a row: one flight
 
 
 @unittest.skipUnless(NODE, "node not installed")

@@ -72,6 +72,45 @@ FB.fetchBoard = async function (fetchFn) {
   }
   return records;
 };
+// History: "גרסאות לעם" (over.org.il) keeps every version of the board since 10 Apr 2026
+// (about every 15 min) as an append-only table of row states with the time each was first seen.
+FB.HISTORY_SQL = "https://www.over.org.il/api/append/31c812a6-9b0c-4f32-8317-e5f268c28f60/datastore_search_sql";
+FB.HISTORY_TABLE = "append_flydata_31c812a6";
+FB.HISTORY_START = Date.parse("2026-04-10T22:10:00Z") / 1000;
+/** SQL for the board as it was at epoch `t`: per flight (airline, number, direction, scheduled
+ *  time) the last row state first seen by then, for flights scheduled from a day before to three
+ *  days after (what the live board holds). Rows dropped from the board are not marked in the
+ *  archive, so the window stands in for the board's own trimming. */
+FB.snapshotSQL = function (t, limit, offset) {
+  const local = x => FB.fmt(x, FB.TZ, "date") + "T" + FB.fmt(x, FB.TZ, "hms");
+  const cols = FB.FIELDS.split(",").map(c => '"' + c + '"').join(",");
+  const key = '"CHOPER","CHFLTN","CHAORD","CHSTOL"';
+  return `SELECT DISTINCT ON (${key}) ${cols},first_seen FROM "${FB.HISTORY_TABLE}" ` +
+    `WHERE first_seen <= '${new Date(t * 1000).toISOString()}' AND "CHSTOL" >= '${local(t - 86400)}' ` +
+    `AND "CHSTOL" < '${local(t + 3 * 86400)}' ORDER BY ${key},first_seen DESC LIMIT ${limit} OFFSET ${offset}`;
+};
+FB.fetchBoardAt = async function (t, fetchFn) {
+  if (!(t >= FB.HISTORY_START)) throw new Error("the archive starts on 10 Apr 2026");
+  const f = fetchFn || fetch, records = [], page = 1000;  // the archive returns at most 1000 rows
+  for (let i = 0; i < 20; i++) {
+    const url = FB.HISTORY_SQL + "?sql=" + encodeURIComponent(FB.snapshotSQL(t, page, records.length));
+    let rows;
+    for (let attempt = 0; ; attempt++) {  // one retry: a page sometimes fails once (~2 s per query)
+      try {
+        const r = await f(url);
+        if (!r.ok) throw new Error("board archive: HTTP " + r.status);
+        rows = (await r.json()).result.records;
+        break;
+      } catch (e) {
+        if (attempt) throw e;
+        await new Promise(ok => setTimeout(ok, 2000));
+      }
+    }
+    records.push(...rows);
+    if (rows.length < page) break;
+  }
+  return records;
+};
 FB.boardUpdated = async function (fetchFn) {
   try {
     const r = await (fetchFn || fetch)(FB.RESOURCE_URL + "?id=" + FB.RESOURCE);

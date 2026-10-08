@@ -28,6 +28,9 @@ a.map{text-decoration:none}
 </style></head><body>
 <h1>Ben Gurion (TLV) arrivals and departures</h1>
 <div class="bar">
+  <label>board <select id="when"><option value="live">live</option><option value="past">as it was at…</option></select></label>
+  <label id="atbox" style="display:none"><input type="datetime-local" id="at" step="60">
+    <span class="raw">Israel time, since 10 Apr 2026</span> <button id="go">show</button></label>
   <label>show <select id="view"></select></label>
   <label><select id="dir"><option value="">arrivals and departures</option>
     <option value="ARR">arrivals</option><option value="DEP">departures</option></select></label>
@@ -36,7 +39,7 @@ a.map{text-decoration:none}
   <label>times <select id="zone"><option value="Asia/Jerusalem">Israel</option><option value="UTC">UTC</option>
     <option value="local">this computer's time zone</option></select></label>
   <button id="reload">refresh</button>
-  <a href="flight_map.html">map: next arrival ▸</a>
+  <a id="maplink" href="flight_map.html">map: next arrival ▸</a>
 </div>
 <div id="msg">loading the flight board…</div>
 <div class="wrap"><table>
@@ -45,13 +48,17 @@ a.map{text-decoration:none}
 <th data-k="delay">delay</th><th data-k="situation">status</th><th data-k="terminal">terminal</th><th></th></tr></thead>
 <tbody id="rows"></tbody></table></div>
 <div class="credits">Flight board: Israel Airports Authority (<a href="https://data.gov.il/dataset/flydata">data.gov.il</a>),
-refreshed by them several times a day and here every 5 minutes. Delay = estimated − scheduled time.
+refreshed by them several times a day and here every 5 minutes. Earlier boards: every version since 10 Apr 2026, kept by
+<a href="https://www.over.org.il/versions/31c812a6-9b0c-4f32-8317-e5f268c28f60">גרסאות לעם (over.org.il)</a>
+(about every 15 minutes; a past board is rebuilt from the row states seen by then). Delay = estimated − scheduled time.
 Open a flight to see it on the map (live positions: <a href="https://adsb.lol">adsb.lol</a>,
 <a href="https://opendatacommons.org/licenses/odbl/">ODbL</a>). ·
 <a href="https://github.com/yuval-harpaz/flight-watch">flight-watch</a></div>
 <script>
 "use strict";
 let flights = [], updated = NaN, ZONE = "Asia/Jerusalem", sortKey = "est", sortDir = 1;
+let AT = null;  // epoch of the past board shown, or null for the live one
+const clock = () => AT ?? Date.now() / 1000;
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
 const params = new URLSearchParams(location.search);
@@ -68,7 +75,7 @@ function views(now) {
 }
 
 function render() {
-  const now = Date.now() / 1000, view = $("view").value, dir = $("dir").value, q = $("q").value.trim().toLowerCase();
+  const now = clock(), view = $("view").value, dir = $("dir").value, q = $("q").value.trim().toLowerCase();
   let rows = flights.map(f => ({f, s: FB.situation(f, now)}));
   rows = rows.filter(({f, s}) => {
     if (view === "now" && !(f.est >= now - 3 * 3600 && f.est <= now + 12 * 3600)) return false;
@@ -95,22 +102,23 @@ function render() {
 <td>${s.delay ? (s.delay > 0 ? "+" : "") + s.delay + " min" : ""}</td>
 <td><span class="badge ${cls}">${esc(s.label)}</span> <span class="raw">${esc(f.status)}</span></td>
 <td>${esc(f.terminal ?? "")}${f.dir === "DEP" && f.counters ? ` <span class="raw">${esc(f.zone)} ${esc(f.counters)}</span>` : ""}</td>
-<td><a class="map" href="${esc(url)}" title="show on the map">🗺</a></td></tr>`;
+<td>${AT ? "" : `<a class="map" href="${esc(url)}" title="show on the map">🗺</a>`}</td></tr>`;
   }).join("");
   const n = {ARR: 0, DEP: 0};
   rows.forEach(({f}) => n[f.dir]++);
   $("msg").textContent = `${rows.length} flights (${n.ARR} arrivals, ${n.DEP} departures)` +
-    (isFinite(updated) ? ` · board updated ${FB.fmt(updated, ZONE, "dhm")} ${FB.fmt(updated, ZONE, "z")}` : "") +
+    (AT ? ` · the board as it was at ${FB.fmt(AT, ZONE, "dhm")} ${FB.fmt(AT, ZONE, "z")} (archive)` :
+     isFinite(updated) ? ` · board updated ${FB.fmt(updated, ZONE, "dhm")} ${FB.fmt(updated, ZONE, "z")}` : "") +
     ` · times ${FB.fmt(now, ZONE, "z")}`;
 }
 
 async function load() {
-  $("msg").textContent = "loading the flight board…";
+  $("msg").textContent = AT ? "rebuilding the board from the archive…" : "loading the flight board…";
   try {
-    const [records, up] = await Promise.all([FB.fetchBoard(), FB.boardUpdated()]);
+    const [records, up] = AT ? [await FB.fetchBoardAt(AT), AT] : await Promise.all([FB.fetchBoard(), FB.boardUpdated()]);
     flights = FB.flights(records);
     updated = up;
-    views(Date.now() / 1000);
+    views(clock());
     render();
   } catch (e) {
     $("msg").textContent = "could not load the flight board: " + e.message;
@@ -119,8 +127,29 @@ async function load() {
 
 $("rows").addEventListener("click", e => {
   const tr = e.target.closest("tr");
-  if (tr && !e.target.closest("a")) location.href = tr.dataset.url;
+  if (tr && !AT && !e.target.closest("a")) location.href = tr.dataset.url;  // the map is live only
 });
+function setWhen(at) {  // null: live; else epoch of a past board (Israel time in the box and the URL)
+  AT = at;
+  $("when").value = at ? "past" : "live";
+  $("atbox").style.display = at || $("when").value === "past" ? "" : "none";
+  $("maplink").style.display = at ? "none" : "";  // the map is live only
+  const q = new URLSearchParams(location.search);
+  if (at) q.set("at", FB.fmt(at, FB.TZ, "date") + "T" + FB.fmt(at, FB.TZ, "hm")); else q.delete("at");
+  history.replaceState(null, "", q.toString() ? "?" + q.toString().replace(/%3A/g, ":") : location.pathname);
+  load();
+}
+$("when").onchange = () => {
+  if ($("when").value === "live") return setWhen(null);
+  $("atbox").style.display = "";
+  if (!$("at").value) $("at").value = FB.fmt(Date.now() / 1000 - 86400, FB.TZ, "date") + "T" +
+                                     FB.fmt(Date.now() / 1000 - 86400, FB.TZ, "hm");
+};
+$("go").onclick = () => {
+  const t = FB.israelEpoch($("at").value);
+  if (!(t >= FB.HISTORY_START && t <= Date.now() / 1000)) { $("msg").textContent = "pick a time between 10 Apr 2026 and now"; return; }
+  setWhen(t);
+};
 document.querySelectorAll("th[data-k]").forEach(th => th.onclick = () => {
   sortDir = sortKey === th.dataset.k ? -sortDir : 1;
   sortKey = th.dataset.k;
@@ -131,7 +160,10 @@ $("q").oninput = render;
 $("zone").onchange = e => { ZONE = e.target.value; views(Date.now() / 1000); render(); };
 $("reload").onclick = load;
 if (params.get("dir")) $("dir").value = params.get("dir");
-load();
-setInterval(load, 5 * 60 * 1000);
+if (params.get("at") && FB.israelEpoch(params.get("at")) >= FB.HISTORY_START) {
+  $("at").value = params.get("at");
+  setWhen(FB.israelEpoch(params.get("at")));
+} else load();
+setInterval(() => { if (!AT) load(); }, 5 * 60 * 1000);
 setInterval(render, 60 * 1000);  // "past estimate" and "now" move on between board refreshes
 </script></body></html>
