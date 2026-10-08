@@ -184,7 +184,8 @@ the same rows and fails when they differ - change both together. Not ported yet:
 
 ## Links in alerts (no local storage)
 
-`fr24_flight` (`/data/flights/fz1073`, flight number from the board or callsign → IATA),
+`map` (our `docs/flight_map.html?hex=<hex>&f=<flight>&d=<A|D>` on GitHub Pages, `--viewer-url`; first
+link in posts), `fr24_flight` (`/data/flights/fz1073`, flight number from the board or callsign → IATA),
 `fr24_aircraft` (by registration), `live_adsbx` / `live`, `replay_adsbx` / `replay`
 (`?icao=<hex>&showTrace=<UTC date>`). ADS-B Exchange replays proved more reliable for older
 days than airplanes.live, which showed "No data". Tapping an ntfy notification opens live ADSBx.
@@ -249,8 +250,18 @@ and fetching a cold start's ~60 files in one cycle held up the local poll for ov
   disagrees with two built-in entries (9U `MLD` absent, GQ listed as `BSY` not `SEH`): unverified.
 
 - **Flight pages, next steps.** Show alerts on the map / list (needs the checks in JS, or the
-  monitor's `alerts.jsonl` served by the helper); port `Schedule.resolve`; host the relay on the
-  VPS so the GitHub Pages map works without a local helper. Past boards come from the
+  monitor's `alerts.jsonl` served by the helper); port `Schedule.resolve`. **Live data on GitHub
+  Pages needs a relay with CORS** (posts link the Pages map): adsb.lol sends no CORS header on any
+  endpoint (`/v2/*`, `/data/traces/*`, Oct 2026), so a page there can't read it whatever it tries.
+  `FB.RELAY` is the owner's Cloudflare Worker (https://flight-watch-relay.yuvharpaz.workers.dev, code
+  `tools/cors_worker.js`; redeploy by pasting it after changes; workers.dev is not reachable from the
+  cloud sandbox). It relays only `/v2/hex|callsign/*` and `/data/traces/*`, only for the Pages /
+  localhost origins, with a 5-30 s cache (tested under node in `tests/test_pages.py`). Fallback if
+  adsb.lol limits Cloudflare: an HTTPS `tools/serve.py` on the VPS. opendata.adsb.fi sends no CORS
+  header either (checked Oct 2026: 200 without `Access-Control-Allow-Origin`, OPTIONS -> 405).
+  Whether adsb.lol rate-limits Cloudflare's shared egress addresses is untested. Without a relay the map skips
+  pointless lookups (`FB.liveUseful`: landed, cancelled, far from its time) and turns a refused
+  feed (`FB.blocked`, a fetch TypeError) into a quiet note with ADSBx / FR24 links. Past boards come from the
   over.org.il archive (nothing stored here); a past map would need ADS-B Exchange history, which
   is not free to read from a page - use the `replay_adsbx` links instead.
 

@@ -35,7 +35,7 @@ so route corners and detours around closed airspace do not alert, while sharp tu
 ## Announcements
 
 Every alert is also written as a short social-media-style post (<= 280 characters, Israel time,
-`Live` / `Replay` / `FR24` links), printed to the terminal as a feed and appended to
+`Map` / `Live` / `Replay` / `FR24` links), printed to the terminal as a feed and appended to
 `posts.jsonl` (`--posts`). Posts are threaded per flight: later alerts reply to the flight's
 thread for `--thread-hours` (6); a more serious event (priority 5, or squawk 7500 above all)
 starts a new top-level post. Restored contact only appears as a reply. At most
@@ -118,6 +118,8 @@ the announcement feed; `-vv` adds debug detail. Alerts are appended to `alerts.j
 
 No flight tracks are stored. Each alert is one line in `alerts.jsonl` with links to existing sites:
 
+- `map` - our flight map page (`docs/flight_map.html?hex=...`, on GitHub Pages; `--viewer-url`,
+  `''` leaves it out): the aircraft, plus its board data when it is a TLV flight.
 - `fr24_flight` - Flightradar24 history for the flight number (e.g. `/data/flights/fz1073`); pick the
   date to open its playback. Free FR24 accounts only see recent history.
 - `fr24_aircraft` - Flightradar24 history for the registration (works when callsign != flight number).
@@ -257,7 +259,10 @@ between the two airports), where it will be in 5 minutes at its speed, altitude 
 (km/h), vertical speed, squawk, distance and time to TLV, updated every 10 s. Opened without a
 flight it shows the arrival closest to landing (the shortest time to TLV among airborne
 arrivals; one already on the ground is skipped) and moves on to the next one after it lands.
-"next arrival" skips to the next, "← flight list" goes back.
+"next arrival" skips to the next, "← flight list" goes back. `flight_map.html?hex=<icao hex>`
+shows one aircraft, also one that is not on the board (alert posts link this way). The live feed is
+not asked for a cancelled flight, an arrival landed over 30 minutes ago, or a flight hours from its
+time: the page then shows the board data alone.
 
 Live positions come from adsb.lol, which does not allow other web sites to read it (no CORS
 headers), so the map needs the local helper, which serves the pages and relays the feed with the
@@ -267,8 +272,12 @@ monitor's request budget and 429 backoff:
 python tools/serve.py          # then open http://localhost:8765/  (Ctrl+C stops)
 ```
 
-The flight list also works straight from GitHub Pages or a file; the map then shows the board
-data and a hint to start the helper. `docs/flightboard.js` holds the logic both pages share; it
+The flight list also works straight from GitHub Pages or a file. The map there shows the board
+data and links (ADS-B Exchange live, FR24) with a short note, as the browser refuses the feed; it
+is live through the HTTPS relay named by `FB.RELAY` in `docs/flightboard.js`, which adds CORS:
+`tools/cors_worker.js`, a Cloudflare Worker (free plan; paste it into a new Worker, see its header),
+or `tools/serve.py` on a server (`--host 0.0.0.0` behind an HTTPS proxy). The worker relays only
+the feed paths the pages use, for the GitHub Pages and localhost origins, with a 5-30 s cache. `docs/flightboard.js` holds the logic both pages share; it
 mirrors the monitor's flight-board code (codeshares, operating carrier, callsigns, Israel time)
 and `tests/test_pages.py` runs it under node against the Python to keep them identical.
 Alerts are not shown on the pages yet.
