@@ -197,7 +197,7 @@ FB.local = function () {
 };
 // FB.RELAY: an HTTPS address of tools/serve.py (or any relay of /v2/* and /data/traces/* that
 // adds CORS headers), for the pages on GitHub Pages; "" = none, so live data works only locally.
-FB.RELAY = "";
+FB.RELAY = "https://flight-watch-relay.yuvharpaz.workers.dev";  // tools/cors_worker.js
 FB.feedBase = function () {
   const q = typeof location !== "undefined" ? new URLSearchParams(location.search).get("feed") : null;
   return q ? q.replace(/\/$/, "") : FB.local() ? "" : FB.RELAY || "https://api.adsb.lol";

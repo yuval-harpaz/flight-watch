@@ -274,7 +274,7 @@ python tools/serve.py          # then open http://localhost:8765/  (Ctrl+C stops
 
 The flight list also works straight from GitHub Pages or a file. The map there shows the board
 data and links (ADS-B Exchange live, FR24) with a short note, as the browser refuses the feed; it
-becomes live once `FB.RELAY` in `docs/flightboard.js` names an HTTPS relay that adds CORS:
+is live through the HTTPS relay named by `FB.RELAY` in `docs/flightboard.js`, which adds CORS:
 `tools/cors_worker.js`, a Cloudflare Worker (free plan; paste it into a new Worker, see its header),
 or `tools/serve.py` on a server (`--host 0.0.0.0` behind an HTTPS proxy). The worker relays only
 the feed paths the pages use, for the GitHub Pages and localhost origins, with a 5-30 s cache. `docs/flightboard.js` holds the logic both pages share; it

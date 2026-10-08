@@ -253,9 +253,11 @@ and fetching a cold start's ~60 files in one cycle held up the local poll for ov
   monitor's `alerts.jsonl` served by the helper); port `Schedule.resolve`. **Live data on GitHub
   Pages needs a relay with CORS** (posts link the Pages map): adsb.lol sends no CORS header on any
   endpoint (`/v2/*`, `/data/traces/*`, Oct 2026), so a page there can't read it whatever it tries.
-  Set `FB.RELAY` to the Cloudflare Worker `tools/cors_worker.js` (only `/v2/hex|callsign/*` and
-  `/data/traces/*`, only the Pages / localhost origins, 5-30 s cache; tested under node in
-  `tests/test_pages.py`) or an HTTPS `tools/serve.py` (VPS). opendata.adsb.fi sends no CORS
+  `FB.RELAY` is the owner's Cloudflare Worker (https://flight-watch-relay.yuvharpaz.workers.dev, code
+  `tools/cors_worker.js`; redeploy by pasting it after changes; workers.dev is not reachable from the
+  cloud sandbox). It relays only `/v2/hex|callsign/*` and `/data/traces/*`, only for the Pages /
+  localhost origins, with a 5-30 s cache (tested under node in `tests/test_pages.py`). Fallback if
+  adsb.lol limits Cloudflare: an HTTPS `tools/serve.py` on the VPS. opendata.adsb.fi sends no CORS
   header either (checked Oct 2026: 200 without `Access-Control-Allow-Origin`, OPTIONS -> 405).
   Whether adsb.lol rate-limits Cloudflare's shared egress addresses is untested. Without a relay the map skips
   pointless lookups (`FB.liveUseful`: landed, cancelled, far from its time) and turns a refused

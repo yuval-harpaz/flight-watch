@@ -204,9 +204,10 @@ class CorsWorker(unittest.TestCase):
             ["GET", "/https://example.com/", pages],
             ["POST", "/v2/hex/738071", pages],
             ["GET", "/v2/callsign/X429", pages],       # upstream 429 passed on
+            ["GET", "/", None],                        # someone opening the address: a short help text
         ])
         self.assertEqual(got["out"], [[200, pages], [200, "http://localhost:8765"], [200, pages], [204, pages],
-                                      [403, None], [404, pages], [404, pages], [405, pages], [429, pages]])
+                                      [403, None], [404, pages], [404, pages], [405, pages], [429, pages], [200, None]])
         self.assertEqual(got["calls"], ["https://api.adsb.lol/v2/hex/738071,8965d1",
                                         "https://api.adsb.lol/v2/callsign/WZZ4603",
                                         "https://adsb.lol/data/traces/71/trace_recent_738071.json",

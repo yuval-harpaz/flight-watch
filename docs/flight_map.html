@@ -49,8 +49,9 @@ const map = new deck.DeckGL({container: "map", controller: true,
 
 function feedError(e) {
   if (/HTTP 429/.test(e.message)) return "<div class='note'>the live feed is busy (HTTP 429) - the next update retries</div>";
-  if (FB.blocked(e) && !FB.local()) return "<div class='note'>Live positions can't be shown on this site: the feed " +
-    "(adsb.lol) does not let other web sites read it. The links below show the flight live.</div>";
+  if (FB.blocked(e) && !FB.local()) return "<div class='note'>Live positions can't be loaded right now" +
+    (FB.RELAY ? " (the relay did not answer)" : ": the feed (adsb.lol) does not let other web sites read it") +
+    ". The links below show the flight live.</div>";
   const hint = FB.local() ? "" : "<br><span class='note'>api.adsb.lol does not let other web sites read it. Run " +
     "<code>python tools/serve.py</code> and open <a href='http://localhost:8765/flight_map.html'>" +
     "localhost:8765/flight_map.html</a>.</span>";

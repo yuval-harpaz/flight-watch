@@ -35,6 +35,10 @@ export default {
     if (request.method !== "GET") return json(405, {error: "GET only"});
     if (origin && !ORIGINS.some(o => o.test(origin))) return json(403, {error: "origin not allowed"});
     const url = new URL(request.url);
+    if (url.pathname === "/") return new Response(  // a person opening the address: what it is
+      "flight-watch relay: live ADS-B data from adsb.lol with CORS, for the flight-watch map pages.\n" +
+      "Try /v2/callsign/ELY315 or /v2/hex/738071 (JSON).\nhttps://github.com/yuval-harpaz/flight-watch\n",
+      {headers: {...cors(origin), "Content-Type": "text/plain; charset=utf-8"}});
     const route = ROUTES.find(([re]) => re.test(url.pathname));
     if (!route) return json(404, {error: "not relayed"});
     const [, host, ttl] = route;
