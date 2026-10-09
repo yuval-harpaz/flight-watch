@@ -35,7 +35,7 @@ so route corners and detours around closed airspace do not alert, while sharp tu
 ## Announcements
 
 Every alert is also written as a short social-media-style post (<= 280 characters, Israel time,
-`Live` / `Replay` / `FR24` links), printed to the terminal as a feed and appended to
+`Map` / `Live` / `Replay` / `FR24` links), printed to the terminal as a feed and appended to
 `posts.jsonl` (`--posts`). Posts are threaded per flight: later alerts reply to the flight's
 thread for `--thread-hours` (6); a more serious event (priority 5, or squawk 7500 above all)
 starts a new top-level post. Restored contact only appears as a reply. At most
@@ -118,6 +118,8 @@ the announcement feed; `-vv` adds debug detail. Alerts are appended to `alerts.j
 
 No flight tracks are stored. Each alert is one line in `alerts.jsonl` with links to existing sites:
 
+- `map` - our flight map page (`docs/flight_map.html?hex=...`, on GitHub Pages; `--viewer-url`,
+  `''` leaves it out): the aircraft, plus its board data when it is a TLV flight.
 - `fr24_flight` - Flightradar24 history for the flight number (e.g. `/data/flights/fz1073`); pick the
   date to open its playback. Free FR24 accounts only see recent history.
 - `fr24_aircraft` - Flightradar24 history for the registration (works when callsign != flight number).
@@ -193,8 +195,9 @@ python tests/replay.py --descent-angle 8 --max-bank 30   # try other thresholds 
 
 `tests/test_replay_fz1073.py` requires the incident's alerts and caps alerts on the other
 flights (`NOISE_BUDGET`). Capture another incident with `tools/capture_incident.py` (see its
-`--help`); it uses the ADS-B Exchange globe history. The flight board of a past day is not
-online, so board rows are derived from the traces plus `--board` rows given by hand.
+`--help`); it uses the ADS-B Exchange globe history. Board rows are derived from the traces plus
+`--board` rows given by hand; the board as it was on a past day (since 10 Apr 2026) is in the
+over.org.il archive (see Flight pages) and could replace the hand-written rows.
 
 ## Plot an alert
 
@@ -232,6 +235,63 @@ Times are Israel time with a switch to UTC or the viewer's zone; units are metri
 m/s), including the alert texts. Credits (map tiles, flight data, route sources) are at the bottom.
 `examples/` has FZ1073 (30 Sep 2026) in 3D; its map is `docs/fz1073_map.html` (GitHub Pages). By default the plot covers the alert's flight leg (between ground stops or 30 min
 silences); `--minutes` widens it. Nothing else is stored.
+
+## Flight pages (board + live map)
+
+`docs/flights.html` lists Ben Gurion arrivals and departures from the live flight board
+(data.gov.il, fetched by the page itself, refreshed every 5 minutes): scheduled and estimated
+time, delay, the board's status plus a plain one (delayed landing, late departure, not landed /
+not departed N min past the estimate, landed late, cancelled), terminal and check-in counters.
+"show" picks now (−3 h … +12 h, the default), any single day the board still holds (it keeps
+about a day back and a few days ahead) or everything; filter by direction, search, hide
+completed flights; Israel time with a UTC / own-zone switch.
+
+"board: as it was at…" shows the board at any past moment since 10 Apr 2026 (Israel time), and
+`flights.html?at=2026-09-30T08:45` links to one. The page rebuilds it in the browser from the
+archive of [גרסאות לעם / over.org.il](https://www.over.org.il/versions/31c812a6-9b0c-4f32-8317-e5f268c28f60),
+which records every change of every board row (checked about every 15 minutes); nothing is
+stored here. Loading takes ~10 s (four pages of 1,000 rows). The archive does not record when a
+row left the board, so a past board covers flights scheduled from a day before to three days
+after that moment. Map links are hidden for a past board, as the map is live.
+
+Clicking a flight opens `docs/flight_map.html` for it: today's track, the route (great circle
+between the two airports), where it will be in 5 minutes at its speed, altitude (m), speed
+(km/h), vertical speed, squawk, distance and time to TLV, updated every 10 s. Opened without a
+flight it shows the arrival closest to landing (the shortest time to TLV among airborne
+arrivals; one already on the ground is skipped) and moves on to the next one after it lands.
+"next arrival" skips to the next, "← flight list" goes back, "↻ refresh" asks for the latest data
+now, and "ADS-B Exchange ↗" / "FR24 ↗" open the flight live on those sites. When the live feed is
+busy (adsb.lol answers 429 to the relay), the map shows our data so far: the aircraft's track from
+adsb.lol's trace files up to its last point, with its time. `flight_map.html?hex=<icao hex>`
+shows one aircraft, also one that is not on the board (alert posts link this way). The live feed is
+not asked for a cancelled flight, an arrival landed over 30 minutes ago, or a flight hours from its
+time: the page then shows the board data alone.
+
+Live positions come from adsb.lol, which does not allow other web sites to read it (no CORS
+headers), so the map needs the local helper, which serves the pages and relays the feed with the
+monitor's request budget and 429 backoff:
+
+```bash
+python tools/serve.py          # then open http://localhost:8765/  (Ctrl+C stops)
+```
+
+The flight list also works straight from GitHub Pages or a file. The map there shows the board
+data and links (ADS-B Exchange live, FR24) with a short note, as the browser refuses the feed; it
+is live through the HTTPS relay named by `FB.RELAY` in `docs/flightboard.js`, which adds CORS:
+`tools/cors_worker.js`, a Cloudflare Worker (free plan; paste it into a new Worker, see its header),
+or `tools/serve.py` on a server (`--host 0.0.0.0` behind an HTTPS proxy). The worker relays only
+the feed paths the pages use, for the GitHub Pages and localhost origins, with a 5-30 s cache,
+and serves its last answer of up to 2 minutes when adsb.lol answers 429. With a KV namespace
+(binding `CALLSIGNS`) and a Cron Trigger every 5 minutes it also keeps which aircraft flew each
+callsign near TLV in the last 36 hours, so the map shows the flown track of a landed flight.
+adsb.lol refuses the worker's own requests, so a GitHub workflow fills it every 10 minutes
+(`.github/workflows/share_callsigns.yml`): set one random value as the worker's secret
+`LEARN_TOKEN` and as the repository secret `RELAY_TOKEN` (Settings -> Secrets and variables ->
+Actions). The monitor also sends what it hears when it runs with `RELAY_TOKEN` in its environment
+(`--share-interval`, `--share-url ''` to stop). The worker's `/status` shows the last send. `docs/flightboard.js` holds the logic both pages share; it
+mirrors the monitor's flight-board code (codeshares, operating carrier, callsigns, Israel time)
+and `tests/test_pages.py` runs it under node against the Python to keep them identical.
+Alerts are not shown on the pages yet.
 
 ## Caveats
 

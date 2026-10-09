@@ -47,6 +47,17 @@ ADS-B carries no origin/destination. Arrival/departure comes from the flight boa
 then the callsign's route in the VRS standing data, then a heuristic near the airport
 (`ARR?` / `DEP?`).
 
+**Flight pages** (`docs/flights.html`, `docs/flight_map.html`, shared `docs/flightboard.js`;
+local helper `tools/serve.py`): the board table and a live map of one flight, processed in the
+browser. The owner wants the browser (JS) and the monitor (Python) to process alike: the JS
+board logic is a port of `Schedule.load` (slot grouping, lowest flight number = operating carrier,
+callsign variants), `FB.AIRLINE_ICAO` is a copy of `AIRLINE_ICAO`, `FB.israelEpoch` reads board
+times as Python does (fold=0 at DST changes), and `tests/test_pages.py` runs the JS under node on
+the same rows and fails when they differ - change both together. Not ported yet: Python's
+`Schedule.resolve` (unknown airline codes via route data) and every alert check. The pages load
+`flightboard.js?v=<first 8 hex of its sha256>`: GitHub Pages lets browsers cache files for 10 min, and a
+new page with the old script failed ("FB.blocked is not a function"); a test fails until `v` is updated.
+
 ## Data sources: decisions and history
 
 - **adsb.lol** is the default feed (free, no key *for now*; it plans feeder-issued keys).
@@ -71,9 +82,25 @@ then the callsign's route in the VRS standing data, then a heuristic near the ai
   direction of travel from the flight (> 60 nm from both ends) before using the destination.
   Never treat a route as proof that a flight is harmless beyond those checks.
 - The board is fetched with only the columns used (`FLYDATA_FIELDS`), half the size.
+- **CORS** (what a page on another site may read in the browser): data.gov.il and
+  raw.githubusercontent.com answer `Access-Control-Allow-Origin: *`; **api.adsb.lol does not**
+  (no header, OPTIONS -> 405, Oct 2026). Hence `tools/serve.py`: it serves `docs/` and relays
+  `/v2/*` (api.adsb.lol) and `/data/traces/*` (adsb.lol) on the same origin, through
+  `flight_watch.Http` (budget, 429 cooldown) with a short cache. The pages use the relay when
+  served from localhost, otherwise try adsb.lol directly (`?feed=` overrides).
 - Flight-board quirks: codeshare rows (e.g. DAL7441 on an El Al flight) never transmit, so
   search one callsign per physical flight. Departures stay "DEPARTED" long after landing.
   The board has >3000 rows, so paginate.
+- **Board history**: over.org.il ("גרסאות לעם", github.com/zomer-g/ckan-version-tracker) archives
+  the board every ~15 min since 2026-04-10T22:08Z. Its append table `append_flydata_31c812a6`
+  holds each distinct row state with `first_seen`; the board at time T is
+  `SELECT DISTINCT ON (CHOPER,CHFLTN,CHAORD,CHSTOL) ... WHERE first_seen <= T ORDER BY ...,
+  first_seen DESC` via `/api/append/31c812a6-9b0c-4f32-8317-e5f268c28f60/datastore_search_sql`
+  (CORS `*`, at most 1,000 rows per answer, so page with LIMIT/OFFSET; ~2 s each, an occasional
+  failure is retried once). Removed rows are not marked, hence the CHSTOL window T-1 d ... T+3 d
+  (`FB.snapshotSQL`). In it FZ1073 on 30 Sep read FINAL est 09:24 at 05:45Z, then DELAYED from
+  07:03Z (13:00, 14:00, 18:15) and LANDED 18:34 with the replacement aircraft: the board showed
+  the diversion only as a delay.
 
 ## Alert logic and why
 
@@ -159,7 +186,8 @@ then the callsign's route in the VRS standing data, then a heuristic near the ai
 
 ## Links in alerts (no local storage)
 
-`fr24_flight` (`/data/flights/fz1073`, flight number from the board or callsign → IATA),
+`map` (our `docs/flight_map.html?hex=<hex>&f=<flight>&d=<A|D>` on GitHub Pages, `--viewer-url`; first
+link in posts), `fr24_flight` (`/data/flights/fz1073`, flight number from the board or callsign → IATA),
 `fr24_aircraft` (by registration), `live_adsbx` / `live`, `replay_adsbx` / `replay`
 (`?icao=<hex>&showTrace=<UTC date>`). ADS-B Exchange replays proved more reliable for older
 days than airplanes.live, which showed "No data". Tapping an ntfy notification opens live ADSBx.
@@ -222,6 +250,43 @@ and fetching a cold start's ~60 files in one cycle held up the local poll for ov
   a third of codes have several airlines), so the candidate with routes through TLV wins; still
   ambiguous means unmapped. Oct 2026: 3F = FIE, H4 = HYS, H7 = HYM, NO = NOS, U8 = CYF. The list
   disagrees with two built-in entries (9U `MLD` absent, GQ listed as `BSY` not `SEH`): unverified.
+
+- **Flight pages, next steps.** Show alerts on the map / list (needs the checks in JS, or the
+  monitor's `alerts.jsonl` served by the helper); port `Schedule.resolve`. **Live data on GitHub
+  Pages needs a relay with CORS** (posts link the Pages map): adsb.lol sends no CORS header on any
+  endpoint (`/v2/*`, `/data/traces/*`, Oct 2026), so a page there can't read it whatever it tries.
+  `FB.RELAY` is the owner's Cloudflare Worker (https://flight-watch-relay.yuvharpaz.workers.dev, code
+  `tools/cors_worker.js`; redeploy by pasting it after changes; workers.dev is not reachable from the
+  cloud sandbox). It relays only `/v2/hex|callsign/*` and `/data/traces/*`, only for the Pages /
+  localhost origins, with a 5-30 s cache (tested under node in `tests/test_pages.py`). adsb.lol does
+  answer 429 to Cloudflare's shared addresses (seen 8 Oct 2026 on `/v2/callsign/CFG4308`), so the
+  worker serves its last answer of up to 2 min on an upstream error and the map retries a 429 after
+  20 s. Fallback if that is not enough: an HTTPS `tools/serve.py` on the VPS.
+  **Callsign map** (`/hexof/<cs,...>`): the board does not name the aircraft and the feed finds a
+  callsign only while it flies, so a landed flight had no track. The worker keeps callsign -> [hex,
+  last seen] for 36 h in one KV value (binding `CALLSIGNS`). Its Cron Trigger (`/v2/point/<TLV>/250`
+  every 5 min) got 429 on every run from Cloudflare (8 Oct 2026). It is filled through `POST /learn`
+  (`Authorization: Bearer <token>`; the worker's secret `LEARN_TOKEN`, `RELAY_TOKEN` elsewhere):
+  - **GitHub Actions** `.github/workflows/share_callsigns.yml` every 10 min runs
+    `tools/share_callsigns.py` (stdlib only): one `/v2/point/<TLV>/250` request, then `/learn`.
+    The owner did not want the map to depend on a local Python process (8 Oct 2026). Scheduled runs
+    can start late or be skipped; an arrival is within 250 nm for ~35-40 min, so it is usually seen.
+    adsb.lol busy = warning only; a refused `/learn` = red run. GitHub disables schedules after 60
+    days without commits. 144 KV writes a day.
+  - **The monitor**, while it runs with `RELAY_TOKEN` set: `Monitor.share_callsigns` POSTs the pairs
+    heard since the last send every `--share-interval` (300 s), LOW priority, never stopping the poll.
+  Remove the Cron Trigger (it only gets 429 and costs 288 writes a day of the free 1,000). The owner agreed to this small,
+  expiring store (8 Oct 2026). The map then draws that aircraft's leg to / from TLV from today's
+  trace (`FB.legs` / `FB.legAt`). The route database is ignored when it disagrees with the board's
+  airport (ELY5064 listed BCN, board HER). opendata.adsb.fi sends no CORS
+  header either (checked Oct 2026: 200 without `Access-Control-Allow-Origin`, OPTIONS -> 405).
+  The worker's `/status` shows its version, whether KV is bound, the number of callsigns and the
+  last cron run's upstream HTTP status (kept as `_run` in the same KV value, so still one write per
+  run): a run answered 429 changes no callsigns. Without a relay the map skips
+  pointless lookups (`FB.liveUseful`: landed, cancelled, far from its time) and turns a refused
+  feed (`FB.blocked`, a fetch TypeError) into a quiet note with ADSBx / FR24 links. Past boards come from the
+  over.org.il archive (nothing stored here); a past map would need ADS-B Exchange history, which
+  is not free to read from a page - use the `replay_adsbx` links instead.
 
 ## Out of scope unless asked
 
