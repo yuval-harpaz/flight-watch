@@ -127,7 +127,12 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   climb 12 deg en route and 18 deg within 30 nm of an airport below 15,000 ft (bizjets reach
   ~13). Near-airport traffic is still checked - a too-steep approach alerts. `--vrate`
   (8000 ft/min) alerts whatever the angle. The reported rate must be backed by the altitude
-  history (rejects single bad values). Climb and descent have separate cooldowns, and a reading ≥1.5× the
+  history (rejects single bad values); with no history yet (just heard, back from a gap) it waits
+  for the next reports - FZ1073's dive now alerts at 05:22:13 instead of 05:22:04, when the history
+  (-8,065 ft/min) confirms it. The angle uses only a credible ground speed (`trusted_gs`: >= 120 kt,
+  >= 150 kt for an airliner above 10,000 ft, within x1.6 of the speed from positions); otherwise
+  only the rate limit applies. On 6 Oct spoofed speeds (B789s at FL380 "at" 117-147 kt) made
+  normal climbs read as 40-60 deg and also "confirmed" glitched rates: 10 alerts, 0 now. Climb and descent have separate cooldowns, and a reading ≥1.5× the
   last alerted severity bypasses the cooldown. Without this, a small wobble suppressed the
   real 14,000 ft dive in the FZ1073 test.
 - **EMERGENCY**: alerts on squawk *transition* into 7500/7600/7700, not every cooldown.
@@ -157,6 +162,8 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   checks this gave 20 false alarms on Beirut departures in the replay. Route bends (Gulf flights via Saudi Arabia and Jordan) stayed
   below 65 deg in the replay; FZ1073 reached 165 deg.
 - **TOWARD_ISRAEL**: the hijack scenario of a flight *not* bound for Israel turned toward it.
+  Military aircraft (readsb dbFlags) are exempt: on 6 Oct 29 of 33 alerts were USAF KC-135
+  tankers, a military Gulfstream (IRON) and a Canadian C-130 operating over Israel for hours.
   Above 8000 ft, a turn of >= 45 deg after which Israeli airspace (rough polygon) is <= 12 min
   ahead on two samples in a row, from a track that did not point there; or about to enter it
   within 3 min without looking like an arrival. Israel traffic is exempt: board/route-DB
@@ -181,6 +188,53 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   139 nm away after 3.4 min. The FZ1073 replay gave no new alerts with these rules. The Eastern
   Mediterranean has heavy GNSS jamming and spoofing, which causes jumps, fake turns and position
   dropouts.
+- **GPS_SPOOFING**: only physically impossible reports count as fake: a fixed-wing aircraft (not
+  rotorcraft / balloon / light / military, which can hover) at >= 5,000 ft under 50 kt over the
+  ground while its reported (barometric, air-data) vertical rate is under 6,000 ft/min
+  (`SPOOF_MAX_RATE`; a stall or spin falls 10,000+ ft/min and stays fully checked). Such a report
+  never enters the track. Reports within 2 km of each other form an episode labelled by its start,
+  `spoof-YYYYMMDDTHHMMZ`; a second aircraft confirms it (one alert), 15 min without fake reports
+  ends it (one summary alert). Position-based alerts (`SPOOF_KINDS`: jumps, turns, off-course,
+  toward Israel, lost contact, holding) on a flight in an episode, for 30 min after its last fake
+  report, and jumps landing within 100 nm of an active spoofing point, are logged under the label
+  instead of alerted - unless the flight is hot from an alert that does not rest on GPS (emergency
+  squawk, vertical rate, diversion). Squawk and barometric altitude are never suppressed. Every
+  alert record carries `spoof` (the label) when the flight was in an episode.
+  6 Oct 2026, 15:42-17:25 IDT: three bursts (~12 min each, ~30 min apart) placed 43 aircraft at
+  31.717 N 35.999 E (Amman airport) at cruise with ~0.7 kt, track 0; ~190 of that day's 562 alerts.
+  Replaying those 43 aircraft together: 171 alerts -> 71 (6 of them the episodes). Left: lost
+  contact at each burst's onset (aircraft go silent ~1 min before showing up frozen, before a
+  second aircraft confirms the point) and their "restored" follow-ups.
+  Barometric altitude (`alt_baro`, `baro_rate`) comes from the aircraft's air data and survives
+  GPS spoofing; lat/lon, ground speed and track are GNSS. **MLAT** positions (ground receivers'
+  timing; the feed's `type: mlat` / `mlat: [fields]`) are independent of the aircraft's GPS: never
+  judged spoofed, and their gs / track are dropped unless MLAT computed them too (MLAT records
+  often carry the aircraft's spoofed 0.7 kt / 0 deg). For a flight in an episode, a GPS report
+  farther from its latest MLAT fix (<= 3 min) than it could have flown is fake. Measured 6 Oct:
+  MLAT vs clean GPS median 0.2 km (78% within 1 km); while GPS was spoofed MLAT followed the real
+  path (AEE925 climbing out of TLV), but MLAT zig-zags up to ~20 km low near TLV (poor geometry),
+  and the feed gives one position per aircraft (GPS preferred), so MLAT appears only intermittently.
+  `tools/plot_alert.py --sources` draws both.
+- **GPS_DEGRADED / NIC**: `nic` is the aircraft's own position integrity (0 = it does not trust
+  its position: GPS jammed, then it flies on inertial and positions stay roughly right, or a spoof
+  it noticed - AEE925: NIC 0 / NACp 0 / SIL 0 on every fake position, 8 again a minute after).
+  A NIC-0 report is used only if reachable from the last trusted position (3 nm + 650 kt), else
+  dropped without a jump alert. Healthy NIC proves nothing: on 6 Oct 61% of the reports frozen
+  at the Amman point said NIC 8 (only 34% NIC 0), and 5.5% of ordinary reports were NIC 0. Drops
+  to NIC 0 by 3+ aircraft within 2 min and 100 nm = one alert labelled `gps-YYYYMMDDTHHMMZ`
+  (labels get -2, -3 when episodes start the same minute) and one when it ends (15 min without
+  NIC 0). Joint replay of the 43 spoofed aircraft: 38 alerts without NIC -> 36 with it (jumps
+  13 -> 8); the second burst's GPS_DEGRADED came 2 min before its spoofing was confirmed. An
+  MLAT position on an ADS-B aircraft also means its GPS report was rejected (low NIC), but no
+  MLAT means nothing (most fake reports kept NIC 8; MLAT needs receiver coverage).
+- **MASS_SILENCE / lost-contact wait**: a loss waits `--lost-confirm` (60 s) after `--lost-after`;
+  heard again = nothing; 3+ aircraft silent within 2 min of each other = one alert labelled
+  `silence-YYYYMMDDTHHMMZ` (reception, jamming, spoofing onset: on 6 Oct aircraft went silent ~1 min
+  before showing up frozen). Hot flights are not delayed. The owner accepted the minute's delay.
+  Joint replay of the 43 spoofed aircraft: 171 alerts -> 38 (9 of them episode / silence alerts).
+- Conditions that persist (`PERSISTING`: TOWARD_ISRAEL, OFF_COURSE, TURNING_BACK) repeat every
+  `--repeat-minutes` (30), not every `--cooldown` (5 min); a clearly worse reading still escalates.
+  (One tanker over Israel for 75 min gave 15 alerts.) The FZ1073 replay now has one OFF_COURSE.
 - Cooldowns and link dates use the **data timestamp**, not wall-clock time.
 - Any flight that alerts becomes **followed**, so its fate stays visible.
 

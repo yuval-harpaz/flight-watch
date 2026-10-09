@@ -163,18 +163,57 @@ class AlertSimulation(unittest.TestCase):
             feed.aircraft["738001"] = airborne(32.6, 34.0 + i * 0.03, 20000)
             step(mon, clock)
         feed.local.discard("738001")
-        for _ in range(8):
+        for _ in range(14):  # 60 s silent, then --lost-confirm 60 s for others to go silent too
             step(mon, clock)
         lost = [a for a in alerts if a["kind"] == "LOST_CONTACT"]
         self.assertEqual(len(lost), 1)
         self.assertEqual(lost[0]["hex"], "738001")
 
+    def test_heard_again_within_lost_confirm_is_not_lost(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        feed.local = {"738001", "738002"}
+        feed.aircraft["738002"] = airborne(31.0, 34.0, 20000, flight="ELY999")
+        for i in range(4):
+            feed.aircraft["738001"] = airborne(32.6, 34.0 + i * 0.03, 20000)
+            step(mon, clock)
+        feed.local.discard("738001")
+        for _ in range(9):  # 90 s: past --lost-after, within --lost-confirm
+            step(mon, clock)
+        feed.aircraft["738001"] = airborne(32.6, 34.25, 20000)
+        feed.local.add("738001")
+        for _ in range(10):
+            step(mon, clock)
+        self.assertEqual(kinds(alerts), [])
+
+    def test_group_silence_is_one_alert(self):
+        """Three aircraft silent together (reception, jamming, spoofing onset): one MASS_SILENCE,
+        no LOST_CONTACT each, and no CONTACT_RESTORED when they come back."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        hexes = ["738001", "738003", "738004"]
+        feed.aircraft["738002"] = airborne(31.0, 34.0, 20000, flight="ELY999")  # keeps the feed alive
+        for i in range(4):
+            for k, h in enumerate(hexes):
+                feed.aircraft[h] = airborne(32.4 + 0.2 * k, 34.0 + i * 0.03, 20000, flight=f"ELY31{k}")
+            feed.local = set(hexes) | {"738002"}
+            step(mon, clock)
+        feed.local = {"738002"}
+        for h in hexes:  # not heard at all (also not by a follow request)
+            feed.aircraft.pop(h)
+        for _ in range(16):
+            step(mon, clock)
+        for k, h in enumerate(hexes):
+            feed.aircraft[h] = airborne(32.4 + 0.2 * k, 34.3, 20000, flight=f"ELY31{k}")
+        feed.local = set(hexes) | {"738002"}
+        for _ in range(3):
+            step(mon, clock)
+        self.assertEqual(kinds(alerts), ["MASS_SILENCE"], [a["message"] for a in alerts])
+        self.assertRegex(alerts[0]["message"], r"^silence-\d{8}T\d{4}Z: 3 aircraft")
+
     def test_course_change(self):
         mon, feed, clock, alerts = make(["--no-routes"])
-        feed.local = {"738001"}
-        for i, trk in enumerate([90] * 8 + [200] * 12):  # reported once the new track held 2 min
-            feed.aircraft["738001"] = airborne(33.0, 33.5 + i * 0.01, 30000, track=trk)
-            step(mon, clock, 15)
+        tracks = [90] * 8 + [200] * 12  # reported once the new track held 2 min
+        fly(mon, feed, clock, "738001", path(33.0, 33.5, tracks, [30000] * len(tracks), dt=15), dt=15,
+            flight="ELY315", r="4X-EDC", t="B789")
         self.assertIn("COURSE_CHANGE", [a["kind"] for a in alerts])
 
     def test_position_jump(self):
@@ -523,6 +562,169 @@ class LandingTests(unittest.TestCase):
         self.assertNotIn("RETURNED", kinds(alerts, "48af08"))
 
 
+AMMAN_SPOOF = (31.7171, 35.9993)  # 6 Oct 2026: aircraft at cruise reported motionless here
+
+
+def frozen(alt=35000):
+    return dict(lat=AMMAN_SPOOF[0], lon=AMMAN_SPOOF[1], alt_baro=alt, track=0, gs=0.7, baro_rate=0)
+
+
+class SpoofingTests(unittest.TestCase):
+    def run_flights(self, mon, feed, clock, flights, steps):
+        """flights: hex -> (states per step or None when not heard, ident)."""
+        for i in range(steps):
+            feed.local = set()
+            for hexid, (states, ident) in flights.items():
+                st = states[i] if i < len(states) else None
+                if st is None:
+                    feed.aircraft.pop(hexid, None)
+                    continue
+                feed.aircraft[hexid] = {**st, "flight": ident.ljust(8), "r": "SX-" + hexid[-3:].upper(), "t": "A320"}
+                feed.local.add(hexid)
+            step(mon, clock)
+
+    def test_mass_spoofing_is_one_labelled_episode(self):
+        """Three airliners frozen at one point for 3 min, then on their real courses again."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        flights = {}
+        for k, (hexid, start) in enumerate((("4ba001", 0), ("4ba002", 6), ("4ba003", 12))):
+            states = path(32.6 + 0.1 * k, 33.9, [300] * 60, [35000] * 60)
+            for i in range(12 + start, 30 + start):  # 3 min motionless, starting 0 / 1 / 2 min apart
+                states[i] = frozen()
+            flights[hexid] = (states, f"TST10{k}")
+        self.run_flights(mon, feed, clock, flights, 60)
+        spoof = [a for a in alerts if a["kind"] == "GPS_SPOOFING"]
+        self.assertEqual(len(spoof), 1, [a["message"] for a in spoof])
+        label = spoof[0]["message"].split(":")[0]
+        self.assertRegex(label, r"^spoof-\d{8}T\d{4}Z$")
+        self.assertEqual(spoof[0]["spoof"], label)
+        noise = {"LOST_CONTACT", "POSITION_JUMP", "COURSE_CHANGE", "SHARP_TURN", "OFF_COURSE", "TOWARD_ISRAEL"}
+        self.assertEqual([a for a in alerts if a["kind"] in noise], [])
+        for _ in range(100):  # 16+ min without spoofed reports: the episode ends, once
+            step(mon, clock)
+        ended = [a for a in alerts if a["kind"] == "GPS_SPOOFING" and "ended" in a["message"]]
+        self.assertEqual(len(ended), 1)
+        self.assertIn(f"{label} ended: 3 aircraft", ended[0]["message"])
+
+    def test_single_frozen_aircraft_raises_no_position_alerts(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        states = path(32.6, 33.9, [300] * 40, [35000] * 40)
+        states[12:30] = [frozen()] * 18
+        self.run_flights(mon, feed, clock, {"4ba004": (states, "TST104")}, 40)
+        self.assertEqual(kinds(alerts), [], "one aircraft is not an episode; its fake reports are ignored")
+
+    def test_upset_with_low_ground_speed_is_not_spoofing(self):
+        """A deep stall: 40 kt over the ground but falling 15,000 ft/min - a real emergency."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        alts = [35000 - 2500 * i for i in range(9)]
+        states = path(32.6, 33.9, [300] * 9, alts, gs=40)[:-1]  # (path()'s last point has no rate)
+        self.run_flights(mon, feed, clock, {"4ba005": (path(32.6, 33.9, [300] * 6, [35000] * 6) + states, "TST105")}, 14)
+        self.assertIn("VERTICAL_RATE", kinds(alerts))
+        self.assertNotIn("GPS_SPOOFING", kinds(alerts))
+        self.assertFalse(mon.tracks["4ba005"].spoof)
+
+    def test_hovering_helicopter_is_not_spoofing(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        hover = [dict(lat=32.6, lon=34.6, alt_baro=6000, track=0, gs=0, baro_rate=0, category="A7")] * 20
+        self.run_flights(mon, feed, clock, {"738a07": (hover, "4XBHA")}, 20)
+        self.assertFalse(mon.tracks["738a07"].spoof)
+        self.assertEqual(len(mon.tracks["738a07"].samples), 20)
+
+
+class MlatTests(unittest.TestCase):
+    def test_mlat_report_with_the_aircrafts_spoofed_velocity_is_not_frozen(self):
+        """MLAT position, but gs / track copied from the aircraft (0.7 kt, 0 deg): not spoofed."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        states = path(32.0, 34.8, [270] * 10, [12000] * 10, gs=270)
+        states = [{**st, "gs": 0.7, "track": 0, "type": "mlat", "mlat": ["lat", "lon"]} for st in states]
+        fly(mon, feed, clock, "46b828", states, flight="AEE925", r="SX-NAE", t="A21N")
+        t = mon.tracks["46b828"]
+        self.assertFalse(t.spoof)
+        self.assertTrue(all(x.mlat and x.gs is None and x.track is None for x in t.samples))
+
+    def test_spoofed_flight_follows_its_mlat_fixes(self):
+        """AEE925, 6 Oct 2026: climbing out of TLV with GPS spoofed (frozen at Amman, then drifting
+        far away at believable speeds) while MLAT followed the real departure."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        real = path(32.0, 34.7, [287] * 30, [8000 + 300 * i for i in range(30)], gs=280)
+        states = []
+        for i, st in enumerate(real):
+            if i < 4:
+                states.append(st)
+            elif i in (4, 5):
+                states.append(frozen(st["alt_baro"]))                       # GPS: motionless at Amman
+            elif i % 2 or i == 6:
+                states.append({**st, "type": "mlat", "mlat": ["lat", "lon"]})  # MLAT: the real path
+            else:
+                states.append({**st, "lat": 31.7, "lon": 36.4 + 0.02 * i})      # GPS: drifting, 150 km off
+        fly(mon, feed, clock, "46b828", states, flight="AEE925", r="SX-NAE", t="A21N")
+        t = mon.tracks["46b828"]
+        self.assertTrue(t.spoof)
+        self.assertNotIn("POSITION_JUMP", kinds(alerts))
+        self.assertTrue(all(x.lon < 35 for x in t.samples), "only real positions in the track")
+
+
+class TrustedSpeedTests(unittest.TestCase):
+    def test_spoofed_low_speed_does_not_make_a_climb_steep(self):
+        """QTR94R, 6 Oct 2026: B789 at FL390 'at' 147 kt during spoofing, reporting +12,224 ft/min
+        while climbing normally. The altitude history unmasks the rate as a glitch - but judged with
+        the fake speed, even the real climb looked steep enough to confirm it."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        states = path(32.6, 33.9, [300] * 15, [37000 + 300 * i for i in range(15)], gs=480)
+        # positions move at 480 kt, reported 117; reported rate +12,224 ft/min, real climb 1,800
+        states = [{**st, "gs": 117, "baro_rate": 12224} for st in states]
+        fly(mon, feed, clock, "4ba020", states, flight="QTR94R", r="A7-BHA", t="B789")
+        self.assertNotIn("VERTICAL_RATE", kinds(alerts))
+
+
+class IntegrityTests(unittest.TestCase):
+    def test_jammed_but_on_track_is_still_watched(self):
+        """GPS jammed: NIC 0, the aircraft navigates on inertial - positions roughly right."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        states = [{**st, "nic": 0, "nac_p": 0} for st in path(32.6, 33.9, [300] * 20, [35000] * 20)]
+        fly(mon, feed, clock, "4ba010", states, flight="TST110")
+        self.assertEqual(kinds(alerts), [])
+        self.assertEqual(len(mon.tracks["4ba010"].samples), 20)
+
+    def test_untrusted_position_out_of_reach_is_dropped(self):
+        """AEE925: NIC 0 on a fake position 787 km away, NIC 8 again on the real track."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        states = [{**st, "nic": 8} for st in path(32.6, 33.9, [300] * 12, [35000] * 12)]
+        states[6] = {**states[6], "lat": 31.73, "lon": 36.4, "nic": 0, "nac_p": 0}
+        fly(mon, feed, clock, "4ba011", states, flight="TST111")
+        self.assertNotIn("POSITION_JUMP", kinds(alerts))
+        self.assertTrue(all(x.lon < 34 for x in mon.tracks["4ba011"].samples))
+
+    def test_nic_drops_together_are_one_episode(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        hexes = ["4ba012", "4ba013", "4ba014"]
+        tracks = {h: path(32.4 + 0.2 * k, 33.9, [300] * 160, [35000] * 160) for k, h in enumerate(hexes)}
+        for i in range(160):
+            feed.local = set(hexes)
+            for k, h in enumerate(hexes):
+                bad = 6 + 3 * k <= i < 40  # NIC 0 from 1 / 1.5 / 2 min to 6.5 min
+                feed.aircraft[h] = {**tracks[h][i], "nic": 0 if bad else 8, "flight": f"TST11{k}  ",
+                                    "r": "SX-" + h[-3:], "t": "A320"}
+            step(mon, clock)
+        gps = [a for a in alerts if a["kind"] == "GPS_DEGRADED"]
+        self.assertEqual(len(gps), 2, [a["message"] for a in alerts])  # start, end
+        self.assertRegex(gps[0]["message"], r"^gps-\d{8}T\d{4}Z: 3 aircraft")
+        self.assertIn("ended", gps[1]["message"])
+        self.assertEqual([k for k in kinds(alerts) if k != "GPS_DEGRADED"], [])
+
+
+class SharpTurnGlitchTests(unittest.TestCase):
+    def test_corrupted_velocity_reading_is_not_a_sharp_turn(self):
+        """4X-CZF, 6 Oct 2026: straight on 131 deg at FL300, one reading 191 deg at a plausible
+        449 kt (the live feed's copy of a corrupted message). Also THY6685 in the FZ1073 replay:
+        a gentle climbing turn through 23 deg, one reading 255 deg."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        states = path(33.38, 32.87, [131] * 12, [30000] * 12, gs=450)
+        states[6] = {**states[6], "track": 191}
+        fly(mon, feed, clock, "73934e", states, flight="4XCZF", r="4X-CZF", t="H25B")
+        self.assertNotIn("SHARP_TURN", kinds(alerts))
+
+
 class GapAndDetourJumps(unittest.TestCase):
     """POSITION_JUMP beyond short hops: reappearing too far after a gap (THY1KG, 5 Oct 2026: 94 nm
     in 408 s, ~833 kt, over the Eastern Mediterranean) and one position off the track and back."""
@@ -655,6 +857,14 @@ class DestinationTests(unittest.TestCase):
             r="4X-ECA")
         self.assertIn("OFF_COURSE", kinds(alerts))
 
+    def test_off_course_repeats_every_repeat_minutes(self):
+        """A persisting condition: once, then every --repeat-minutes (30), not every --cooldown (5)."""
+        mon, feed, clock, alerts = with_board([board_row("LY", "26", "A", local_time(mon_clock(), 1), "EWR")])
+        tracks = [80] * 6 + [80 + 15 * i for i in range(1, 13)] + [260] * 200  # ~36 min heading away
+        fly(mon, feed, clock, "738026", path(32.3, 33.0, tracks, [30000] * len(tracks)), flight="ELY026",
+            r="4X-ECA")
+        self.assertEqual(kinds(alerts).count("OFF_COURSE"), 2, kinds(alerts))
+
     def test_route_bend_is_not_off_course(self):
         mon, feed, clock, alerts = with_board([board_row("LY", "26", "A", local_time(mon_clock(), 1), "EWR")])
         fly(mon, feed, clock, "738026", path(32.3, 32.0, [20] * 30, [30000] * 30), flight="ELY026", r="4X-ECA")
@@ -687,6 +897,10 @@ class TowardIsraelTests(unittest.TestCase):
         self.assertEqual(len(hits), 1, kinds(alerts))
         self.assertIn("turned", hits[0]["message"])
         self.assertEqual(hits[0]["priority"], 5)
+
+    def test_military_aircraft_over_israel_is_routine(self):
+        """6 Oct 2026: KC-135 tankers and a military Gulfstream over Israel for hours - 29 alerts."""
+        self.assertNotIn("TOWARD_ISRAEL", kinds(self.run_track(flight="IRON", r="", dbFlags=1)))
 
     def test_israeli_flight_on_the_same_track_is_not_flagged(self):
         self.assertNotIn("TOWARD_ISRAEL", kinds(self.run_track(flight="ELY111", r="4X-EHA")))

@@ -116,7 +116,9 @@ CONFIRMED = {"ARR", "DEP", "VIA"}
 LIGHT_CATEGORIES = {"A1", "A7", "B1", "B2", "B3", "B4", "B6"}
 PRIORITY = {"EMERGENCY": 5, "LOST_CONTACT": 5, "DIVERSION": 5, "TOWARD_ISRAEL": 5, "OFF_COURSE": 5,
             "RETURNED": 4, "TURNING_BACK": 4, "VERTICAL_RATE": 4, "SHARP_TURN": 4,
-            "COURSE_CHANGE": 4, "HOLDING": 4, "POSITION_JUMP": 3, "CONTACT_RESTORED": 2}
+            "COURSE_CHANGE": 4, "HOLDING": 4, "POSITION_JUMP": 3, "GPS_SPOOFING": 3, "MASS_SILENCE": 3,
+            "GPS_DEGRADED": 3,
+            "CONTACT_RESTORED": 2}
 # kinds that describe abnormal flying; two different ones on one flight within --hot-minutes
 # are reported as a pattern (priority 5)
 ANOMALIES = {"EMERGENCY", "LOST_CONTACT", "DIVERSION", "TOWARD_ISRAEL", "OFF_COURSE", "TURNING_BACK",
@@ -134,6 +136,15 @@ REGION_AIRPORTS = {
     "AJF": (29.7851, 40.1000, False), "MED": (24.5534, 39.7051, False), "ALP": (36.1807, 37.2244, False),
     "LTK": (35.4011, 35.9487, False), "AYT": (36.8987, 30.8005, False), "ADA": (36.9822, 35.2804, False),
 }
+# conditions that last while a flight keeps flying the same way: repeated every --repeat-minutes, not
+# every --cooldown (6 Oct 2026: one tanker over Israel for 75 min gave 15 TOWARD_ISRAEL alerts)
+PERSISTING = {"TOWARD_ISRAEL", "OFF_COURSE", "TURNING_BACK"}
+# GPS spoofing (Monitor.spoofed): an aircraft reported motionless at altitude is spoofed unless it
+# climbs / descends at least this fast (a stall or spin falls 10,000+ ft/min) - then it is checked.
+SPOOF_MAX_RATE = 6000
+# alerts that rest on GPS positions / velocities: logged under a spoofing episode, not alerted
+SPOOF_KINDS = {"POSITION_JUMP", "COURSE_CHANGE", "SHARP_TURN", "OFF_COURSE", "TURNING_BACK",
+               "TOWARD_ISRAEL", "LOST_CONTACT", "HOLDING"}
 # Rough outline of Israeli-controlled airspace over land (incl. West Bank, Golan), lat/lon.
 # Israeli airlines (ICAO): El Al, Israir, Arkia, CAL Cargo, Sun d'Or, Challenge Airlines IL, Air Haifa
 ISRAELI_AIRLINES = {"ELY", "ISR", "AIZ", "ICL", "ERO", "CHG", "HFA"}
@@ -517,6 +528,8 @@ class Sample:
     gs: float | None       # knots
     vrate: int | None      # ft/min
     on_ground: bool
+    mlat: bool = False     # position from multilateration (ground receivers' timing), not the aircraft's GPS
+    nic: int | None = None  # the aircraft's own position-integrity category (0 = it does not trust it)
 
 
 @dataclass
@@ -556,10 +569,18 @@ class Track:
     last_query: float = 0.0  # server time we last asked a remote feed for this hex and got an answer
     hot_until: float = 0.0   # data time until which the flight is "hot" (alerted recently)
     lost_alerted: bool = False  # the current loss of contact was alerted (not just noted)
+    lost_pending: float = 0.0   # time its silence reached the limit; alerted --lost-confirm s later
     israeli: bool = False    # seen low at an Israeli airport (so it is Israel traffic)
     route_dir: int = 0       # +1 flying the route as listed, -1 the reverse leg, 0 not known yet
     military: bool = False   # readsb aircraft database flag (dbFlags bit 0)
     pending_turn: dict | None = None  # a reversal waiting to show whether it is one (see check_turn)
+    spoof: str = ""          # label of the GPS-spoofing episode it was caught in (spoof-YYYYMMDDTHHMMZ)
+    gps_free_until: float = 0.0  # hot from an alert that does not rest on GPS (squawk, baro altitude)
+    spoof_last: float = 0.0  # data time of its last spoofed (frozen) report
+    spoof_prev: Sample | None = None  # its last spoofed report
+    nic_last: int | None = None  # integrity of its previous ADS-B report (to see drops to 0)
+    gps: str = ""            # label of the GPS-degraded episode it was caught in (gps-YYYYMMDDTHHMMZ)
+    gps_last: float = 0.0    # data time of its last NIC-0 report in that episode
     turn_ref: tuple | None = None     # (track before a manoeuvre found not to be a reversal, until)
     hold_since: float = 0.0  # data time the current circling (holding pattern / orbit) began
     hold_last: float = 0.0   # last data time it was circling
@@ -585,6 +606,28 @@ class Track:
             if s.t <= target:
                 return s if self.samples[-1].t - s.t <= seconds * 1.5 else None
         return None
+
+    def course_into(self, x: Sample) -> float | None:
+        """Direction of travel from the positions (not the reported track) arriving at sample x:
+        from the latest earlier sample 2-60 s before it, if it moved at least 0.1 nm."""
+        prev = None
+        for y in self.samples:
+            if y.t > x.t - 2:
+                break
+            prev = y
+        if prev is None or x.t - prev.t > 60 or haversine_nm(prev.lat, prev.lon, x.lat, x.lon) < 0.1:
+            return None
+        return bearing(prev.lat, prev.lon, x.lat, x.lon)
+
+    def track_ok(self, x: Sample) -> bool:
+        """The reported track agrees with the path into x (when known). The path's direction is the
+        track halfway between the two positions, so a real turn may differ by its rate (up to
+        ~3 deg/s) times half the time between them."""
+        c = self.course_into(x)
+        if c is None or x.track is None:
+            return True
+        prev = max((y.t for y in self.samples if y.t <= x.t - 2), default=x.t)
+        return heading_diff(x.track, c) <= 20 + 1.5 * (x.t - prev)
 
     def turned(self, since: float) -> float:
         """Signed track change summed over the samples since `since` (+ right, - left): circling
@@ -629,10 +672,17 @@ def parse_aircraft(ac: dict, server_now: float):
     seen = float(ac.get("seen", 0) or 0)
     seen_pos = ac.get("seen_pos")
     pos_t = server_now - float(seen_pos) if seen_pos is not None else server_now - seen
+    track, gs = ac.get("track", ac.get("true_heading")), ac.get("gs")
+    mlat_fields = ac.get("mlat") or []
+    mlat = ac.get("type") == "mlat" or "lat" in mlat_fields
+    if mlat:  # speed / track are the aircraft's own (GNSS) unless MLAT computed them too
+        gs = gs if "gs" in mlat_fields else None
+        track = track if "track" in mlat_fields else None
+    nic = ac.get("nic")  # (an MLAT record's nic is the feed's, not the aircraft's: ignored)
     sample = Sample(pos_t, float(lat), float(lon),
                     int(alt) if alt is not None else None,
-                    ac.get("track", ac.get("true_heading")), ac.get("gs"),
-                    int(vrate) if vrate is not None else None, on_ground)
+                    track, gs, int(vrate) if vrate is not None else None, on_ground, mlat,
+                    None if mlat or not isinstance(nic, int) else nic)
     return hexid, server_now - seen, sample
 
 
@@ -782,7 +832,10 @@ class Announcer:
                  "SHARP_TURN": ("\U0001f504", "Sharp turn"),
                  "COURSE_CHANGE": ("\U0001f504", "Course reversal"),
                  "HOLDING": ("⏳", "Holding unusually long"),
-                 "POSITION_JUMP": ("\U0001f6f0️", "Position jump (GPS spoofing?)")}
+                 "POSITION_JUMP": ("\U0001f6f0️", "Position jump (GPS spoofing?)"),
+                 "GPS_SPOOFING": ("\U0001f6f0️", "GPS spoofing"),
+                 "MASS_SILENCE": ("\U0001f4e1", "Many aircraft silent at once"),
+                 "GPS_DEGRADED": ("\U0001f6f0️", "GPS jamming / spoofing")}
 
     def __init__(self, args, out=None):
         self.args = args
@@ -967,7 +1020,8 @@ class Notifier:
         ident += f" {rec['airline']}" if rec.get("airline") else ""
         ident += " (military)" if rec.get("military") else ""
         route = f"  {rec['route_text']}" if rec.get("route_text") else ""
-        return f"{when:%H:%M:%S}  {ident}{route}  {rec['kind']}"
+        spoof = "".join(f"  [{rec[k]}]" for k in ("spoof", "gps") if rec.get(k))
+        return f"{when:%H:%M:%S}  {ident}{route}  {rec['kind']}{spoof}"
 
     def _post(self, url, **kw):
         try:
@@ -1000,6 +1054,10 @@ class Monitor:
         self.started = self.clock()
         self.starved_warned = -1e9
         self.zones = TurnZones(args.turn_zones)
+        self.spoofs: list[dict] = []  # GPS-spoofing episodes (see spoofed())
+        self.silent: dict[str, float] = {}  # hex -> last message, aircraft whose silence reached the limit
+        self.silences: list[dict] = []      # group silences (see check_lost)
+        self.nic_drops: list[dict] = []     # GPS-degraded episodes (see integrity())
         self.protect = args.protect == "israel"
         self.disc_queue: dict[str, list[str]] = {}  # discovery round in progress, per provider
         self.disc_round = -1e9
@@ -1305,14 +1363,31 @@ class Monitor:
             if self.schedule and t.callsign in self.schedule.by_callsign:
                 t.sched = self.schedule.by_callsign[t.callsign]
             prev = t.last
-            if prev is None or sample.t > prev.t + 0.5:
+            label = self.spoofed(t, sample) or self.integrity(t, sample)  # a fake / untrustworthy
+            if not label and (prev is None or sample.t > prev.t + 0.5):  # position is kept out of the track
                 t.samples.append(sample)
-            updated.append((t, prev, ac))
+            updated.append((t, prev, ac, label))
 
-        self.lookup_routes([t for t, _, _ in updated])
+        self.lookup_routes([t for t, *_ in updated])
 
-        for t, prev, ac in updated:
+        for t, prev, ac, spoofed in updated:
             s = t.last
+            if t.lost_pending and server_now - t.last_msg < a.lost_after:
+                log.info("%s heard again within --lost-confirm: not lost", t.label())
+                t.lost_pending = 0.0
+                self.silent.pop(t.hex, None)
+            if spoofed:
+                # Squawks are not GPS: still checked. Barometric altitude is not GPS either, but a
+                # report is only "spoofed" while that altitude is steady (see spoofed()), so a real
+                # dive or climb never lands here and goes through the vertical-rate check.
+                if t.lost and server_now - t.last_msg < a.lost_after:
+                    t.lost = False
+                    if t.lost_alerted:
+                        self.alert(t, "CONTACT_RESTORED", f"heard again ({spoofed})")
+                self.check_emergency(t, ac)
+                continue
+            if s is None:
+                continue
             d = self.dist(s)
             kind, route = self.classify(t)
             if not t.followed and (kind in CONFIRMED or (kind == "DEP?" and d < 15 and airline_like(t))):
@@ -1350,6 +1425,7 @@ class Monitor:
                         len(local), self.last_count)
         if gap_ok and feed_ok:
             self.check_lost(server_now)
+        self.end_spoofs(server_now)
 
         self.last_ok, self.last_count = server_now, len(local)
         self.share_callsigns(server_now)
@@ -1399,23 +1475,43 @@ class Monitor:
         a, s = self.args, t.last
         if s.on_ground or s.vrate is None or s.alt is None or s.alt < 1000:
             return
-        angle = path_angle(s.vrate, s.gs) if s.gs and s.gs >= 60 else None
+        gs = self.trusted_gs(t)
+        angle = path_angle(s.vrate, gs) if gs else None
         apt, ad = nearest_airport(s.lat, s.lon)
         terminal = ad <= a.terminal_radius and s.alt < a.terminal_alt
         limit = (a.terminal_climb_angle if terminal else a.climb_angle) if s.vrate > 0 else a.descent_angle
         if not ((angle is not None and abs(angle) >= limit) or abs(s.vrate) >= a.vrate):
             return
         computed = t.computed_vrate(30)
-        if computed is not None:
-            c_angle = path_angle(computed, s.gs) if s.gs and s.gs >= 60 else 0.0
-            if abs(computed) < 0.5 * a.vrate and abs(c_angle) < 0.5 * limit:
-                return  # reported rate not backed by actual altitude change -> likely a glitch
+        if computed is None:
+            return  # nothing to back the reported rate yet (just heard, e.g. back from a spoofing
+            #         gap - QTR94R "+12,224 ft/min" on 6 Oct): judged on the next reports
+        c_angle = path_angle(computed, gs) if gs else 0.0
+        if abs(computed) < 0.5 * a.vrate and abs(c_angle) < 0.5 * limit:
+            return  # reported rate not backed by actual altitude change -> likely a glitch
         direction = "DESCENT" if s.vrate < 0 else "CLIMB"
         extra = f" (history: {computed:+.0f} ft/min)" if computed is not None else ""
         ang = f", {angle:+.1f} deg" if angle is not None else ""
         near = f", {ad:.0f} nm from {apt}" if terminal else ""
         self.alert(t, "VERTICAL_RATE", f"{direction} {s.vrate:+d} ft/min{ang} at {s.alt} ft{near}{extra}",
                    key=f"VERTICAL_RATE:{direction}", severity=abs(s.vrate))
+
+    def trusted_gs(self, t: Track) -> float | None:
+        """Ground speed fit for judging a climb / descent angle, else None (then only the --vrate
+        rate limit applies). Spoofed / corrupted velocity made normal climbs look like 40-60 deg
+        dives on 6 Oct 2026 (B789s at FL380 "at" 117-147 kt, a B738 at FL190 "at" 82 kt), and for
+        slow light aircraft an angle limit means little."""
+        s = t.last
+        if s.gs is None or s.gs < 120:
+            return None
+        if airline_like(t) and (s.alt or 0) >= 10000 and s.gs < 150:
+            return None  # an airliner up there cannot be that slow over the ground
+        prev = next((y for y in reversed(t.samples) if 20 <= s.t - y.t <= 120), None)
+        if prev is not None:
+            moved = haversine_nm(prev.lat, prev.lon, s.lat, s.lon) / ((s.t - prev.t) / 3600)
+            if not s.gs / 1.6 <= moved <= s.gs * 1.6:
+                return None  # positions disagree with the reported speed
+        return s.gs
 
     def check_turn(self, t: Track) -> None:
         """Large course change (e.g. a U-turn). Routine turns are skipped: in terminal areas and at
@@ -1433,6 +1529,11 @@ class Monitor:
         d = heading_diff(s.track, old.track)
         if d < a.turn:
             return
+        if not (t.track_ok(old) and t.track_ok(s)):
+            return  # a corrupted track reading (THY6685: 255 deg while flying 23)
+        c_old, c_new = t.course_into(old), t.course_into(s)
+        if c_old is not None and c_new is not None and heading_diff(c_new, c_old) < a.turn / 2:
+            return  # the path barely bent
         msg = f"track {old.track:.0f} -> {s.track:.0f} deg ({d:.0f} deg in {s.t - old.t:.0f}s) at {s.alt} ft"
         if t.circling():
             return  # holding pattern / orbit, also when hot: check_holding reports it if unusually long
@@ -1512,6 +1613,15 @@ class Monitor:
         moved = haversine_nm(old.lat, old.lon, s.lat, s.lon)
         expect = (s.gs + old.gs) / 2 * dt / 3600
         if not 0.6 <= moved / expect <= 1.4:
+            return
+        # ...and the path must bend like the reported tracks: a corrupted velocity message (4X-CZF,
+        # 6 Oct 2026: straight on 131 deg, one reading 262 deg / 3,571 kt) is a "turn" otherwise
+        c_old, c_new = t.course_into(old), t.course_into(s)
+        if c_old is None or c_new is None:
+            return
+        by_track = (s.track - old.track + 540) % 360 - 180
+        by_path = (c_new - c_old + 540) % 360 - 180
+        if by_track * by_path <= 0 or abs(by_path) < abs(by_track) / 2:
             return
         bank = math.degrees(math.atan(math.radians(dtrk) / dt * s.gs * 0.5144 / 9.81))
         if bank >= a.max_bank:
@@ -1657,6 +1767,8 @@ class Monitor:
         if (not self.protect or s.on_ground or (s.alt or 0) < a.toward_min_alt or not s.gs
                 or s.gs < 150 or s.track is None):
             return
+        if t.military:
+            return  # tankers, transports, patrols over Israel are routine (29 of 33 alerts, 6 Oct 2026)
         if (kind in CONFIRMED or t.sched or t.israeli or t.reg.upper().startswith("4X")
                 or t.callsign[:3] in ISRAELI_AIRLINES
                 or (route and ISRAELI_CODES & set(route.split("-")))
@@ -1724,6 +1836,8 @@ class Monitor:
                 limit = a.lost_after
             if silent < limit:
                 continue
+            if not self.hot(t) and a.lost_confirm > 0 and self.wait_or_group(t, now):
+                continue
             t.lost, t.lost_alerted = True, False
             trk = f"{s.track:.0f}" if s.track is not None else "?"
             where = (f"last {s.alt} ft, {d:.0f} nm from {a.airport}, track {trk} deg, "
@@ -1744,8 +1858,201 @@ class Monitor:
                 log.info("%s silent %.0fs, %s - remote coverage gap, not alerted",
                          t.label(), silent, where)
                 continue
-            t.lost_alerted = True
-            self.alert(t, "LOST_CONTACT", f"silent {silent:.0f}s; {where}")
+            # (not alerted - e.g. part of a spoofing episode - means no "restored" later either)
+            t.lost_alerted = self.alert(t, "LOST_CONTACT", f"silent {silent:.0f}s; {where}")
+
+    def wait_or_group(self, t: Track, now: float) -> bool:
+        """True when a loss of contact is not (yet) alerted: within --lost-confirm of reaching the
+        limit, or one of a group - 3+ aircraft silent within 2 min of each other (reception,
+        jamming, the onset of spoofing: on 6 Oct 2026 aircraft went silent ~1 min before showing
+        up frozen at the spoofing point). A group gets one alert, labelled silence-YYYYMMDDTHHMMZ."""
+        if not t.lost_pending:
+            t.lost_pending = now
+            self.silent[t.hex] = t.last_msg
+            return True
+        for h, lm in list(self.silent.items()):
+            if now - lm > 900:
+                del self.silent[h]
+        group = {h for h, lm in self.silent.items() if abs(lm - t.last_msg) <= 120}
+        if len(group | {t.hex}) >= 3:
+            g = next((g for g in self.silences if abs(g["start"] - t.last_msg) <= 300), None)
+            if g is None:
+                g = {"label": self.episode_label("silence", t.last_msg),
+                     "start": t.last_msg, "hexes": set(), "alerted": False}
+                self.silences = [x for x in self.silences if now - x["start"] <= 3600] + [g]
+            g["hexes"] |= group | {t.hex}
+            t.lost, t.lost_alerted, t.lost_pending = True, False, 0.0
+            log.info("%s silent with %d other aircraft - %s, not alerted alone", t.label(),
+                     len(g["hexes"]) - 1, g["label"])
+            if not g["alerted"]:
+                g["alerted"] = True
+                self.alert(t, "MASS_SILENCE", f"{g['label']}: {len(g['hexes'])} aircraft went silent within "
+                           f"2 min - reception, jamming or spoofing; not alerted one by one",
+                           key=g["label"], force=True)
+            return True
+        if now - t.lost_pending < self.args.lost_confirm:
+            return True
+        t.lost_pending = 0.0
+        self.silent.pop(t.hex, None)
+        return False
+
+    # ---- GPS spoofing
+    def spoof_part(self, t: Track, kind: str, s: Sample) -> str:
+        """Label of the spoofing episode an alert of this kind on t would be part of, else "".
+        Position-based alerts on a flight caught in an episode (for 30 min after its last fake
+        report), and jumps landing within 100 nm of an active spoofing point (fake positions there
+        also drift at believable speeds), are logged under the episode instead of alerted -
+        unless the flight is hot from an alert that does not rest on GPS (emergency squawk,
+        vertical rate, diversion)."""
+        if kind not in SPOOF_KINDS or (t.last and t.last.t < t.gps_free_until):
+            return ""  # (hot from GPS-based alerts - e.g. this spoofing's own onset - does not count)
+        if t.spoof and s.t - t.spoof_last <= 1800:
+            return t.spoof
+        if kind == "POSITION_JUMP":
+            for ep in self.spoofs:
+                if ep["alerted"] and s.t - ep["last"] <= 900 and haversine_nm(ep["lat"], ep["lon"], s.lat, s.lon) <= 100:
+                    t.spoof, t.spoof_last = ep["label"], s.t
+                    ep["hexes"].add(t.hex)
+                    return ep["label"]
+        return ""
+
+    def episode_label(self, prefix: str, when: float) -> str:
+        """prefix-YYYYMMDDTHHMMZ, with -2, -3... when another episode started the same minute
+        (on 6 Oct two areas 300 km apart lost GPS integrity at once)."""
+        base = f"{prefix}-{time.strftime('%Y%m%dT%H%MZ', time.gmtime(when))}"
+        taken = {e["label"] for e in self.spoofs + self.silences + self.nic_drops}
+        label, n = base, 1
+        while label in taken:
+            n += 1
+            label = f"{base}-{n}"
+        return label
+
+    def integrity(self, t: Track, x: Sample) -> str:
+        """The aircraft's own integrity flag. NIC 0 means its avionics do not trust the position:
+        GPS jammed (it then navigates on inertial, positions roughly right) or a spoof it noticed
+        (AEE925 on 6 Oct: NIC 0 / NACp 0 / SIL 0 on every fake position, 8 again a minute after).
+        Such a report is used only if the flight could have flown there since its last trusted
+        position; else it is dropped (returns a label) - no jump alert for it. Healthy NIC proves
+        nothing: 61% of the reports frozen at the Amman spoofing point still said NIC 8.
+        Drops to NIC 0 by 3+ aircraft within 2 min and 100 nm form a GPS-degraded episode (one
+        alert, label gps-YYYYMMDDTHHMMZ; one more when 15 min pass without NIC-0 reports)."""
+        if x.mlat or x.nic is None or x.on_ground:
+            return ""
+        dropped = x.nic == 0 and t.nic_last not in (0, None)
+        t.nic_last = x.nic
+        if x.nic != 0:
+            return ""
+        ep = next((e for e in self.nic_drops if x.t - e["last"] <= 900
+                   and haversine_nm(e["lat"], e["lon"], x.lat if t.last is None else t.last.lat,
+                                    x.lon if t.last is None else t.last.lon) <= 100), None)
+        if dropped:
+            ref = t.last or x
+            if ep is None or x.t - ep["last_drop"] > 120 and len(ep["hexes"]) < 3:
+                ep = {"label": self.episode_label("gps", x.t), "lat": ref.lat,
+                      "lon": ref.lon, "start": x.t, "last": x.t, "last_drop": x.t, "hexes": set(),
+                      "alerted": False, "track": t}
+                self.nic_drops = [e for e in self.nic_drops if x.t - e["last"] <= 3600] + [ep]
+            ep["hexes"].add(t.hex)
+            ep["last_drop"] = x.t
+            if len(ep["hexes"]) >= 3 and not ep["alerted"]:
+                ep["alerted"] = True
+                apt, ad = nearest_airport(ep["lat"], ep["lon"])
+                self.alert(t, "GPS_DEGRADED", f"{ep['label']}: {len(ep['hexes'])} aircraft report they no "
+                           f"longer trust their GPS position (NIC 0) within 2 min, around {ep['lat']:.2f},"
+                           f"{ep['lon']:.2f} ({ad:.0f} nm from {apt}) - jamming or spoofing",
+                           key=ep["label"], force=True, sample=t.last or x)
+        if ep is not None:
+            ep["last"], ep["track"] = x.t, t
+            t.gps, t.gps_last = ep["label"], x.t
+        last = t.last
+        if last is None or (x.t > last.t and haversine_nm(last.lat, last.lon, x.lat, x.lon)
+                            <= 3 + 650 * (x.t - last.t) / 3600):
+            return ""  # untrusted by the aircraft, but where it could be: keep watching it
+        log.info("%s NIC 0 position %.4f,%.4f out of reach of its last trusted one - dropped", t.label(), x.lat, x.lon)
+        return t.gps or "nic0"
+
+    def off_mlat(self, t: Track, x: Sample) -> bool:
+        """A GPS report farther from the flight's latest MLAT fix (<= 3 min old) than it could have
+        flown: fake. On 6 Oct 2026 MLAT and clean GPS positions agreed to a median 0.2 km, and while
+        GPS was spoofed MLAT followed the real path (AEE925 climbing out of TLV)."""
+        if x.mlat:
+            return False
+        fix = next((y for y in reversed(t.samples) if y.mlat), None)
+        if fix is None or not 0 <= x.t - fix.t <= 180:
+            return False
+        return haversine_nm(fix.lat, fix.lon, x.lat, x.lon) > 3 + 650 * (x.t - fix.t) / 3600
+
+    def spoofed(self, t: Track, x: Sample) -> str:
+        """Label of the spoofing episode when report x is a fake position, else "".
+
+        Only what a fixed-wing aircraft physically cannot do counts: hanging motionless in the air,
+        i.e. under 50 kt at 5,000 ft or more while its barometric altitude (from its own air data,
+        not GPS) is steady. A real upset - a stall, a spin, a near-vertical dive - can also show a
+        very low ground speed, but its altitude changes fast, so it is still checked as usual.
+        Helicopters and balloons can hover and are never judged. On 6 Oct 2026 (12:42-14:25Z) at
+        least 43 aircraft were reported motionless at 31.717 N 35.999 E (Amman airport) at cruise
+        and then reappeared 100+ nm away: ~190 of 562 alerts that day.
+        Episodes are spoofing points (within 2 km) shared by aircraft; labelled by start time."""
+        if x.mlat:
+            return ""  # computed on the ground from signal timing, not by the aircraft's GPS
+        if t.spoof and x.t - t.spoof_last <= 1800 and self.off_mlat(t, x):
+            t.spoof_last = x.t  # a flight in an episode, its GPS report far from its MLAT fix
+            log.info("%s GPS position at %.4f,%.4f, far from its MLAT fix - spoofed (%s)", t.label(),
+                     x.lat, x.lon, t.spoof)
+            return t.spoof
+        if (x.on_ground or (x.alt or 0) < 5000 or x.gs is None or x.gs >= 50
+                or t.category in LIGHT_CATEGORIES or t.military):  # (some military aircraft can hover)
+            return ""
+        # A stall / spin falls 10,000+ ft/min; zero headway while climbing or descending at a
+        # normal rate (spoofed aircraft keep flying their real profile) is impossible.
+        rate = x.vrate
+        ref = t.spoof_prev if t.spoof_prev and x.t - t.spoof_prev.t <= 120 else t.last
+        if rate is None and ref is not None and ref.alt is not None and 0 < x.t - ref.t <= 120:
+            rate = (x.alt - ref.alt) / (x.t - ref.t) * 60
+        if rate is not None and abs(rate) >= SPOOF_MAX_RATE:
+            return ""
+        ep = next((e for e in self.spoofs if x.t - e["last"] <= 900
+                   and haversine_nm(e["lat"], e["lon"], x.lat, x.lon) <= 1.1), None)
+        if ep is None:
+            ep = {"label": self.episode_label("spoof", x.t), "lat": x.lat, "lon": x.lon,
+                  "start": x.t, "last": x.t, "hexes": set(), "alerted": False, "track": t}
+            self.spoofs.append(ep)
+        ep["last"], ep["track"] = max(ep["last"], x.t), t
+        t.spoof, t.spoof_last, t.spoof_prev = ep["label"], x.t, x
+        if t.hex not in ep["hexes"]:
+            ep["hexes"].add(t.hex)
+            log.info("%s reported motionless at %s ft, %.4f,%.4f - GPS spoofing (%s, %d aircraft)",
+                     t.label(), x.alt, x.lat, x.lon, ep["label"], len(ep["hexes"]))
+        if len(ep["hexes"]) >= 2 and not ep["alerted"]:
+            ep["alerted"] = True
+            apt, ad = nearest_airport(ep["lat"], ep["lon"])
+            self.alert(t, "GPS_SPOOFING", f"{ep['label']}: {len(ep['hexes'])} aircraft reported motionless in "
+                       f"the air at {ep['lat']:.4f},{ep['lon']:.4f} ({ad:.0f} nm from {apt}) - positions, "
+                       f"speeds and tracks there are fake", key=ep["label"], force=True, sample=x)
+        return ep["label"]
+
+    def end_spoofs(self, now: float) -> None:
+        """An episode with no spoofed (or NIC-0) report for 15 min is over: one summary alert."""
+        for ep in list(self.nic_drops):
+            if now - ep["last"] > 900:
+                self.nic_drops.remove(ep)
+                if ep["alerted"]:
+                    t = ep["track"]
+                    self.alert(t, "GPS_DEGRADED", f"{ep['label']} ended: {len(ep['hexes'])} aircraft reported "
+                               f"untrusted GPS (NIC 0) from {time.strftime('%H:%M', time.gmtime(ep['start']))} "
+                               f"to {time.strftime('%H:%M', time.gmtime(ep['last']))} UTC",
+                               key=ep["label"] + ":end", force=True)
+        for ep in list(self.spoofs):
+            if now - ep["last"] <= 900:
+                continue
+            self.spoofs.remove(ep)
+            if ep["alerted"]:
+                t = ep["track"]
+                self.alert(t, "GPS_SPOOFING", f"{ep['label']} ended: {len(ep['hexes'])} aircraft reported "
+                           f"motionless at {ep['lat']:.4f},{ep['lon']:.4f} from "
+                           f"{time.strftime('%H:%M', time.gmtime(ep['start']))} to "
+                           f"{time.strftime('%H:%M', time.gmtime(ep['last']))} UTC",
+                           key=ep["label"] + ":end", force=True, sample=t.spoof_prev)
 
     # ---- output
     def hot(self, t: Track) -> bool:
@@ -1753,18 +2060,29 @@ class Monitor:
         return bool(t.last) and t.last.t < t.hot_until
 
     def alert(self, t: Track, kind: str, msg: str, key: str | None = None,
-              severity: float = 0, force: bool = False) -> None:
-        """Cooldown per key; a clearly worse reading (1.5x severity) or force bypasses it."""
+              severity: float = 0, force: bool = False, sample: Sample | None = None) -> bool:
+        """Cooldown per key; a clearly worse reading (1.5x severity) or force bypasses it.
+        `sample`: where / when, if not the track's last (trusted) report (a spoofed report)."""
         a = self.args
-        now = t.last.t  # time of the data, not of the poll
+        s = sample or t.last
+        if s is None:
+            return False
+        now = s.t  # time of the data, not of the poll
+        part = self.spoof_part(t, kind, s)
+        if part:
+            if kind == "POSITION_JUMP":
+                t.spoof_last = now  # still being spoofed
+            log.info("%s %s - part of GPS spoofing %s, not alerted: %s", t.label(), kind, part, msg)
+            return False
         key = key or kind
         last_t, last_sev = t.alerted.get(key, (-1e12, 0))
         escalated = severity and severity >= 1.5 * last_sev
-        if not (force or escalated or kind == "CONTACT_RESTORED") and now - last_t < a.cooldown:
-            return
+        cooldown = a.repeat_minutes * 60 if kind in PERSISTING else a.cooldown
+        if not (force or escalated or kind == "CONTACT_RESTORED") and now - last_t < cooldown:
+            return False
         traffic, route = self.classify(t)
         if a.airport_traffic_only and traffic not in AIRPORT_TRAFFIC:
-            return
+            return False
         recent = sorted({k.split(":")[0] for k, (tt, _) in t.alerted.items()
                          if now - tt <= a.hot_minutes * 60 and k.split(":")[0] in ANOMALIES} - {kind})
         pattern = kind in ANOMALIES and bool(recent)
@@ -1774,7 +2092,8 @@ class Monitor:
         t.followed = True  # keep its fate visible wherever it goes
         if kind in ANOMALIES:
             t.hot_until = max(t.hot_until, now + a.hot_minutes * 60)
-        s = t.last
+            if kind not in SPOOF_KINDS:
+                t.gps_free_until = max(t.gps_free_until, now + a.hot_minutes * 60)
         d = self.dist(s)
         apt, ad = nearest_airport(s.lat, s.lon)
         self.notifier.send({
@@ -1790,7 +2109,11 @@ class Monitor:
             "flight": self.flight_number(t), "airline": self.airline_name(t),
             "military": t.military, "reg": t.reg, "type": t.actype, "squawk": t.squawk, "route_text": self.route_text(t, traffic, route),
             "recent": recent, "links": external_links(t, now, self.args.viewer_url),
+            # the spoofing episode this flight was caught in (same label on every flight in it)
+            "spoof": t.spoof if t.spoof and now - t.spoof_last <= 1800 else None,
+            "gps": t.gps if t.gps and now - t.gps_last <= 1800 else None,  # its GPS-degraded episode
         })
+        return True
 
 
 # --------------------------------------------------------------------------- cli
@@ -1850,6 +2173,9 @@ def parse_args(argv=None):
     g.add_argument("--max-bank", type=float, default=35,
                    help="SHARP_TURN above this implied bank angle, degrees (airliners turn at <= 25-30)")
     g.add_argument("--lost-after", type=float, default=60, help="seconds of silence = lost (local)")
+    g.add_argument("--lost-confirm", type=float, default=60,
+                   help="then wait this long: heard again = nothing; 2+ other aircraft silent within "
+                        "2 min = one group-silence alert (reception / jamming); else LOST_CONTACT")
     g.add_argument("--lost-after-remote", type=float, default=600,
                    help="seconds of silence = lost for followed flights outside the local circle")
     g.add_argument("--lost-min-alt", type=int, default=5000, help="ignore losses below this ft")
@@ -1891,6 +2217,9 @@ def parse_args(argv=None):
     g.add_argument("--hot-minutes", type=float, default=20,
                    help="after an alert, follow the flight every cycle and report every anomaly")
     g.add_argument("--cooldown", type=float, default=300, help="seconds between repeat alerts")
+    g.add_argument("--repeat-minutes", type=float, default=30,
+                   help="a condition that persists (toward Israel, off course, turning back) is "
+                        "repeated this rarely instead of every --cooldown")
     g = p.add_argument_group("notifications")
     g.add_argument("--jsonl", default="alerts.jsonl", help="append alerts here ('' to disable)")
     g.add_argument("--posts", default="posts.jsonl",

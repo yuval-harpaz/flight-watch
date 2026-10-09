@@ -116,6 +116,8 @@ def points(tr: dict) -> list[dict]:
         for k in ("flight", "squawk"):
             if ex.get(k):
                 state[k] = str(ex[k]).strip()
+        if isinstance(ex.get("nic"), int):  # the aircraft's position integrity (0: it distrusts it)
+            state["nic"] = ex["nic"]
         src = p[9] if len(p) > 9 and p[9] else ex.get("type") or "?"
         out.append({"t": tr["timestamp"] + p[0], "lat": p[1], "lon": p[2],
                     "alt": 0 if p[3] == "ground" else p[3], "ground": p[3] == "ground",
@@ -249,13 +251,36 @@ def steep(air: list[dict]) -> tuple[set, list[dict]]:
     return hops, clusters
 
 
+SOURCES = (("adsb", "ADS-B (the aircraft's GPS)", "#1f77b4", [31, 119, 180]),
+           ("mlat", "MLAT (ground receivers)", "#2ca02c", [44, 160, 44]))  # (orange is for jumps)
+
+
+def source_lines(air: list[dict]) -> dict[str, list[tuple[dict, dict]]]:
+    """For --sources: each position source as its own line - consecutive points of that source,
+    broken where it has none for over 3 min - so GPS and MLAT positions can be compared."""
+    out = {}
+    for src, *_ in SOURCES:
+        sel = [p for p in air if p["src"] == src]
+        out[src] = [(p, q) for p, q in zip(sel, sel[1:]) if q["t"] - p["t"] <= 180]
+    return out
+
+
+def mlat_covered(air: list[dict]):
+    """For --sources: does MLAT cover the moment of a GPS segment (an MLAT point or stretch within
+    30 s)? Then the GPS line is drawn dotted - the ground-based position is there to compare."""
+    spans = [(p["t"] - 30, q["t"] + 30) for p, q in source_lines(air)["mlat"]]
+    spans += [(p["t"] - 30, p["t"] + 30) for p in air if p["src"] == "mlat"]
+    return lambda p, q: any(a <= q["t"] and p["t"] <= b for a, b in spans)
+
+
 def hover(p: dict) -> str:
     alt = "ground" if p["ground"] else m(p["alt"]) if p["alt"] is not None else "alt ?"
     parts = [f"{T(p['t'])} {T(p['t'], 'z')}",
              alt, f"{p['gs'] * KT:,.0f} km/h" if p["gs"] is not None else "",
              f"track {p['track']:.0f}°" if p["track"] is not None else "",
              f"{p['vrate'] * FT / 60:+.1f} m/s" if isinstance(p["vrate"], int) else "",
-             f"{p['src']}", f"sq {p.get('squawk')}" if p.get("squawk") else ""]
+             f"{p['src']}" + (f", NIC {p['nic']}" if p.get("nic") is not None and p["src"] == "adsb" else ""),
+             f"sq {p.get('squawk')}" if p.get("squawk") else ""]
     return "<br>".join(x for x in parts if x)
 
 
@@ -285,7 +310,8 @@ def viridis(f: float) -> list[int]:
 
 
 def build(rec: dict, alerts: list[dict], pts: list[dict], source: str, max_speed: float = 1200,
-          gap_speed: float = 750, airport: str = "TLV", use_map: bool = False, tiles: str = TILES) -> str:
+          gap_speed: float = 750, airport: str = "TLV", use_map: bool = False, tiles: str = TILES,
+          sources: bool = False) -> str:
     t0, t1 = pts[0]["t"], pts[-1]["t"]
     mine = [a for a in alerts if a["hex"] == rec["hex"] and t0 - 60 <= epoch(a["time"]) <= t1 + 60]
     if rec not in mine:
@@ -312,6 +338,11 @@ def build(rec: dict, alerts: list[dict], pts: list[dict], source: str, max_speed
         code = re.search(r"squawk (\d{4})", a["message"]) if a["kind"] == "EMERGENCY" else None
         a["_label"] = f"{a['kind']}{' ' + code.group(1) if code else ''} {T(epoch(a['time']), 'hm')}"
         a["_msg"] = metric(a["message"])
+    # labels of alerts raised at about the same place / time are stacked, not printed on each other
+    # (e.g. CONTACT_RESTORED, POSITION_JUMP and COURSE_CHANGE together when a flight reappears)
+    for i, a in enumerate(mine):
+        a["_k"] = sum(1 for b in mine[:i] if math.hypot(a["_x"] - b["_x"], a["_y"] - b["_y"]) <= 5)
+        a["_kt"] = sum(1 for b in mine[:i] if epoch(a["time"]) - epoch(b["time"]) <= 180)
     # the first view: everything incl. the alert positions, at least 100 km across, 0-40,000 ft
     ax, ay = [p["x"] for p in air] + [a["_x"] for a in mine], [p["y"] for p in air] + [a["_y"] for a in mine]
     span = max(100.0, 1.1 * max(max(ax) - min(ax), max(ay) - min(ay)))
@@ -374,9 +405,10 @@ def build(rec: dict, alerts: list[dict], pts: list[dict], source: str, max_speed
                f"{fw.haversine_nm(lat0, lon0, p['lat'], p['lon']) * NM:.0f} km from {airport}"
 
     if use_map:
-        view = deck_view(air, hops, mine, rec, signs, tip, tiles, focus_ll)
+        view = deck_view(air, hops, mine, rec, signs, tip, tiles, focus_ll, sources)
     else:
-        view = plotly_view(air, hops, mine, rec, signs, xr, yr, ztop, airport, title, sub, tip, km, focus_km)
+        view = plotly_view(air, hops, mine, rec, signs, xr, yr, ztop, airport, title, sub, tip, km, focus_km,
+                           sources)
 
     def iso(t):  # epoch: the page turns it into wall-clock time in the zone picked
         return t
@@ -392,7 +424,8 @@ def build(rec: dict, alerts: list[dict], pts: list[dict], source: str, max_speed
     # alerts as red lines, jumps orange, gaps without positions shaded
     shapes = [{"type": "line", "x0": iso(epoch(a["time"])), "x1": iso(epoch(a["time"])), "yref": "paper",
                "y0": 0, "y1": 1, "line": {"color": "red", "dash": "dot"}} for a in mine]
-    notes = [{"x": iso(epoch(a["time"])), "y": 1, "yref": "paper", "text": a["_label"], "showarrow": False,
+    notes = [{"x": iso(epoch(a["time"])), "y": 1, "xshift": 14 * a["_kt"], "yref": "paper", "text": a["_label"],
+              "showarrow": False,  # (vertical labels of alerts close in time: side by side)
               "textangle": -90, "xanchor": "right", "yanchor": "top", "font": {"color": "red"},
               "bgcolor": "rgba(255,255,255,0.8)"} for a in mine]
     shapes += [{"type": "line", "x0": iso(air[i]["t"]), "x1": iso(air[i]["t"]), "yref": "paper", "y0": 0,
@@ -503,7 +536,8 @@ d2.on("plotly_click", show);
 """
 
 
-def plotly_view(air, hops, mine, rec, signs, xr, yr, ztop, airport, title, sub, tip, km, focus) -> dict:
+def plotly_view(air, hops, mine, rec, signs, xr, yr, ztop, airport, title, sub, tip, km, focus,
+                sources=False) -> dict:
     """Rotatable 3D with plotly: km east / north of the airport, altitude in m."""
     def line(kind):
         x, y, z, txt = [], [], [], []
@@ -523,13 +557,30 @@ def plotly_view(air, hops, mine, rec, signs, xr, yr, ztop, airport, title, sub, 
             tx.append(None), ty.append(None), tz.append(None), tc.append(q["t"] - t0)
         tx.append(q["x"]), ty.append(q["y"]), tz.append(q["alt"] * FT), tc.append(q["t"] - t0)
     traces = [{"type": "scatter3d", "mode": "lines", "name": "track (colour = time)", "x": tx, "y": ty, "z": tz,
-               "line": {"width": 5, "color": tc, "colorscale": "Viridis"}, "hoverinfo": "skip"}]
+               "line": {"width": 5, "color": tc, "colorscale": "Viridis"}, "hoverinfo": "skip",
+               **({"visible": "legendonly"} if sources else {})}]  # (--sources: click the legend to show)
+    if sources:
+        covered = mlat_covered(air)
+        for src, name, colour, _ in SOURCES:
+            for dotted in (False, True):  # GPS where MLAT covers the same moment: dotted
+                x, y, z = [], [], []
+                for p, q in source_lines(air)[src]:
+                    if (src == "adsb" and covered(p, q)) != dotted:
+                        continue
+                    x += [p["x"], q["x"], None]
+                    y += [p["y"], q["y"], None]
+                    z += [p["alt"] * FT, q["alt"] * FT, None]
+                if x:
+                    traces.append({"type": "scatter3d", "mode": "lines", "x": x, "y": y, "z": z,
+                                   "name": name + (" while MLAT is available" if dotted else ""),
+                                   "line": {"width": 4, "color": colour, **({"dash": "dot"} if dotted else {})},
+                                   "hoverinfo": "skip"})
     gx, gy, gz, gt = line("gap")
     if gx:
         traces.append({"type": "scatter3d", "mode": "lines", "name": f"no data > {GAP} s ({len(gx) // 3})",
                        "x": gx, "y": gy, "z": gz, "hovertext": gt, "hoverinfo": "text",
                        "line": {"width": 3, "color": "#888", "dash": "dash"}})
-    for src, colour in (("adsb", "#1f77b4"), ("mlat", "#ff7f0e")):
+    for src, colour in (("adsb", "#1f77b4"), ("mlat", "#2ca02c")):
         sel = [p for p in air if p["src"] == src]
         other = src == "adsb" and [p for p in air if p["src"] not in ("adsb", "mlat")]
         sel += other or []
@@ -547,7 +598,7 @@ def plotly_view(air, hops, mine, rec, signs, xr, yr, ztop, airport, title, sub, 
     ring = [(min(max(x, xr[0]), xr[1]), min(max(y, yr[0]), yr[1])) for x, y in ring]
     traces.append({"type": "scatter3d", "mode": "lines", "name": "Israel (rough)",
                    "x": [p[0] for p in ring], "y": [p[1] for p in ring], "z": [0] * len(ring),
-                   "line": {"width": 2, "color": "#2ca02c"}, "hoverinfo": "skip"})
+                   "line": {"width": 2, "color": "#888", "dash": "dot"}, "hoverinfo": "skip"})  # (green: MLAT)
     apts = [(k, km(v[0], v[1])) for k, v in fw.REGION_AIRPORTS.items()]
     apts = [(k, (x, y)) for k, (x, y) in apts if xr[0] <= x <= xr[1] and yr[0] <= y <= yr[1]]
     if apts:
@@ -569,15 +620,25 @@ def plotly_view(air, hops, mine, rec, signs, xr, yr, ztop, airport, title, sub, 
     if jx:
         traces.append({"type": "scatter3d", "mode": "lines", "name": f"position jumps ({len(jx) // 3})",
                        "x": jx, "y": jy, "z": jz, "hovertext": jt, "hoverinfo": "text",
-                       "line": {"width": 6, "color": "#ff9900"}})
+                       "line": {"width": 6, "color": "#ff9900"},
+                       **({"visible": "legendonly"} if sources else {})})  # (mostly GPS <-> MLAT hops)
     # alerts: a small red marker where the monitor raised it, a drop line to the ground
+    dz = ztop * 0.045  # a stacked label is raised by this much per alert below it (m)
     for a in mine:
-        traces.append({"type": "scatter3d", "mode": "markers+text", "name": f"alert: {a['_label']}",
-                       "x": [a["_x"]], "y": [a["_y"]], "z": [a["_alt"] * FT], "text": [a["_label"]],
+        z, zt = a["_alt"] * FT, a["_alt"] * FT + a["_k"] * dz
+        traces.append({"type": "scatter3d", "mode": "markers" if a["_k"] else "markers+text",
+                       "name": f"alert: {a['_label']}",
+                       "x": [a["_x"]], "y": [a["_y"]], "z": [z], "text": [a["_label"]],
                        "textposition": "top center",
                        "textfont": {"color": "red", "size": 13 if a is rec else 11},
                        "marker": {"size": 4, "color": "red"},
                        "hovertext": [f"<b>{a['_label']}</b><br>{a['_msg']}"], "hoverinfo": "text"})
+        if a["_k"]:  # the label above the others at this spot, with a thin line down to its dot
+            traces.append({"type": "scatter3d", "mode": "lines+text", "showlegend": False,
+                           "x": [a["_x"]] * 2, "y": [a["_y"]] * 2, "z": [z, zt], "text": ["", a["_label"]],
+                           "textposition": "top center", "textfont": {"color": "red", "size": 13 if a is rec else 11},
+                           "line": {"width": 1, "color": "rgba(255,0,0,0.5)"},
+                           "hovertext": [f"<b>{a['_label']}</b><br>{a['_msg']}"] * 2, "hoverinfo": "text"})
         traces.append({"type": "scatter3d", "mode": "lines", "showlegend": False, "hoverinfo": "skip",
                        "x": [a["_x"]] * 2, "y": [a["_y"]] * 2, "z": [0, a["_alt"] * FT],
                        "line": {"width": 2, "color": "red", "dash": "dot"}})
@@ -611,7 +672,7 @@ def plotly_view(air, hops, mine, rec, signs, xr, yr, ztop, airport, title, sub, 
             "js": js}
 
 
-def deck_view(air, hops, mine, rec, signs, tip, tiles=TILES, focus=None) -> dict:
+def deck_view(air, hops, mine, rec, signs, tip, tiles=TILES, focus=None, sources=False) -> dict:
     """The same over a street map (Esri World Street Map tiles by default) with deck.gl: drag to pan,
     right-drag / Ctrl+drag to tilt and rotate. Altitude exaggerated (adjustable)."""
     t0, t1 = air[0]["t"], air[-1]["t"]
@@ -630,10 +691,24 @@ def deck_view(air, hops, mine, rec, signs, tip, tiles=TILES, focus=None) -> dict
             f0, f1 = k / n, (k + 1) / n
             segs.append({"a": [x + (y - x) * f0 for x, y in zip(a, b)], "b": [x + (y - x) * f1 for x, y in zip(a, b)],
                          "c": colour, "k": kind, "tip": info})
+    if sources:  # each position source as its own line instead of the time-coloured track; no jump
+        segs = [x for x in segs if x["k"] not in ("track", "jump")]  # lines (mostly GPS <-> MLAT hops)
+        covered = mlat_covered(air)
+        for src, _, _, rgb in SOURCES:
+            for p, q in source_lines(air)[src]:
+                a, b = [p["lon"], p["lat"], p["alt"] * ft], [q["lon"], q["lat"], q["alt"] * ft]
+                if not (src == "adsb" and covered(p, q)):
+                    segs.append({"a": a, "b": b, "c": rgb, "k": "track", "tip": src.upper()})
+                    continue
+                # GPS while MLAT is available: dotted (every other ~2 km piece)
+                n = max(2, 2 * round(fw.haversine_nm(p["lat"], p["lon"], q["lat"], q["lon"]) * NM / 4))
+                segs += [{"a": [u + (v - u) * k / n for u, v in zip(a, b)],
+                          "b": [u + (v - u) * (k + 1) / n for u, v in zip(a, b)],
+                          "c": rgb, "k": "track", "tip": "ADSB (MLAT available)"} for k in range(0, n, 2)]
     data = {"segs": segs,
             "pts": [{"p": [p["lon"], p["lat"], p["alt"] * ft], "tip": tip(p),
-                     "c": [255, 127, 14] if p["src"] == "mlat" else [31, 119, 180]} for p in air],
-            "alerts": [{"p": [a["lon"], a["lat"], a["_alt"] * ft], "label": a["_label"],
+                     "c": [44, 160, 44] if p["src"] == "mlat" else [31, 119, 180]} for p in air],
+            "alerts": [{"p": [a["lon"], a["lat"], a["_alt"] * ft], "label": a["_label"], "k": a["_k"],
                         "tip": f"<b>{a['_label']}</b><br>{a['_msg']}", "sel": a is rec} for a in mine],
             "airports": [{"p": [v[1], v[0], 0], "label": k} for k, v in fw.REGION_AIRPORTS.items()],
             "signs": [{"p": [air[c["start"]]["lon"], air[c["start"]]["lat"], air[c["start"]]["alt"] * ft],
@@ -651,6 +726,10 @@ def deck_view(air, hops, mine, rec, signs, tip, tiles=TILES, focus=None) -> dict
             "pos": [[p["lon"], p["lat"], p["alt"] * ft] for p in air]}
     ident = rec.get("flight") or rec.get("callsign") or rec["hex"].upper()
     credit = TILES_CREDIT if tiles == TILES else f"map tiles: {tiles.split('/')[2]}"
+    jump_legend = "" if sources else '<span style="color:#ff9900">━ position jumps</span>'
+    track_legend = ("".join(f'<span style="color:{c}">━ {n}</span>' for _, n, c, _ in SOURCES)
+                    + f'<span style="color:{SOURCES[0][2]}">┅ ADS-B while MLAT is available</span>' if sources
+                    else '<span style="color:#3b528b">━ track (colour = time)</span>')
     first = next((c for c in signs if c["first"]), None)
     first_btn = (f' <button id="firstsign" class="tz" data-raw="{first["label"]}">{first["label"]}</button>'
                  if first else "")
@@ -659,8 +738,8 @@ def deck_view(air, hops, mine, rec, signs, tip, tiles=TILES, focus=None) -> dict
                       f"{T(air[0]['t'], 'dhm')}–{T(air[-1]['t'], 'hm')} {T(air[-1]['t'], 'z')})", quote=True)
     page = f"""<h1 class="tz" data-raw="{head}"></h1>
 <div class="sub tz" data-raw="{sub}"></div>
-<div class="legend"><span style="color:#3b528b">━ track (colour = time)</span>
-<span style="color:#ff9900">━ position jumps</span><span style="color:#9b30d9">━ steep altitude change</span>
+<div class="legend">{track_legend}
+{jump_legend}<span style="color:#9b30d9">━ steep altitude change</span>
 <span style="color:#888">╌ no data &gt; {GAP} s</span><span style="color:red">● alerts</span>
 · altitude ×<input id="zx" type="range" min="1" max="20" value="5" style="vertical-align:middle;width:110px"><b
 id="zxv">5</b> <button id="zoomin">zoom to alerts</button> <button id="top">top view</button>
@@ -712,7 +791,7 @@ function layers() {
       getFillColor: [255, 0, 0], radiusUnits: "pixels", getRadius: d => d.sel ? 4 : 3,
       updateTriggers: {getPosition: Z}}),
     new deck.TextLayer({id: "alert-names", data: D.alerts, getPosition: d => P(d.p), getText: d => tz(d.label),
-      getSize: d => d.sel ? 15 : 12, getColor: [220, 0, 0], getPixelOffset: [0, -14], fontWeight: 600,
+      getSize: d => d.sel ? 15 : 12, getColor: [220, 0, 0], getPixelOffset: d => [0, -14 - 15 * d.k], fontWeight: 600,
       fontSettings: {sdf: true}, outlineWidth: 4, outlineColor: [255, 255, 255, 230], updateTriggers: {getPosition: Z, getText: ZONE}}),
     new deck.TextLayer({id: "signs", data: D.signs, pickable: true, getPosition: d => P(d.p), getText: d => tz(d.label),
       getSize: d => d.first ? 15 : 11, getColor: [155, 48, 217], getPixelOffset: [0, 16], fontWeight: 600,
@@ -781,6 +860,9 @@ def main(argv=None):
     p.add_argument("--map", action="store_true",
                    help="draw over a street map (deck.gl; tilt / rotate) instead of km axes")
     p.add_argument("--tiles", default=TILES, help="map tile URL template ({z}, {x}, {y}) for --map")
+    p.add_argument("--sources", action="store_true",
+                   help="draw the aircraft's GPS (ADS-B) positions and the ground receivers' MLAT "
+                        "positions as two separate lines, to compare them (e.g. during GPS spoofing)")
     p.add_argument("--airport", default="TLV", help="km axes are measured from this airport")
     p.add_argument("--max-speed", type=float, default=1200,
                    help="kt; faster hops in the trace are drawn as jumps (as flight_watch.py --max-speed)")
@@ -806,7 +888,8 @@ def main(argv=None):
     if not [q for q in pts if q["alt"] is not None]:
         sys.exit("no positions found around the alert time")
     with open(a.out, "w", encoding="utf-8") as f:
-        f.write(build(rec, alerts, pts, source, a.max_speed, a.max_gap_speed, a.airport, a.map, a.tiles))
+        f.write(build(rec, alerts, pts, source, a.max_speed, a.max_gap_speed, a.airport, a.map, a.tiles,
+                      a.sources))
     print(f"wrote {a.out} ({len(pts)} positions, {source})")
     if not a.no_open:
         webbrowser.open("file://" + os.path.abspath(a.out))
