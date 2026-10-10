@@ -78,6 +78,19 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   429 with backoff and jitter, never hammer, protect the local poll's budget first.
 - Batch endpoints (`/v2/hex/a,b`, `/v2/callsign/A,B`) work on adsb.lol. A probe failing with
   429 or another error is **not** evidence that batching is unsupported.
+- **Recent trace** (`TRACE_RECENT`, `--trace-url`): `adsb.lol/data/traces/<last 2 hex>/trace_recent_<hex>.json`,
+  one aircraft's last ~10-20 min (~90 rows, ~19 KB; every change, sub-second in a dive; newest 4-16 s
+  old). Another host than the API: 12 of 12 quick requests answered from a home IP on 10 Oct 2026 while
+  api.adsb.lol allowed ~3.5 req/min (half the polls refused, follow requests starved for 9 h). Read with
+  LOW priority, at most `--trace-per-cycle` (3) per poll, once per aircraft per poll (`Monitor.recent_trace`):
+  to fill a vertical rate's missing history and before a lost-contact alert (see those), and as the
+  **fallback**: when the local poll fails (HTTP 429, cooling down) the traces of a watch list (`watch_list`:
+  hot, emergency squawk, a steep climb / descent or slow flight at height at the last report, a skydiving
+  lift) are read and their new reports run through every check (`backfill`); hot flights outside the
+  circle are read every 30 s (the follow request gives one report per `--follow-interval`). 4XDAN,
+  10 Oct 2026, replayed with the live run's polls (276 successful, the rest refused) and the trace 8 s
+  behind: dives raised at 08:55:25, 09:37:34 (from the trace, during refusals), 10:17:54, 10:58:04
+  (live: none, 09:37:47, none, 10:58:38); ~1 trace request a minute. Trace 16 s behind: 09:37:47.
 - **Routes**: adsb.lol's `routeset` POST now answers 201 with no body and its per-callsign route
   endpoint redirects to `vrs-standing-data.adsb.lol`; the same Virtual Radar Server standing
   data (CC0) is on GitHub as `vradarserver/standing-data` (`routes/schema-01/W/WZZ-3.csv`:
@@ -116,6 +129,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   `--lost-min-alt`, near the airport (landing), and near the circle edge for unfollowed
   aircraft (simply leaving coverage). Skipped entirely after our own outage or when the
   feed suddenly returns far fewer aircraft (feed glitch, not mass disappearance).
+  Before alerting, the aircraft's recent trace is read (`backfill`): reports our polls missed (HTTP 429,
+  between polls) go through every check at their own time (alerts marked `from_trace`, "[from the feed's
+  recent trace: missed by our polls]") and the silence is judged again from its last report; a trace that
+  ends where we lost it too is said in the alert ("the feed's own trace ends there too").
   Silence while descending below 12,000 ft within 30 nm of another airport is a probable
   landing there (DIVERSION for a TLV arrival, otherwise only logged). Remote silence at
   cruise (or a departure descending into its destination) is a coverage gap and only
@@ -134,9 +151,11 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   climb 12 deg en route and 18 deg within 30 nm of an airport below 15,000 ft (bizjets reach
   ~13). Near-airport traffic is still checked - a too-steep approach alerts. `--vrate`
   (8000 ft/min) alerts whatever the angle. The reported rate must be backed by the altitude
-  history (rejects single bad values); with no history yet (just heard, back from a gap) it waits
-  for the next reports - FZ1073's dive now alerts at 05:22:13 instead of 05:22:04, when the history
-  (-8,065 ft/min) confirms it. The angle uses only a credible ground speed (`trusted_gs`: >= 120 kt,
+  history (rejects single bad values): the report nearest 30 s old within 15-90 s (a longer span only
+  averages a real dive down), else reports 90 s back from the recent trace (`fill_history`); with none
+  it waits for the next reports - FZ1073's dive now alerts at 05:22:13 instead of 05:22:04, when the
+  history (-8,065 ft/min) confirms it. 4XDAN, 10 Oct 2026, replayed with the live run's successful polls:
+  4 of 4 dives alerted (live: 2, 25-32 s late; the 30-45 s window found no report after refused polls). The angle uses only a credible ground speed (`trusted_gs`: >= 120 kt,
   >= 150 kt for an airliner above 10,000 ft, within x1.6 of the speed from positions, taken between the speeds reported at both ends - 4XDAN, a
   P750 speeding up from 55 to 138 kt into a dive, 10 Oct 2026, alerted 30 s late without that); otherwise
   only the rate limit applies. On 6 Oct spoofed speeds (B789s at FL380 "at" 117-147 kt) made
@@ -300,11 +319,9 @@ and fetching a cold start's ~60 files in one cycle held up the local poll for ov
 - **Short events between polls (the FZ1073 altitude wobble, 05:21:44-49Z).** It lasted ~5 s
   while FZ1073 was 224 nm out, so it was sampled only by the 30 s follow request; `/v2/hex`
   returns only the latest state, and the flight became hot only at its first alert (the dive
-  after the wobble). Detection currently works without it. Idea to return to: for hot (and
-  perhaps all followed) flights, pull the last ~30 s of full-rate positions once per 30 s from
-  readsb's recent-trace files (`globe.adsb.lol/data/traces/<last 2 hex>/trace_recent_<hex>.json`
-  redirects to `adsb.lol`; not reachable from the cloud sandbox, untested), and feed every
-  point to the checks. Budget: one extra request per hot flight per 30 s.
+  after the wobble). Detection currently works without it. The recent trace (see Data sources)
+  now covers hot flights every 30 s, but a flight that has not alerted yet is still sampled only by
+  the follow request.
 
 - **Next step: publish announcements to Bluesky.** `Announcer` already builds posts as
   segments + `root`/`reply_to`. The owner's `yuval-harpaz/astro` bots show the pattern:

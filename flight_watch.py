@@ -75,6 +75,11 @@ PROVIDERS = {
 # adsb.lol's own route API now redirects to it). Per-airline CSV files, fetched on first use and
 # kept in memory only. A local checkout of the repository can be used instead (--standing-data).
 STANDING_DATA = "https://raw.githubusercontent.com/vradarserver/standing-data/main"
+# The last ~10-20 min of one aircraft's reports (readsb trace: every change, sub-second in a dive), on
+# another host than the API: answered 12 of 12 quick requests from a home IP on 10 Oct 2026 while
+# api.adsb.lol allowed ~3.5 req/min. Rows: [dt, lat, lon, alt|"ground", gs, track, flags, vrate,
+# {details}|None, source, geometric alt, ...]; flags 1 stale position, 8 alt is GPS altitude.
+TRACE_RECENT = "https://adsb.lol/data/traces/{xx}/trace_recent_{hex}.json"
 ROUTE_TTL = 6 * 3600
 RELAY_URL = "https://flight-watch-relay.yuvharpaz.workers.dev"  # tools/cors_worker.js (Cloudflare)
 VIEWER_URL = "https://yuval-harpaz.github.io/flight-watch/flight_map.html"  # docs/ on GitHub Pages
@@ -607,6 +612,7 @@ class Track:
     geo_offset: float | None = None  # its GPS altitude minus barometric (weather: a few hundred ft)
     skydive: dict | None = None  # its last skydiving lift (see check_skydive)
     skydive_lifts: int = 0   # lifts seen since we first heard it
+    trace_end: float = 0.0   # data time of the newest report in its last recent trace (see recent_trace)
 
     @property
     def last(self) -> Sample | None:
@@ -680,6 +686,16 @@ class Track:
         if not now or not old or now.alt is None or old.alt is None or now.t == old.t:
             return None
         return (now.alt - old.alt) / ((now.t - old.t) / 60)
+
+    def computed_vrate_near(self, span: float = 30, lo: float = 15, hi: float = 90) -> float | None:
+        """As computed_vrate, from the report nearest `span` s old within lo..hi s (gaps in polls or
+        reception: 4XDAN, 10 Oct 2026 08:55 IDT, had none 30-45 s before its dive was seen)."""
+        now = self.last
+        if not now or now.alt is None:
+            return None
+        old = min((x for x in self.samples if x.alt is not None and lo <= now.t - x.t <= hi),
+                  key=lambda x: abs(now.t - x.t - span), default=None)
+        return None if old is None else (now.alt - old.alt) / ((now.t - old.t) / 60)
 
 
 def parse_aircraft(ac: dict, server_now: float):
@@ -935,7 +951,7 @@ class Announcer:
 
     def detail(self, rec: dict) -> str:
         """The facts the headline and position don't already say, compactly."""
-        kind, msg = rec["kind"], re.sub(r" \[(also|skydiving pattern)[^\]]*\]", "", rec["message"])
+        kind, msg = rec["kind"], re.sub(r" \[(also|skydiving pattern|from the feed's recent trace)[^\]]*\]", "", rec["message"])
         if kind in self.DETAILS:
             m = re.search(self.DETAILS[kind][0], msg)
             out = self.DETAILS[kind][1].format(*m.groups()) if m else msg
@@ -1089,6 +1105,9 @@ class Monitor:
         self.protect = args.protect == "israel"
         self.disc_queue: dict[str, list[str]] = {}  # discovery round in progress, per provider
         self.disc_round = -1e9
+        self.traces: dict[str, tuple[float, list]] = {}  # hex -> (clock, parsed recent trace)
+        self.trace_left = 0       # trace requests still allowed this cycle
+        self.from_trace = False   # checks are running on reports read from a trace (alert() says so)
 
     # ---- remote queries
     def multi_supported(self, prov: str, kind: str, local: list) -> bool | None:
@@ -1360,9 +1379,14 @@ class Monitor:
         if self.schedule:
             self.schedule.refresh_if_due()
 
-        # 1) local circle every cycle, top priority - failure here aborts the cycle
-        server_now, local = self.fetch("point", priority=HIGH, lat=a.lat, lon=a.lon,
-                                       radius=int(a.radius))
+        self.trace_left = a.trace_per_cycle
+        # 1) local circle every cycle, top priority - failure here aborts the cycle (after the fallback)
+        try:
+            server_now, local = self.fetch("point", priority=HIGH, lat=a.lat, lon=a.lon,
+                                           radius=int(a.radius))
+        except requests.RequestException:
+            self.fallback(self.watch_list())
+            raise
         batches = [(server_now, ac) for ac in local]
         local_hexes = {(ac.get("hex") or "").lower() for ac in local}
 
@@ -1404,54 +1428,13 @@ class Monitor:
             updated.append((t, prev, ac, label))
 
         self.lookup_routes([t for t, *_ in updated])
+        # hot flights outside the circle: the follow request gives one report per --follow-interval at
+        # best (FZ1073's 5-s wobble fell between them); their trace has every report
+        self.fallback([t for t in self.tracks.values() if self.hot(t) and t.hex not in local_hexes
+                       and not t.lost and self.clock() - self.traces.get(t.hex, (-1e9,))[0] >= 30])
 
         for t, prev, ac, spoofed in updated:
-            s = t.last
-            if t.lost_pending and server_now - t.last_msg < a.lost_after:
-                log.info("%s heard again within --lost-confirm: not lost", t.label())
-                t.lost_pending = 0.0
-                self.silent.pop(t.hex, None)
-            if spoofed:
-                # Squawks are not GPS: still checked. Barometric altitude is not GPS either, but a
-                # report is only "spoofed" while that altitude is steady (see spoofed()), so a real
-                # dive or climb never lands here and goes through the vertical-rate check.
-                if t.lost and server_now - t.last_msg < a.lost_after:
-                    t.lost = False
-                    if t.lost_alerted:
-                        self.alert(t, "CONTACT_RESTORED", f"heard again ({spoofed})")
-                self.check_emergency(t, ac)
-                continue
-            if s is None:
-                continue
-            d = self.dist(s)
-            kind, route = self.classify(t)
-            if not t.followed and (kind in CONFIRMED or (kind == "DEP?" and d < 15 and airline_like(t))):
-                t.followed = True
-                log.info("following %s (%s %s)", t.label(), kind, route or "")
-            if t.lost and server_now - t.last_msg < a.lost_after:
-                t.lost = False
-                if t.lost_alerted:
-                    self.alert(t, "CONTACT_RESTORED", f"heard again at {s.alt} ft")
-            if (s.on_ground or (s.alt or 0) < 3000) and nearest_airport(s.lat, s.lon, israeli=True)[1] < 8:
-                t.israeli = True
-            self.check_emergency(t, ac)
-            self.check_skydive(t)  # before check_vrate, so the dive's alert says what it is
-            self.check_vrate(t)
-            self.check_turn(t)
-            self.check_sharp_turn(t)
-            self.check_holding(t)
-            self.check_jump(t, prev)
-            self.check_landing(t, kind, d)
-            self.check_destination(t, kind, d)
-            self.check_protected(t, kind, route)
-            if not s.on_ground:
-                t.was_airborne = True
-                t.max_dist = max(t.max_dist, d)
-            elif t.was_airborne and (s.gs is None or s.gs < 50):
-                # Landed (at taxi speed, so not a stray "ground" reading in flight): the leg is
-                # over. Otherwise its next flight inherits it - an arrival turning around as a
-                # departure was reported as RETURNED (LOT7MA -> LOT4CG at TLV, 6 Oct 2026).
-                t.was_airborne, t.max_dist, t.route_dir = False, 0.0, 0
+            self.check_track(t, prev, ac, spoofed, server_now)
 
         # Don't declare mass "lost contact" after our own outage or a feed glitch.
         gap_ok = self.last_ok is not None and server_now - self.last_ok < 3 * a.interval + 15
@@ -1471,6 +1454,187 @@ class Monitor:
         self.stats = {"local": len(local), "followed": sum(t.followed for t in self.tracks.values()),
                       "scheduled": len(self.schedule.flights) if self.schedule else 0,
                       "rate": b.rate}
+
+    def check_track(self, t: Track, prev: Sample | None, ac: dict, spoofed: str, server_now: float) -> None:
+        """Every check on a track's newest report (from a poll, or one our polls missed - backfill)."""
+        a = self.args
+        s = t.last
+        if t.lost_pending and server_now - t.last_msg < a.lost_after:
+            log.info("%s heard again within --lost-confirm: not lost", t.label())
+            t.lost_pending = 0.0
+            self.silent.pop(t.hex, None)
+        if spoofed:
+            # Squawks are not GPS: still checked. Barometric altitude is not GPS either, but a
+            # report is only "spoofed" while that altitude is steady (see spoofed()), so a real
+            # dive or climb never lands here and goes through the vertical-rate check.
+            if t.lost and server_now - t.last_msg < a.lost_after:
+                t.lost = False
+                if t.lost_alerted:
+                    self.alert(t, "CONTACT_RESTORED", f"heard again ({spoofed})")
+            self.check_emergency(t, ac)
+            return
+        if s is None:
+            return
+        d = self.dist(s)
+        kind, route = self.classify(t)
+        if not t.followed and (kind in CONFIRMED or (kind == "DEP?" and d < 15 and airline_like(t))):
+            t.followed = True
+            log.info("following %s (%s %s)", t.label(), kind, route or "")
+        if t.lost and server_now - t.last_msg < a.lost_after:
+            t.lost = False
+            if t.lost_alerted:
+                self.alert(t, "CONTACT_RESTORED", f"heard again at {s.alt} ft")
+        if (s.on_ground or (s.alt or 0) < 3000) and nearest_airport(s.lat, s.lon, israeli=True)[1] < 8:
+            t.israeli = True
+        self.check_emergency(t, ac)
+        self.check_skydive(t)  # before check_vrate, so the dive's alert says what it is
+        self.check_vrate(t)
+        self.check_turn(t)
+        self.check_sharp_turn(t)
+        self.check_holding(t)
+        self.check_jump(t, prev)
+        self.check_landing(t, kind, d)
+        self.check_destination(t, kind, d)
+        self.check_protected(t, kind, route)
+        if not s.on_ground:
+            t.was_airborne = True
+            t.max_dist = max(t.max_dist, d)
+        elif t.was_airborne and (s.gs is None or s.gs < 50):
+            # Landed (at taxi speed, so not a stray "ground" reading in flight): the leg is
+            # over. Otherwise its next flight inherits it - an arrival turning around as a
+            # departure was reported as RETURNED (LOT7MA -> LOT4CG at TLV, 6 Oct 2026).
+            t.was_airborne, t.max_dist, t.route_dir = False, 0.0, 0
+
+    # ---- an aircraft's recent trace: what our polls missed
+    def recent_trace(self, t: Track) -> list[tuple[Sample, dict]] | None:
+        """The aircraft's last ~10-20 min of reports from the feed's trace file, oldest first, as
+        (sample, {"squawk", "emergency"}); None if not available. At most --trace-per-cycle requests
+        per poll, cached 5 s (one read per aircraft per poll), never at the expense of the local poll (another
+        host, LOW priority). 4XDAN, 10 Oct 2026: the API refused half the polls (HTTP 429) and dives
+        went unseen or unconfirmed; the trace had every report."""
+        a = self.args
+        hit = self.traces.get(t.hex)
+        if hit and self.clock() - hit[0] < 5:  # (asked already this cycle)
+            return hit[1]
+        if not a.trace_url or self.trace_left <= 0:
+            return None
+        self.trace_left -= 1
+        try:
+            data = self.http.get_json(a.trace_url.format(xx=t.hex[-2:], hex=t.hex), LOW)
+            rows, base = data["trace"], float(data["timestamp"])
+        except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+            log.info("%s: no recent trace (%s)", t.label(), e)
+            return None
+        out, info, offset = [], {}, t.geo_offset
+        for r in rows:
+            try:
+                flags = r[6] if isinstance(r[6], int) else 0
+                alt = r[3]
+                det = r[8] if len(r) > 8 and isinstance(r[8], dict) else {}
+                for k in ("squawk", "emergency"):
+                    if det.get(k):
+                        info[k] = str(det[k])
+                if len(r) > 10 and isinstance(r[10], (int, float)) and isinstance(alt, (int, float)) and not flags & 8:
+                    offset = r[10] - alt  # GPS minus barometric, for rows that carry only GPS altitude
+                if flags & 1:
+                    continue  # stale position
+                ground = alt == "ground"
+                if flags & 8 and isinstance(alt, (int, float)):
+                    alt = alt - offset if offset is not None else None
+                mlat = "mlat" in str(r[9] if len(r) > 9 else "")
+                out.append((Sample(t=base + r[0], lat=r[1], lon=r[2], alt=0 if ground else
+                                   (int(alt) if isinstance(alt, (int, float)) else None),
+                                   track=None if mlat else r[5], gs=None if mlat else r[4],
+                                   vrate=r[7] if isinstance(r[7], int) else None, on_ground=ground,
+                                   mlat=mlat), dict(info)))
+            except (IndexError, TypeError):
+                continue
+        self.traces = {h: v for h, v in self.traces.items() if self.clock() - v[0] < 60}
+        self.traces[t.hex] = (self.clock(), out)
+        if out:
+            t.trace_end = out[-1][0].t
+        return out
+
+    def watch_list(self) -> list[Track]:
+        """Aircraft worth reading from their trace while the API refuses us, most urgent first: hot,
+        emergency squawk, a steep climb / descent or slow flight at height (a jump run: 4XDAN at
+        10:17:04 IDT, 10 Oct 2026, 40 s before a dive no poll saw) at the last report, a skydiving lift."""
+        def rank(t):
+            s = t.last
+            if not s or t.lost or s.on_ground or self.clock() - self.traces.get(t.hex, (-1e9,))[0] < 5:
+                return None
+            if self.hot(t) or t.squawk in EMERGENCY_SQUAWKS:
+                return 0
+            steep = s.vrate is not None and (abs(s.vrate) >= 4000 or s.gs and s.gs >= 120
+                                             and abs(path_angle(s.vrate, s.gs)) >= 6)
+            slow = (s.alt or 0) >= SKYDIVE_RUN_ALT and s.gs is not None and s.gs <= 90
+            lift = t.skydive and s.t - t.skydive["t"] <= 600
+            return 1 if steep else 2 if slow or lift else None
+        ranked = sorted((r, -t.last_msg, t.hex) for t in self.tracks.values() if (r := rank(t)) is not None)
+        return [self.tracks[h] for _, _, h in ranked]
+
+    def fallback(self, tracks: list[Track]) -> None:
+        """Read the recent trace of these aircraft (at most --trace-per-cycle) and run what our polls
+        did not get through every check."""
+        for t in tracks:
+            if self.trace_left <= 0:
+                break
+            self.backfill(t)
+
+    @staticmethod
+    def thin(rows: list, gap: float) -> list:
+        """Rows at least `gap` s apart (the last always kept): a dive has a report every second."""
+        kept = []
+        for i, x in enumerate(rows):
+            if not kept or x[0].t - kept[-1][0].t >= gap or i == len(rows) - 1:
+                kept.append(x)
+        return kept
+
+    def fill_history(self, t: Track) -> bool:
+        """Reports from the trace in the 90 s before the newest one, to back a vertical rate when our
+        polls have none from 30-45 s earlier (4XDAN, 10 Oct 2026, 10:17:54 IDT: -15 deg, but the last
+        poll that got through was 50 s earlier; then contact was lost - no alert)."""
+        last = t.last
+        if not last or t.spoof_last and last.t - t.spoof_last < 1800:
+            return False  # in a spoofing episode: the trace has its fake reports too
+        rows = self.recent_trace(t)
+        if not rows:
+            return False
+        have = [x.t for x in t.samples]
+        older = [x for x in self.thin([r for r in rows if last.t - 90 <= r[0].t < last.t - 0.5], 5)
+                 if x[0].alt is not None and all(abs(x[0].t - h) > 0.5 for h in have)]
+        if not older:
+            return False
+        t.samples = deque(sorted(list(t.samples) + [x for x, _ in older], key=lambda x: x.t),
+                          maxlen=t.samples.maxlen)
+        log.info("%s: %d reports from its recent trace fill the altitude history", t.label(), len(older))
+        return True
+
+    def backfill(self, t: Track) -> bool | None:
+        """Run the reports our polls missed (newer than the last we heard) through every check, from
+        the trace. True: it had some (we were blind, it was not silent); False: the trace ends where
+        we lost it too; None: no trace."""
+        rows = self.recent_trace(t)
+        if rows is None:
+            return None
+        newer = [r for r in rows if r[0].t > t.last_msg + 0.5]
+        if not newer:
+            return False
+        log.info("%s: %d reports our polls missed, from its recent trace (%s-%s)", t.label(), len(newer),
+                 time.strftime("%H:%M:%S", time.gmtime(newer[0][0].t)),
+                 time.strftime("%H:%M:%S", time.gmtime(newer[-1][0].t)))
+        self.from_trace = True
+        try:
+            for x, info in self.thin(newer, 2):
+                prev = t.last
+                label = self.spoofed(t, x) or self.integrity(t, x)
+                if not label and (prev is None or x.t > prev.t + 0.5):
+                    t.samples.append(x)
+                t.last_msg = max(t.last_msg, x.t)
+                self.check_track(t, prev, info, label, x.t)
+        finally:
+            self.from_trace = False
+        return True
 
     def share_callsigns(self, now: float) -> None:
         """Every --share-interval, send the relay (tools/cors_worker.js /learn) callsign -> hex of the
@@ -1519,6 +1683,10 @@ class Monitor:
         if not ((angle is not None and abs(angle) >= limit) or abs(s.vrate) >= a.vrate):
             return
         computed = t.computed_vrate(30)
+        if computed is None and self.fill_history(t):
+            computed = t.computed_vrate(30)
+        if computed is None:
+            computed = t.computed_vrate_near(30)  # (a longer span only averages a real dive down)
         if computed is None:
             return  # nothing to back the reported rate yet (just heard, e.g. back from a spoofing
             #         gap - QTR94R "+12,224 ft/min" on 6 Oct): judged on the next reports
@@ -1922,6 +2090,13 @@ class Monitor:
                 continue
             if not self.hot(t) and a.lost_confirm > 0 and self.wait_or_group(t, now):
                 continue
+            # Our polls may have missed its last reports (HTTP 429, a dive between polls): the trace
+            # tells our blindness from its silence, and its missed reports go through every check.
+            heard = self.backfill(t)
+            if heard:
+                log.info("%s was not silent: its trace goes on to %s - judged on that", t.label(),
+                         time.strftime("%H:%M:%S", time.gmtime(t.last_msg)))
+                continue
             t.lost, t.lost_alerted = True, False
             trk = f"{s.track:.0f}" if s.track is not None else "?"
             where = (f"last {s.alt} ft, {d:.0f} nm from {a.airport}, track {trk} deg, "
@@ -1943,7 +2118,8 @@ class Monitor:
                          t.label(), silent, where)
                 continue
             # (not alerted - e.g. part of a spoofing episode - means no "restored" later either)
-            t.lost_alerted = self.alert(t, "LOST_CONTACT", f"silent {silent:.0f}s; {where}")
+            also = "; the feed's own trace ends there too" if heard is False else ""
+            t.lost_alerted = self.alert(t, "LOST_CONTACT", f"silent {silent:.0f}s; {where}{also}")
 
     def wait_or_group(self, t: Track, now: float) -> bool:
         """True when a loss of contact is not (yet) alerted: within --lost-confirm of reaching the
@@ -2182,6 +2358,8 @@ class Monitor:
         apt, ad = nearest_airport(s.lat, s.lon)
         if kind != "SKYDIVE_PATTERN":
             msg += self.skydive_note(t, now)
+        if self.from_trace:  # raised on a report our polls missed (backfill), at that report's time
+            msg += " [from the feed's recent trace: missed by our polls]"
         self.notifier.send({
             "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
             "kind": kind, "priority": 5 if pattern else PRIORITY.get(kind, 3),
@@ -2199,6 +2377,7 @@ class Monitor:
             "spoof": t.spoof if t.spoof and now - t.spoof_last <= 1800 else None,
             "gps": t.gps if t.gps and now - t.gps_last <= 1800 else None,  # its GPS-degraded episode
             "skydive": t.skydive if t.skydive and now - t.skydive["t"] <= 1800 else None,
+            "from_trace": self.from_trace,
         })
         return True
 
@@ -2225,6 +2404,10 @@ def parse_args(argv=None):
                         "success, halved on HTTP 429)")
     g.add_argument("--rate-max", type=float, default=60, help="upper limit for the adaptive budget")
     g.add_argument("--no-routes", action="store_true", help="skip callsign->route lookups")
+    g.add_argument("--trace-url", default=TRACE_RECENT,
+                   help="an aircraft's recent reports ({xx}: last 2 hex digits), read to fill altitude "
+                        "history and reports our polls missed; '' = never")
+    g.add_argument("--trace-per-cycle", type=int, default=3, help="at most this many trace requests per poll")
     g.add_argument("--standing-data",
                    help="VRS standing-data repository (URL or local checkout) for routes and airports "
                         f"(default: {LOCAL_STANDING_DATA} if it exists, else {STANDING_DATA})")

@@ -1,8 +1,8 @@
-alerts.jsonl
+/alerts*.jsonl
 __pycache__/
 .env
 .venv/
-posts.jsonl
+/posts*.jsonl
 tmp*
 standing-data/
 *.log

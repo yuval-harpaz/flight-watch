@@ -57,6 +57,7 @@ class FakeFeed:
         self.files = {}           # standing-data path ("routes/schema-01/W/WZZ-3.csv") -> CSV text
         self.headers = {}
         self.learned = []         # (json body, Authorization header) of POSTs to the relay's /learn
+        self.traces = {}          # hex -> rows of its recent trace, absolute times (see trace_rows)
 
     def ac(self, hexid):
         a = dict(self.aircraft[hexid], hex=hexid)
@@ -80,6 +81,13 @@ class FakeFeed:
             ids = set(path.rsplit("/", 1)[1].split(","))
             return FakeResponse(200, {"now": now_ms, "ac": [
                 self.ac(h) for h, a in self.aircraft.items() if a.get("flight", "").strip() in ids]})
+        if path.startswith("/data/traces/"):  # readsb trace_recent_<hex>.json: what the clock has reached
+            hexid = path.rsplit("_", 1)[1].split(".")[0]
+            rows = [r for r in self.traces.get(hexid, []) if r[0] <= self.clock()]
+            if not rows:
+                return FakeResponse(404, url=url)
+            return FakeResponse(200, {"icao": hexid, "timestamp": rows[0][0],
+                                      "trace": [[r[0] - rows[0][0], *r[1:]] for r in rows]}, url=url)
         if path == "/learn" and method == "POST":
             self.learned.append((kw.get("json"), (kw.get("headers") or {}).get("Authorization")))
             return FakeResponse(200, {"stored": len(kw.get("json") or {})})
@@ -698,6 +706,112 @@ def lift(gs_run=55, gs_dive=150, run_reported=None):
         run = [{**st, "gs": run_reported} for st in run]
     lat, lon = fw.destination(run[-1]["lat"], run[-1]["lon"], 185, gs_run * 10 / 3600)
     return run + path(lat, lon, [190] * 4, [11300 - 930 * i for i in range(4)], gs=gs_dive)
+
+
+def trace_rows(t0, states, dt=10, squawk=None):
+    """path() states as readsb trace rows from time t0, `dt` s apart; the squawk in the details."""
+    return [[t0 + i * dt, st["lat"], st["lon"], st["alt_baro"], st["gs"], st["track"], 0, st["baro_rate"],
+             {"squawk": squawk} if squawk and i == 0 else None, "adsb_icao"] for i, st in enumerate(states)]
+
+
+class RecentTraceTests(unittest.TestCase):
+    """The feed's recent trace (TRACE_RECENT) fills what our polls missed: 4XDAN, 10 Oct 2026, dives at
+    08:55 and 10:17 IDT went unalerted while the API refused half the polls (HTTP 429)."""
+
+    def dive_after_a_gap(self, argv=(), gap=100):
+        """Polled on its jump run, then 100 s of refused polls, then one poll mid-dive (-17 deg): no
+        report of ours 15-90 s before it to back the rate."""
+        mon, feed, clock, alerts = make(["--no-routes", *argv])
+        run = path(31.36, 35.387, [185] * 7, [11800 - 40 * i for i in range(7)], gs=55, dt=10)
+        lat, lon = fw.destination(run[-1]["lat"], run[-1]["lon"], 185, 55 * 10 / 3600)
+        dive = path(lat, lon, [190] * 47, [11500 - 150 * i for i in range(47)], gs=145, dt=2)
+        t0 = clock()
+        feed.traces["739215"] = trace_rows(t0, run) + trace_rows(t0 + 70, dive, dt=2)
+        ident = dict(flight="4XDAN", r="4X-DAN", t="P750", category="A1")
+        fly(mon, feed, clock, "739215", run[:6], **ident)   # polls up to t0+50 (clock: t0+60)
+        clock.t += gap                                       # refused polls, t0+60 .. t0+150
+        fly(mon, feed, clock, "739215", [dive[(gap - 10) // 2]], **ident)  # e.g. t0+160: -4,500 ft/min, 145 kt
+        return alerts
+
+    def test_missing_altitude_history_is_read_from_the_trace(self):
+        alerts = self.dive_after_a_gap()
+        self.assertEqual(kinds(alerts), ["VERTICAL_RATE"])
+        self.assertRegex(alerts[0]["message"], r"DESCENT -4500 ft/min, -1\d\.\d deg .*\(history: -4\d{3} ft/min\)")
+
+    def test_without_the_trace_it_waits_for_history(self):
+        self.assertEqual(kinds(self.dive_after_a_gap(["--trace-url", ""])), [])
+
+    def test_history_may_be_up_to_90_s_old(self):
+        """No trace, last report 60 s old (08:55 IDT: the reports 30-45 s back were missing)."""
+        self.assertEqual(kinds(self.dive_after_a_gap(["--trace-url", ""], gap=50)), ["VERTICAL_RATE"])
+
+    def refused_after_the_jump_run(self, argv=()):
+        """Polled on its jump run; then the API answers only 429 while it dives (in the trace)."""
+        mon, feed, clock, alerts = make(["--no-routes", *argv])
+        run = path(31.36, 35.387, [185] * 7, [11800 - 40 * i for i in range(7)], gs=55, dt=10)
+        lat, lon = fw.destination(run[-1]["lat"], run[-1]["lon"], 185, 55 * 10 / 3600)
+        dive = path(lat, lon, [190] * 30, [11500 - 150 * i for i in range(30)], gs=145, dt=2)
+        t0 = clock()
+        feed.traces["739215"] = trace_rows(t0, run) + trace_rows(t0 + 70, dive, dt=2)
+        fly(mon, feed, clock, "739215", run[:6], flight="4XDAN", r="4X-DAN", t="P750", category="A1")
+        feed.limited = {"/v2/point"}
+        for _ in range(7):  # t0+60 .. t0+120: refused or skipped (cooling down)
+            step(mon, clock)
+        return alerts, t0
+
+    def test_fallback_reads_the_watch_list_while_the_api_refuses_us(self):
+        alerts, t0 = self.refused_after_the_jump_run()
+        self.assertEqual(kinds(alerts), ["VERTICAL_RATE"])
+        self.assertTrue(alerts[0]["from_trace"])
+        when = datetime.fromisoformat(alerts[0]["time"].replace("Z", "+00:00")).timestamp()
+        self.assertLessEqual(when, t0 + 100)  # data time, mid-dive, before the API answers again
+
+    def test_no_fallback_without_the_trace(self):
+        alerts, _ = self.refused_after_the_jump_run(["--trace-url", ""])
+        self.assertEqual(kinds(alerts), [])
+
+    def test_hot_flight_squawk_during_refusals(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        states = path(32.4, 34.4, [200] * 12, [20000] * 12, gs=300)
+        t0 = clock()
+        feed.traces["738001"] = trace_rows(t0, states[:6]) + trace_rows(t0 + 60, states[6:], squawk="7700")
+        fly(mon, feed, clock, "738001", states[:6], flight="ELY315")
+        mon.tracks["738001"].hot_until = clock() + 3600  # it alerted before
+        feed.limited = {"/v2/point"}
+        for _ in range(4):
+            step(mon, clock)
+        self.assertEqual(kinds(alerts), ["EMERGENCY"])
+        self.assertIn("missed by our polls", alerts[0]["message"])
+
+    def vanish(self, trace_more):
+        """Cruising locally, then gone from the API; its trace has 30 s more (squawk 7700) or not."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        feed.local.add("999999")
+        feed.aircraft["999999"] = airborne(31.0, 34.0, 20000, flight="KEEP1")
+        states = path(32.4, 34.4, [200] * 10, [20000] * 10, gs=300)
+        t0 = clock()
+        feed.traces["738001"] = trace_rows(t0, states[:5]) + (trace_rows(t0 + 50, states[5:8], squawk="7700")
+                                                              if trace_more else [])
+        fly(mon, feed, clock, "738001", states[:5], flight="ELY315")
+        feed.local.discard("738001")
+        del feed.aircraft["738001"]
+        for _ in range(30):
+            step(mon, clock)
+        return alerts
+
+    def test_reports_missed_by_our_polls_go_through_the_checks(self):
+        alerts = self.vanish(trace_more=True)
+        self.assertEqual(kinds(alerts)[:2], ["EMERGENCY", "LOST_CONTACT"])
+        self.assertTrue(alerts[0]["from_trace"])
+        self.assertIn("missed by our polls", alerts[0]["message"])
+        self.assertEqual(alerts[0]["time"], fw.time.strftime("%Y-%m-%dT%H:%M:%SZ", fw.time.gmtime(Clock().t + 50)))
+        self.assertIn(f"{alerts[1]['lat']:.4f}", f"{fw.destination(32.4, 34.4, 200, 300 * 70 / 3600)[0]:.4f}")
+
+    def test_silence_confirmed_by_the_trace(self):
+        alerts = self.vanish(trace_more=False)
+        self.assertEqual(kinds(alerts), ["LOST_CONTACT"])
+        self.assertIn("the feed's own trace ends there too", alerts[0]["message"])
+        self.assertFalse(alerts[0]["from_trace"])
 
 
 class SkydiveTests(unittest.TestCase):
@@ -1352,3 +1466,16 @@ class AnnouncerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlotProbeTests(unittest.TestCase):
+    """tools/plot_alert.py runs Monitor.check_vrate offline on every trace report ("first detection")."""
+    def test_plot_finds_the_dive_offline(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        import plot_alert
+        states = lift()
+        air = [{"t": 1_791_187_200 + 10 * i, "lat": st["lat"], "lon": st["lon"], "alt": st["alt_baro"],
+                "track": st["track"], "gs": st["gs"], "vrate": st["baro_rate"], "ground": False}
+               for i, st in enumerate(states) if i not in (9, 10)]  # (no history 30-45 s before the dive)
+        eps = plot_alert.vrate_episodes(air, {"hex": "739215", "callsign": "4XDAN", "type": "P750"})
+        self.assertEqual([e["dir"] for e in eps], ["DESCENT"])

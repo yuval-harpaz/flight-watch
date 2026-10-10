@@ -19,6 +19,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import base64
 import html
 import json
 import math
@@ -41,6 +42,8 @@ HEADERS = {"User-Agent": "flight-watch-plot/0.1", "Referer": "https://globe.adsb
 ADSBLOL = "https://adsb.lol/data/traces/{xx}/trace_{kind}_{hex}.json"  # kind: full / recent
 ADSBX = "https://globe.adsbexchange.com/globe_history/{day:%Y/%m/%d}/traces/{xx}/trace_full_{hex}.json"
 PLOTLY = "https://cdn.plot.ly/plotly-2.35.2.min.js"
+# the project's logo as the tab icon, embedded: the pages stand alone (docs/, examples/, tmp files)
+LOGO = os.path.join(os.path.dirname(__file__), "..", "docs", "logo.png")
 # a silence this long (or a ground stop) ends a flight leg. Not readsb's "new leg" flag: it is set
 # on every reappearance after a low-level silence - 4XDAN (skydiving, 10 Oct 2026) came back after
 # each 13-40 min below coverage, and its plot showed one lift of the morning's session.
@@ -71,6 +74,13 @@ TRACE_NAMES = {"TRACE_VERTICAL_RATE": ("VERTICAL_RATE not alerted (trace)", "not
                "TRACE_NO_MONITOR": ("VERTICAL_RATE, monitor not running (trace)", "no monitor")}
 TEXT_OFF_OVER = 4  # contact labels start hidden when there are more than this (4XDAN: 8 of 10)
 GAP = 120          # longer without positions is a gap, not a jump (as in flight_watch.check_jump)
+
+
+def favicon() -> str:
+    if not os.path.exists(LOGO):
+        return ""
+    with open(LOGO, "rb") as f:
+        return f'\n<link rel="icon" type="image/png" href="data:image/png;base64,{base64.b64encode(f.read()).decode()}">'
 
 
 def epoch(iso: str) -> float:
@@ -326,6 +336,7 @@ def vrate_episodes(air: list[dict], rec: dict) -> list[dict]:
     7 dives passed, the live run (half its polls refused with HTTP 429) alerted 2."""
     probe = object.__new__(fw.Monitor)  # only the check: no feed, no notifier
     probe.args = fw.parse_args(["--no-routes"])
+    probe.traces, probe.trace_left, probe.from_trace = {}, 0, False  # never reads the feed's trace
     hits = []
     probe.alert = lambda t, kind, msg, key=None, severity=0, **_: hits.append(
         {"i": i, "dir": key.split(":")[1], "rate": t.last.vrate,
@@ -619,7 +630,7 @@ def build(rec: dict, alerts: list[dict], pts: list[dict], source: str, max_speed
     credits = " · ".join(x for x in (view.get("credit"), DATA_CREDIT.get(source, f"Flight data: {source}"),
                                      OTHER_CREDITS) if x)
     return f"""<!doctype html>
-<html><head><meta charset="utf-8"><title>{ident} replay</title>
+<html><head><meta charset="utf-8"><title>{ident} replay</title>{favicon()}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="{PLOTLY}"></script>{view["head"]}
 <style>html,body{{overflow-x:hidden}} body{{font-family:sans-serif;margin:8px;background:#fff}} a{{margin-right:1em}}
