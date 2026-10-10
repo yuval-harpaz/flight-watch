@@ -676,6 +676,74 @@ class TrustedSpeedTests(unittest.TestCase):
         fly(mon, feed, clock, "4ba020", states, flight="QTR94R", r="A7-BHA", t="B789")
         self.assertNotIn("VERTICAL_RATE", kinds(alerts))
 
+    def test_speeding_up_into_a_dive_is_trusted_at_once(self):
+        """4XDAN (P750), 10 Oct 2026: ~55 kt at 11,500 ft, then a dive at 140-155 kt and -5,600
+        ft/min. Averaged over the last minute, positions gave 67 kt against the reported 138 kt,
+        so the speed was distrusted and the alert came 30 s late, on its last sample before going
+        out of coverage. Speed changes: the average must lie between the speeds at both ends."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        slow = path(31.36, 35.387, [185] * 6, [11800 - 50 * i for i in range(6)], gs=55)
+        lat, lon = fw.destination(slow[-1]["lat"], slow[-1]["lon"], 185, 55 * 20 / 3600)
+        dive = path(lat, lon, [190] * 5, [10600 - 930 * i for i in range(5)], gs=140)
+        fly(mon, feed, clock, "739215", slow, flight="4XDAN", r="4X-DAN", t="P750")
+        clock.t += 10  # a poll lost to HTTP 429
+        fly(mon, feed, clock, "739215", dive[:1], flight="4XDAN", r="4X-DAN", t="P750")
+        self.assertEqual(kinds(alerts), ["VERTICAL_RATE"])
+
+
+def lift(gs_run=55, gs_dive=150, run_reported=None):
+    """A skydiving lift like 4XDAN's: a 2-min jump run at ~11,800 ft, then -5,600 ft/min."""
+    run = path(31.36, 35.387, [185] * 12, [11800 - 40 * i for i in range(12)], gs=gs_run)
+    if run_reported is not None:
+        run = [{**st, "gs": run_reported} for st in run]
+    lat, lon = fw.destination(run[-1]["lat"], run[-1]["lon"], 185, gs_run * 10 / 3600)
+    return run + path(lat, lon, [190] * 4, [11300 - 930 * i for i in range(4)], gs=gs_dive)
+
+
+class SkydiveTests(unittest.TestCase):
+    def test_jump_plane_dive_is_described(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "739215", lift(), flight="4XDAN", r="4X-DAN", t="P750", category="A1")
+        self.assertEqual(kinds(alerts), ["VERTICAL_RATE"])
+        self.assertIn("skydiving pattern, PAC 750XL: 55 kt at 11800 ft", alerts[0]["message"])
+        self.assertEqual(alerts[0]["skydive"]["lift"], 1)
+
+    def test_airliner_flying_it_is_priority_5(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "738001", lift(), flight="ELY315", r="4X-EKT", t="B738")
+        self.assertEqual(kinds(alerts)[0], "SKYDIVE_PATTERN")
+        self.assertEqual(alerts[0]["priority"], 5)
+        self.assertIn("an airliner (B738) flew a skydiving pattern", alerts[0]["message"])
+
+    def test_large_aircraft_without_airline_callsign(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "738002", lift(), flight="4XABC", r="4X-ABC", t="E190")
+        self.assertIn("a large aircraft (E190)", alerts[0]["message"])
+
+    def test_military_paradrop_is_only_described(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "738003", lift(), flight="RCH123", r="", t="C30J", dbFlags=1)
+        self.assertNotIn("SKYDIVE_PATTERN", kinds(alerts))
+
+    def test_slow_speed_belied_by_positions_is_no_jump_run(self):
+        """Spoofed / corrupted velocity: 'slow' while the positions move at 300 kt."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "738004", lift(gs_run=300, gs_dive=300, run_reported=70),
+            flight="ELY316", r="4X-EKU", t="B738")
+        self.assertNotIn("SKYDIVE_PATTERN", kinds(alerts))
+
+
+class AltitudeSourceTests(unittest.TestCase):
+    def test_gps_altitude_is_converted_to_barometric(self):
+        """4XDAN, 10 Oct 2026: GPS altitude ~575 ft above barometric; one report with only the GPS
+        value read as a 575-ft step within a second."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        states = path(31.36, 35.387, [190] * 6, [10000 - 100 * i for i in range(6)], gs=140)
+        states = [{**st, "alt_geom": st["alt_baro"] + 575} for st in states]
+        states[4] = {k: v for k, v in states[4].items() if k != "alt_baro"}
+        fly(mon, feed, clock, "739215", states[:5], flight="4XDAN", r="4X-DAN", t="P750")
+        self.assertEqual(mon.tracks["739215"].last.alt, 9600)
+
 
 class IntegrityTests(unittest.TestCase):
     def test_jammed_but_on_track_is_still_watched(self):

@@ -117,12 +117,13 @@ LIGHT_CATEGORIES = {"A1", "A7", "B1", "B2", "B3", "B4", "B6"}
 PRIORITY = {"EMERGENCY": 5, "LOST_CONTACT": 5, "DIVERSION": 5, "TOWARD_ISRAEL": 5, "OFF_COURSE": 5,
             "RETURNED": 4, "TURNING_BACK": 4, "VERTICAL_RATE": 4, "SHARP_TURN": 4,
             "COURSE_CHANGE": 4, "HOLDING": 4, "POSITION_JUMP": 3, "GPS_SPOOFING": 3, "MASS_SILENCE": 3,
-            "GPS_DEGRADED": 3,
+            "GPS_DEGRADED": 3, "SKYDIVE_PATTERN": 5,
             "CONTACT_RESTORED": 2}
 # kinds that describe abnormal flying; two different ones on one flight within --hot-minutes
 # are reported as a pattern (priority 5)
 ANOMALIES = {"EMERGENCY", "LOST_CONTACT", "DIVERSION", "TOWARD_ISRAEL", "OFF_COURSE", "TURNING_BACK",
-             "VERTICAL_RATE", "SHARP_TURN", "COURSE_CHANGE", "HOLDING", "POSITION_JUMP"}
+             "VERTICAL_RATE", "SHARP_TURN", "COURSE_CHANGE", "HOLDING", "POSITION_JUMP",
+             "SKYDIVE_PATTERN"}
 
 # Airports in and around the watch area: terminal areas (normal turns, steep-but-normal climbs),
 # "probably landing there" for aircraft going silent low nearby. IATA -> (lat, lon, Israeli)
@@ -144,7 +145,24 @@ PERSISTING = {"TOWARD_ISRAEL", "OFF_COURSE", "TURNING_BACK"}
 SPOOF_MAX_RATE = 6000
 # alerts that rest on GPS positions / velocities: logged under a spoofing episode, not alerted
 SPOOF_KINDS = {"POSITION_JUMP", "COURSE_CHANGE", "SHARP_TURN", "OFF_COURSE", "TURNING_BACK",
-               "TOWARD_ISRAEL", "LOST_CONTACT", "HOLDING"}
+               "TOWARD_ISRAEL", "LOST_CONTACT", "HOLDING", "SKYDIVE_PATTERN"}
+# Skydiving lift (Monitor.check_skydive): a jump run - slow (<= SKYDIVE_RUN_KT) at height for a
+# while - then a steep descent. 4XDAN (P750) over the Dead Sea, 10 Oct 2026: climb to ~12,000 ft
+# every 20-40 min, ~50 kt while jumpers exit, then -5,600 ft/min at 150 kt out of coverage.
+SKYDIVE_RUN_KT, SKYDIVE_RUN_ALT, SKYDIVE_DESCENT = 80, 6000, 3000
+# common jump aircraft (ICAO type -> model, for the alert text)
+JUMP_PLANES = {
+    "P750": "PAC 750XL", "C208": "Cessna 208 Caravan", "PC6P": "Pilatus PC-6 Porter",
+    "PC6T": "Pilatus PC-6 Turbo Porter", "DHC6": "DHC-6 Twin Otter", "DHC2": "DHC-2 Beaver",
+    "DHC3": "DHC-3 Otter", "SC7": "Shorts Skyvan", "L410": "Let L-410", "AN2": "Antonov An-2",
+    "AN28": "Antonov An-28", "C212": "CASA C-212", "KODI": "Kodiak 100", "BE99": "Beech 99",
+    "C182": "Cessna 182", "C206": "Cessna 206", "C210": "Cessna 210", "GA8": "GippsAero Airvan",
+}
+# emitter categories of large aircraft (A3 large, A4 B757-class, A5 heavy) and airliner type codes:
+# such an aircraft flying a jump run is not skydiving (slow flight near the stall at height)
+LARGE_CATEGORIES = {"A3", "A4", "A5"}
+LARGE_TYPES = re.compile(r"A[0-9]{3}|A[23][0-9]N|B7[0-9]{2}|B[37][0-9]M|BCS[13]|E1[79]0|E[0-9]{2}[05LS]|"
+                         r"E2[0-9]{2}|CRJ[0-9X]|AT[47][0-9]|DH8[A-D]|MD[0-9]{2}")
 # Rough outline of Israeli-controlled airspace over land (incl. West Bank, Golan), lat/lon.
 # Israeli airlines (ICAO): El Al, Israir, Arkia, CAL Cargo, Sun d'Or, Challenge Airlines IL, Air Haifa
 ISRAELI_AIRLINES = {"ELY", "ISR", "AIZ", "ICL", "ERO", "CHG", "HFA"}
@@ -530,6 +548,7 @@ class Sample:
     on_ground: bool
     mlat: bool = False     # position from multilateration (ground receivers' timing), not the aircraft's GPS
     nic: int | None = None  # the aircraft's own position-integrity category (0 = it does not trust it)
+    geo: bool = False      # alt is GPS (geometric) altitude: the feed had no barometric one
 
 
 @dataclass
@@ -585,6 +604,9 @@ class Track:
     hold_since: float = 0.0  # data time the current circling (holding pattern / orbit) began
     hold_last: float = 0.0   # last data time it was circling
     hold_alerted: int = 0    # --holding-minutes periods of this hold already alerted
+    geo_offset: float | None = None  # its GPS altitude minus barometric (weather: a few hundred ft)
+    skydive: dict | None = None  # its last skydiving lift (see check_skydive)
+    skydive_lifts: int = 0   # lifts seen since we first heard it
 
     @property
     def last(self) -> Sample | None:
@@ -682,7 +704,8 @@ def parse_aircraft(ac: dict, server_now: float):
     sample = Sample(pos_t, float(lat), float(lon),
                     int(alt) if alt is not None else None,
                     track, gs, int(vrate) if vrate is not None else None, on_ground, mlat,
-                    None if mlat or not isinstance(nic, int) else nic)
+                    None if mlat or not isinstance(nic, int) else nic,
+                    geo=not on_ground and not isinstance(alt_raw, (int, float)) and alt is not None)
     return hexid, server_now - seen, sample
 
 
@@ -835,7 +858,8 @@ class Announcer:
                  "POSITION_JUMP": ("\U0001f6f0️", "Position jump (GPS spoofing?)"),
                  "GPS_SPOOFING": ("\U0001f6f0️", "GPS spoofing"),
                  "MASS_SILENCE": ("\U0001f4e1", "Many aircraft silent at once"),
-                 "GPS_DEGRADED": ("\U0001f6f0️", "GPS jamming / spoofing")}
+                 "GPS_DEGRADED": ("\U0001f6f0️", "GPS jamming / spoofing"),
+                 "SKYDIVE_PATTERN": ("\U0001fa82", "Large aircraft flying like a jump plane")}
 
     def __init__(self, args, out=None):
         self.args = args
@@ -896,7 +920,8 @@ class Announcer:
     NAMES = {"EMERGENCY": "emergency", "LOST_CONTACT": "lost contact", "DIVERSION": "diversion",
              "TOWARD_ISRAEL": "turn toward Israel", "OFF_COURSE": "off course", "TURNING_BACK": "turning back",
              "VERTICAL_RATE": "steep climb/descent", "SHARP_TURN": "sharp turn",
-             "COURSE_CHANGE": "course reversal", "HOLDING": "long holding", "POSITION_JUMP": "position jump"}
+             "COURSE_CHANGE": "course reversal", "HOLDING": "long holding", "POSITION_JUMP": "position jump",
+             "SKYDIVE_PATTERN": "skydiving pattern"}
     DETAILS = {  # kind -> (pattern in the alert message, compact wording)
         "LOST_CONTACT": (r"silent (\d+)s.*?track (\S+) deg", "silent {0} s, last track {1}°"),
         "VERTICAL_RATE": (r"([+-]\d+) ft/min, (-?[\d.]+) deg", "{0} ft/min ({1}°)"),
@@ -910,7 +935,7 @@ class Announcer:
 
     def detail(self, rec: dict) -> str:
         """The facts the headline and position don't already say, compactly."""
-        kind, msg = rec["kind"], rec["message"].split(" [also:")[0]
+        kind, msg = rec["kind"], re.sub(r" \[(also|skydiving pattern)[^\]]*\]", "", rec["message"])
         if kind in self.DETAILS:
             m = re.search(self.DETAILS[kind][0], msg)
             out = self.DETAILS[kind][1].format(*m.groups()) if m else msg
@@ -918,6 +943,9 @@ class Announcer:
             out = ""
         else:
             out = msg
+        k = rec.get("skydive")
+        if k and kind != "SKYDIVE_PATTERN":
+            out = (out + ". " if out else "") + f"Skydiving lift {k['lift']} ({k['model']})"
         also = re.search(r"\[also: ([^\]]+)\]", rec["message"])
         if also:
             names = [self.NAMES.get(k.strip(), k.strip().lower()) for k in also.group(1).split(",")]
@@ -1363,6 +1391,13 @@ class Monitor:
             if self.schedule and t.callsign in self.schedule.by_callsign:
                 t.sched = self.schedule.by_callsign[t.callsign]
             prev = t.last
+            # GPS and barometric altitude differ by hundreds of feet (4XDAN, 10 Oct 2026: +500-600):
+            # a GPS value among barometric ones is a fake step. Converted with this aircraft's offset.
+            geom, baro = ac.get("alt_geom"), ac.get("alt_baro")
+            if isinstance(geom, (int, float)) and isinstance(baro, (int, float)):
+                t.geo_offset = geom - baro
+            if sample.geo and t.geo_offset is not None:
+                sample.alt = int(sample.alt - t.geo_offset)
             label = self.spoofed(t, sample) or self.integrity(t, sample)  # a fake / untrustworthy
             if not label and (prev is None or sample.t > prev.t + 0.5):  # position is kept out of the track
                 t.samples.append(sample)
@@ -1400,6 +1435,7 @@ class Monitor:
             if (s.on_ground or (s.alt or 0) < 3000) and nearest_airport(s.lat, s.lon, israeli=True)[1] < 8:
                 t.israeli = True
             self.check_emergency(t, ac)
+            self.check_skydive(t)  # before check_vrate, so the dive's alert says what it is
             self.check_vrate(t)
             self.check_turn(t)
             self.check_sharp_turn(t)
@@ -1509,7 +1545,10 @@ class Monitor:
         prev = next((y for y in reversed(t.samples) if 20 <= s.t - y.t <= 120), None)
         if prev is not None:
             moved = haversine_nm(prev.lat, prev.lon, s.lat, s.lon) / ((s.t - prev.t) / 3600)
-            if not s.gs / 1.6 <= moved <= s.gs * 1.6:
+            # the average lies between the speeds at both ends: 4XDAN (P750) sped up from 55 to
+            # 138 kt into a dive, 67 kt on average, and its alert came 30 s late
+            speeds = [s.gs] + ([prev.gs] if prev.gs else [])
+            if not min(speeds) / 1.6 <= moved <= max(speeds) * 1.6:
                 return None  # positions disagree with the reported speed
         return s.gs
 
@@ -1574,6 +1613,51 @@ class Monitor:
             self.alert(t, "COURSE_CHANGE", f"{p['msg']}; new track {s.track:.0f} held {a.turn_confirm:.0f}s")
         elif s.t - p["t"] > 600:
             t.pending_turn = None  # neither: no clear reversal
+
+    def check_skydive(self, t: Track) -> None:
+        """A skydiving lift: a jump run (slow at height, positions agreeing) and then a steep
+        descent. A jump plane's alerts (the dive, going silent low) then say so, with its model.
+        An airliner (airline callsign) or a large aircraft doing it is alerted at priority 5:
+        that is near-stall flight at height and a dive, not skydiving. Military transports drop
+        paratroopers: only described."""
+        s = t.last
+        if s.on_ground or s.alt is None:
+            return
+        computed = t.computed_vrate(30)
+        if not ((s.vrate or 0) <= -SKYDIVE_DESCENT or (computed or 0) <= -SKYDIVE_DESCENT):
+            return
+        if t.skydive and s.t - t.skydive["t"] < 600:
+            return  # the same lift
+        run = [x for x in t.samples if s.t - 300 <= x.t < s.t and not x.on_ground and x.gs is not None
+               and x.gs <= SKYDIVE_RUN_KT and (x.alt or 0) >= SKYDIVE_RUN_ALT]
+        if len(run) < 2 or run[-1].t - run[0].t < 15:
+            return
+        moved = haversine_nm(run[0].lat, run[0].lon, run[-1].lat, run[-1].lon) / ((run[-1].t - run[0].t) / 3600)
+        if moved > SKYDIVE_RUN_KT * 1.3:
+            return  # positions say it was not slow: corrupted / spoofed speeds (QTR94R "117 kt" at FL390)
+        top = max(x.alt for x in run)
+        if top - s.alt < 1000:
+            return
+        t.skydive_lifts += 1
+        slow = min(x.gs for x in run)
+        model = JUMP_PLANES.get(t.actype, t.actype or "unknown type")
+        t.skydive = {"t": s.t, "top": top, "gs": round(slow), "lift": t.skydive_lifts, "model": model}
+        large = t.category in LARGE_CATEGORIES or bool(LARGE_TYPES.fullmatch(t.actype or ""))
+        why = ("an airliner" if airline_like(t) else "a large aircraft") if (airline_like(t) or large) else ""
+        if why and not t.military:
+            self.alert(t, "SKYDIVE_PATTERN", f"{why} ({model}) flew a skydiving pattern: {slow:.0f} kt at "
+                       f"{top} ft, then descending {min(s.vrate or 0, computed or 0):+.0f} ft/min at {s.alt} ft")
+        else:
+            log.info("%s skydiving lift %d: %s, %.0f kt at %d ft, descending at %d ft",
+                     t.label(), t.skydive_lifts, model, slow, top, s.alt)
+
+    def skydive_note(self, t: Track, now: float) -> str:
+        """' [skydiving pattern: ...]' for alerts within 30 min of a lift, else ''."""
+        k = t.skydive
+        if not k or now - k["t"] > 1800:
+            return ""
+        return (f" [skydiving pattern, {k['model']}: {k['gs']} kt at {k['top']} ft then a dive; "
+                f"lift {k['lift']}]")
 
     def check_holding(self, t: Track) -> None:
         """An airliner circling (holding pattern / orbit) for unusually long instead of landing:
@@ -2096,6 +2180,8 @@ class Monitor:
                 t.gps_free_until = max(t.gps_free_until, now + a.hot_minutes * 60)
         d = self.dist(s)
         apt, ad = nearest_airport(s.lat, s.lon)
+        if kind != "SKYDIVE_PATTERN":
+            msg += self.skydive_note(t, now)
         self.notifier.send({
             "time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
             "kind": kind, "priority": 5 if pattern else PRIORITY.get(kind, 3),
@@ -2112,6 +2198,7 @@ class Monitor:
             # the spoofing episode this flight was caught in (same label on every flight in it)
             "spoof": t.spoof if t.spoof and now - t.spoof_last <= 1800 else None,
             "gps": t.gps if t.gps and now - t.gps_last <= 1800 else None,  # its GPS-degraded episode
+            "skydive": t.skydive if t.skydive and now - t.skydive["t"] <= 1800 else None,
         })
         return True
 

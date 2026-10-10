@@ -18,6 +18,7 @@ turning back, diversions, and flights not bound for Israel turning toward it.
 | `VERTICAL_RATE` | flight-path angle steeper than 10 deg descending or 12 deg climbing (18 deg climbing near airports), or > 8000 ft/min | 4 |
 | `SHARP_TURN` | turn tighter than ~35 deg of bank (airliners stay below ~25-30), anywhere, also near airports | 4 |
 | `COURSE_CHANGE` | >= 70 deg in 2 min above 12000 ft, new track held 2 min - not S-turns, holding patterns / orbits, routine turns near airports or learned route corners | 4 |
+| `SKYDIVE_PATTERN` | an airliner or large aircraft flying a jump run (slow at height) then diving; a jump plane's own alerts are only labelled `[skydiving pattern, <model> ...]` | 5 |
 | `HOLDING` | an airliner circling over 30 min (again every 30 min) instead of landing; military and non-airline traffic not reported | 4 |
 | `GPS_SPOOFING` | aircraft reported motionless in the air (impossible for a fixed-wing plane unless falling fast) at the same point: one alert per episode (`spoof-YYYYMMDDTHHMMZ`) and one when it ends; the position-based alerts it causes are logged under that label instead | 3 |
 | `MASS_SILENCE` | 3+ aircraft silent within 2 min of each other (reception, jamming, the onset of spoofing): one alert (`silence-YYYYMMDDTHHMMZ`) instead of a `LOST_CONTACT` each. Every loss now waits `--lost-confirm` (60 s) for this; heard again meanwhile = nothing | 3 |

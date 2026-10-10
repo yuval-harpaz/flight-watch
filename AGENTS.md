@@ -40,7 +40,14 @@ and appended to `posts.jsonl`), and ntfy / Telegram when configured. `tests/repl
 
 `docs/` is published with GitHub Pages (e.g. `docs/fz1073_map.html`, made by `tools/plot_alert.py
 --map`); `examples/` holds the FZ1073 alerts and 3D plot. Plot pages are stand-alone (data embedded,
-libraries from CDNs), metric, Israel time with a UTC / viewer-zone switch, and must keep the credits:
+libraries from CDNs), metric, Israel time with a UTC / viewer-zone switch, alerts drawn by group (`GROUPS`: colour, marker),
+a "show" menu per alert kind (marker, text; contact labels start hidden when there are many) and for the
+steep changes / altitude data glitches (shown unless switched off), an "alerts at" switch between the alert
+time and the first detection (the monitor's VERTICAL_RATE check run on every trace report: when it could
+first have alerted; the lag is in the tooltip; dives that pass it with no alert are drawn as "not alerted", or
+"no monitor" (another marker) outside the alert file's span - 4XDAN 10 Oct 2026: 4 dives while the monitor
+ran, 2 alerted, polls refused with HTTP 429 half the time). Map labels are HTML laid out on screen after
+every frame (beside their marker, moved apart with a line back where they would overlap), and must keep the credits:
 "Powered by Esri" + the tile service's sources, the flight-data source, the route sources.
 
 ADS-B carries no origin/destination. Arrival/departure comes from the flight board first,
@@ -130,7 +137,8 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   history (rejects single bad values); with no history yet (just heard, back from a gap) it waits
   for the next reports - FZ1073's dive now alerts at 05:22:13 instead of 05:22:04, when the history
   (-8,065 ft/min) confirms it. The angle uses only a credible ground speed (`trusted_gs`: >= 120 kt,
-  >= 150 kt for an airliner above 10,000 ft, within x1.6 of the speed from positions); otherwise
+  >= 150 kt for an airliner above 10,000 ft, within x1.6 of the speed from positions, taken between the speeds reported at both ends - 4XDAN, a
+  P750 speeding up from 55 to 138 kt into a dive, 10 Oct 2026, alerted 30 s late without that); otherwise
   only the rate limit applies. On 6 Oct spoofed speeds (B789s at FL380 "at" 117-147 kt) made
   normal climbs read as 40-60 deg and also "confirmed" glitched rates: 10 alerts, 0 now. Climb and descent have separate cooldowns, and a reading ≥1.5× the
   last alerted severity bypasses the cooldown. Without this, a small wobble suppressed the
@@ -148,6 +156,14 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   (circling). Circling is never a reversal, also when hot. OFF_COURSE / TURNING_BACK wait while a
   turn is pending and skip circling (the outbound half of an orbit flies away from TLV), unless hot.
   Cost: a real reversal on a flight that has not alerted yet is reported ~2 min later.
+- **SKYDIVE_PATTERN**: a jump run (>= 2 reports <= 80 kt at >= 6,000 ft over >= 15 s, positions
+  agreeing) followed within 5 min by a descent of >= 3,000 ft/min and >= 1,000 ft. 4XDAN (P750) over
+  the Dead Sea, 10 Oct 2026: a lift every ~40 min (climb to ~12,000 ft, ~50 kt while jumpers exit,
+  -5,600 ft/min at 150 kt, silent below ~7,000 ft), each giving VERTICAL_RATE + LOST_CONTACT. The owner
+  wants those alerts kept: they carry `[skydiving pattern, <model>: ...; lift N]` and the record's
+  `skydive` for 30 min (model from `JUMP_PLANES`, else the type code). An airline callsign or a large
+  aircraft (category A3-A5 or `LARGE_TYPES`) flying it is alerted at priority 5 (near-stall flight at
+  height, then a dive); military transports drop paratroopers and are only described.
 - **HOLDING**: an airliner (airline callsign, not military) circling - >= 330 deg of turn one way
   in 12 min within 25 nm - for `--holding-minutes` (30), again after each further 30 min. Military
   aircraft and non-airline traffic orbit as their job (tankers, patrols, training) and are silent.
@@ -206,7 +222,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   contact at each burst's onset (aircraft go silent ~1 min before showing up frozen, before a
   second aircraft confirms the point) and their "restored" follow-ups.
   Barometric altitude (`alt_baro`, `baro_rate`) comes from the aircraft's air data and survives
-  GPS spoofing; lat/lon, ground speed and track are GNSS. **MLAT** positions (ground receivers'
+  GPS spoofing. GPS altitude (`alt_geom`) differs from it by hundreds of feet (weather; 4XDAN +500-600
+  ft on 10 Oct 2026), so a report with only `alt_geom` is converted with that aircraft's last offset
+  (`Track.geo_offset`); readsb traces do the same swap (flag 8), and `plot_alert.py` converts them too
+  and draws altitude steps that the aircraft's own vertical rate does not back as a data glitch; lat/lon, ground speed and track are GNSS. **MLAT** positions (ground receivers'
   timing; the feed's `type: mlat` / `mlat: [fields]`) are independent of the aircraft's GPS: never
   judged spoofed, and their gs / track are dropped unless MLAT computed them too (MLAT records
   often carry the aircraft's spoofed 0.7 kt / 0 deg). For a flight in an episode, a GPS report
