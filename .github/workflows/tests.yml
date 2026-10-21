@@ -16,8 +16,6 @@ jobs:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
-    # Windows reports but does not fail the run until the Windows fixes (single-instance lock, LF pages) are merged
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
       fail-fast: false
       matrix:
