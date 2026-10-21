@@ -2,7 +2,7 @@
 <html lang="en"><head><meta charset="utf-8"><title>TLV flights</title>
 <link rel="icon" type="image/png" href="logo.png">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<script src="flightboard.js?v=44153c38"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
+<script src="flightboard.js?v=19e1fd9e"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
 <style>
 body{font-family:sans-serif;margin:8px;background:#fff;color:#222}
 h1{font-size:18px;margin:4px 0}
@@ -22,6 +22,8 @@ tbody tr{cursor:pointer} tbody tr:hover{background:#f3f8ff}
 .b-late{background:#fff1dc;color:#9a5b00} .b-overdue{background:#fde3e1;color:#a01a12;font-weight:bold}
 .b-soon{background:#e8e6fb;color:#3d2f99} .b-done{background:#f0f0f0;color:#555}
 .b-cancel{background:#f0f0f0;color:#888;text-decoration:line-through}
+.b-warn{background:#fff4d6;color:#7a5200}
+#warnnote{font-size:12px;color:#7a5200;margin:2px 0 4px}
 .b-done.b-late{background:#fff1dc;color:#9a5b00}
 .raw{color:#888;font-size:11px}
 a.map{text-decoration:none}
@@ -36,6 +38,7 @@ a.map{text-decoration:none}
   <label><select id="dir"><option value="">arrivals and departures</option>
     <option value="ARR">arrivals</option><option value="DEP">departures</option></select></label>
   <label><input type="checkbox" id="hide"> hide landed / departed / cancelled</label>
+  <label title="automatic warnings from an experimental monitor; most have a routine explanation"><input type="checkbox" id="warn"> show warnings</label>
   <label>search <input id="q" size="14" placeholder="flight, city, airline"></label>
   <label>times <select id="zone"><option value="Asia/Jerusalem">Israel</option><option value="UTC">UTC</option>
     <option value="local">this computer's time zone</option></select></label>
@@ -43,6 +46,7 @@ a.map{text-decoration:none}
   <a id="maplink" href="flight_map.html">map: next arrival ▸</a>
 </div>
 <div id="msg">loading the flight board…</div>
+<div id="warnnote" style="display:none"></div>
 <div class="wrap"><table>
 <thead><tr><th data-k="est">time</th><th data-k="dir"></th><th data-k="flight">flight</th><th data-k="airline">airline</th>
 <th data-k="city">from / to</th><th data-k="sched">scheduled</th><th data-k="est">estimated</th>
@@ -59,6 +63,7 @@ Open a flight to see it on the map (live positions: <a href="https://adsb.lol">a
 "use strict";
 let flights = [], updated = NaN, ZONE = "Asia/Jerusalem", sortKey = "est", sortDir = 1;
 let AT = null;  // epoch of the past board shown, or null for the live one
+let ALERTS = null;  // the relay's /alerts while "show warnings" is on (hidden by default: an experimental monitor)
 const clock = () => AT ?? Date.now() / 1000;
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
@@ -92,16 +97,21 @@ function render() {
   rows.sort((a, b) => (val(a) > val(b) ? 1 : val(a) < val(b) ? -1 : a.f.est - b.f.est) * sortDir);
   const today = FB.fmt(now, ZONE, "date");
   const t = x => (FB.fmt(x, ZONE, "date") === today ? "" : FB.fmt(x, ZONE, "dhm").slice(0, 6)) + FB.fmt(x, ZONE, "hm");
+  const warn = $("warn").checked && ALERTS && !AT ? FB.alertsFor(flights, ALERTS) : new Map();
   $("rows").innerHTML = rows.map(({f, s}) => {
     const url = "flight_map.html?" + new URLSearchParams({f: f.flight, d: f.dir[0], s: f.schedText});
     const cls = s.cls.split(" ").map(c => "b-" + c).join(" ");
+    const w = warn.get(f.id) || [];
+    const kinds = [...new Set(w.map(a => FB.ALERT_NAMES[a.kind] || a.kind.toLowerCase().replace(/_/g, " ")))];
+    const wb = w.length ? ` <span class="badge b-warn" title="${esc(w.map(a => FB.fmt(a.t, ZONE, "hm") + " " +
+      (FB.ALERT_NAMES[a.kind] || a.kind)).join(", "))}">⚠️ ${esc(kinds.join(", "))}</span>` : "";
     return `<tr class="${f.dir}${/done|cancel/.test(s.cls) ? " old" : ""}" data-url="${esc(url)}">
 <td><b>${esc(t(f.est))}</b></td><td class="dir">${f.dir === "ARR" ? "▼ arr" : "▲ dep"}</td>
 <td>${esc(f.flight)}${f.codeshares.length ? `<div class="cs">${esc(f.codeshares.join(" "))}</div>` : ""}</td>
 <td>${esc(f.airline)}</td><td>${esc(f.city)} <span class="raw">${esc(f.other)}${f.country ? " · " + esc(f.country) : ""}</span></td>
 <td>${esc(t(f.sched))}</td><td>${esc(t(f.est))}</td>
 <td>${s.delay ? (s.delay > 0 ? "+" : "") + s.delay + " min" : ""}</td>
-<td><span class="badge ${cls}">${esc(s.label)}</span> <span class="raw">${esc(f.status)}</span></td>
+<td><span class="badge ${cls}">${esc(s.label)}</span> <span class="raw">${esc(f.status)}</span>${wb}</td>
 <td>${esc(f.terminal ?? "")}${f.dir === "DEP" && f.counters ? ` <span class="raw">${esc(f.zone)} ${esc(f.counters)}</span>` : ""}</td>
 <td>${AT ? "" : `<a class="map" href="${esc(url)}" title="show on the map">🗺</a>`}</td></tr>`;
   }).join("");
@@ -111,6 +121,23 @@ function render() {
     (AT ? ` · the board as it was at ${FB.fmt(AT, ZONE, "dhm")} ${FB.fmt(AT, ZONE, "z")} (archive)` :
      isFinite(updated) ? ` · board updated ${FB.fmt(updated, ZONE, "dhm")} ${FB.fmt(updated, ZONE, "z")}` : "") +
     ` · times ${FB.fmt(now, ZONE, "z")}`;
+  // with warnings shown: what they are, and whether they are current (no monitor sharing = not "all clear")
+  const note = $("warnnote");
+  note.style.display = $("warn").checked ? "" : "none";
+  if ($("warn").checked) {
+    const up = ALERTS && ALERTS.updated;
+    note.textContent = AT ? "warnings are shown on the live board only" :
+      !ALERTS ? "warnings: loading…" :
+      !up || Date.now() / 1000 - up > 15 * 60 ? `warnings not available${up ? " since " + FB.fmt(up, ZONE, "dhm") : ""} - no monitor is sharing them now` :
+      `⚠️ automatic warnings from an experimental monitor (updated ${FB.fmt(up, ZONE, "hm")}) - most have a routine explanation: ` +
+      "training, approach turns, data glitches. Open the map to see the flight.";
+  }
+}
+
+async function loadAlerts() {  // only while "show warnings" is on; the relay caches the answer for a minute
+  if (!$("warn").checked || AT) return;
+  try { ALERTS = await FB.fetchAlerts() || {updated: null, alerts: []}; } catch (e) { ALERTS = {updated: null, alerts: []}; }
+  render();
 }
 
 async function load() {
@@ -160,6 +187,13 @@ document.querySelectorAll("th[data-k]").forEach(th => th.onclick = () => {
   render();
 });
 for (const id of ["view", "dir", "hide"]) $(id).onchange = render;
+$("warn").onchange = () => {   // ?alerts=true in the address keeps it on for a shared link
+  const q = new URLSearchParams(location.search);
+  if ($("warn").checked) q.set("alerts", "true"); else q.delete("alerts");
+  history.replaceState(null, "", q.toString() ? "?" + q.toString().replace(/%3A/g, ":") : location.pathname);
+  if ($("warn").checked) loadAlerts(); else render();
+};
+$("warn").checked = params.get("alerts") === "true";
 $("q").oninput = render;
 $("zone").onchange = e => { ZONE = e.target.value; views(Date.now() / 1000); render(); };
 $("reload").onclick = load;
@@ -168,6 +202,7 @@ if (params.get("at") && FB.israelEpoch(params.get("at")) >= FB.HISTORY_START) {
   $("at").value = params.get("at");
   setWhen(FB.israelEpoch(params.get("at")));
 } else load();
-setInterval(() => { if (!AT) load(); }, 5 * 60 * 1000);
+setInterval(() => { if (!AT) { load(); loadAlerts(); } }, 5 * 60 * 1000);
+loadAlerts();
 setInterval(render, 60 * 1000);  // "past estimate" and "now" move on between board refreshes
 </script></body></html>

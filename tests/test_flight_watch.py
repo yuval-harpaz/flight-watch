@@ -523,6 +523,27 @@ class ShareCallsigns(unittest.TestCase):
             fly(mon, feed, clock, "738062", path_, flight="ELY5064")
             self.assertEqual(feed.learned, [])                          # no token: nothing sent
 
+    def test_board_alerts_ride_on_the_share(self):
+        """The flight board's warnings go with the callsign share (no extra request, no extra KV write): only the
+        kinds Telegram gets, sent once; when the POST fails they wait for the next one."""
+        from unittest import mock
+        with mock.patch.dict(os.environ, {"RELAY_TOKEN": "s3cret"}):
+            mon, feed, clock, _ = make(["--share-interval", "60"])
+            send = lambda rec: fw.Notifier.send(mon.notifier, rec)          # make() records instead of sending
+            send(alert_rec("EMERGENCY", "squawk 7700 (GENERAL EMERGENCY)", remote=False, traffic="ARR", route=None))
+            send(alert_rec("LOST_CONTACT", "silent 90s, last track 120 deg", remote=False, traffic="ARR", route=None))
+            fly(mon, feed, clock, "738062", path(32.3, 34.5, [180] * 3, [9000] * 3), flight="ELY5064")
+            body = feed.learned[0][0]
+            self.assertEqual([a[3] for a in body["_alerts"]], ["EMERGENCY"])   # LOST_CONTACT: a Telegram-skip kind
+            self.assertEqual(body["_alerts"][0][:3], ["8965d1", "FZ1073", "FDB1073"])
+            self.assertIn("ELY5064", body)                                       # the callsigns as before
+            self.assertEqual(mon.notifier.board_alerts, [])                      # sent: not again
+            feed.limited.add("/learn")
+            send(alert_rec("SHARP_TURN", "x", minute=5, remote=False, traffic="ARR", route=None))
+            for _ in range(8):
+                step(mon, clock)
+            self.assertEqual(len(mon.notifier.board_alerts), 1)                  # the relay refused: kept
+
     def test_a_failing_relay_does_not_stop_the_poll(self):
         from unittest import mock
         with mock.patch.dict(os.environ, {"RELAY_TOKEN": "s3cret"}):

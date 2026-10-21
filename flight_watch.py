@@ -1398,6 +1398,10 @@ class Notifier:
         self.tg_var = "TELEGRAM_CHANNEL_ID" if args.telegram_to == "channel" else "TELEGRAM_CHAT_ID"
         self.tg_chat = os.getenv(self.tg_var)
         self.tg_skip = {k.strip().upper() for k in args.telegram_skip.split(",") if k.strip()}
+        # alerts for the flight board (docs/flights.html "show warnings"), sent with the next callsign share to the
+        # relay (Monitor.share_callsigns): [hex, flight, callsign, kind, epoch]. Only the kinds Telegram gets - the
+        # rest are mostly coverage gaps; alerts the monitor holds back (military / skydiving quiet) never get here.
+        self.board_alerts: list = []
         self.tg_spoof_t = -1e12  # data time of the last GPS_SPOOFING sent to Telegram
         # hex -> its Telegram thread: {"id": first message's id, "t": its data time, "last": the last message's,
         # "done": the follow-up was sent}. Later messages on the flight reply to the first; the monitor's
@@ -1416,6 +1420,10 @@ class Notifier:
         log.info("%s | %s", text, rec["links"]["live_adsbx"])
         self.console(self.row(rec))
         post = self.announcer.announce(rec)
+        if rec["kind"] != "GPS_SPOOFING" and self.telegram_wanted(rec):   # the board's warnings: what Telegram gets, per flight
+            t =datetime.fromisoformat(rec["time"].replace("Z", "+00:00")).timestamp()
+            self.board_alerts.append([rec["hex"], rec.get("flight") or "", (rec.get("callsign") or "").strip(), rec["kind"], round(t)])
+            del self.board_alerts[:-200]
         if self.bluesky.wanted(rec, post):
             self.bluesky.enqueue(post)
         if self.args.jsonl:
@@ -2337,11 +2345,17 @@ class Monitor:
         pairs = {t.callsign.strip().upper(): [t.hex, round(t.last_msg)] for t in self.tracks.values()
                  if t.callsign.strip() and t.last_msg > self.shared_at}
         self.shared_at = now
+        # the flight board's alerts ride on the same POST: no KV write of their own (worker 0.7 keeps a day of them;
+        # an older worker skips the "_alerts" key like any non-callsign). Kept for the next try when the POST fails.
+        alerts = list(self.notifier.board_alerts)
+        if alerts:
+            pairs["_alerts"] = alerts
         if not pairs:
             return
         try:
             r = self.http.post(a.share_url, LOW, json=pairs, headers={"Authorization": f"Bearer {token}"})
-            log.debug("shared %d callsigns with the relay: %s", len(pairs), r.text[:80])
+            del self.notifier.board_alerts[:len(alerts)]
+            log.debug("shared %d callsigns and %d alerts with the relay: %s", len(pairs) - bool(alerts), len(alerts), r.text[:80])
         except requests.RequestException as e:  # Throttled included
             log.warning("could not share callsigns with the relay: %s", e)
 

@@ -13,6 +13,8 @@
  *                                        own Referer and send no CORS header. Since 18 Oct 2026 adsb.lol refuses its
  *                                        trace files (a browser check), so the map's tracks come from here.
  *   /hexof/<cs>[,<cs>...]             -> which aircraft (hex) flew each callsign in the last 36 h
+ *   /alerts                           -> the monitor's alerts of the last 24 h (the kinds Telegram gets) and the time
+ *                                        of its last /learn, for the flight board's "show warnings" (hidden by default)
  *
  * Nothing else is relayed (not an open proxy), only GET, only for the origins below. Answers are
  * cached: many viewers of one flight cost one upstream request per 5 s, and when adsb.lol answers
@@ -48,7 +50,8 @@ const ROUTES = [  // [path pattern, upstream host, fresh seconds, prefix left ou
 const STALE_S = 120;              // serve an answer this old when upstream fails
 const HOME = [32.0114, 34.8867];  // TLV
 const KEEP_S = 36 * 3600;         // callsign map: forget entries older than this
-const VERSION = "0.6";            // shown at / and /status, to check which code is deployed
+const ALERTS_KEEP_S = 24 * 3600; // board alerts: forget older ones
+const VERSION = "0.7";            // shown at / and /status, to check which code is deployed
 const UA = {"User-Agent": "flight-watch-pages-relay/" + VERSION};
 
 function cors(origin) {
@@ -77,8 +80,19 @@ async function learnCallsigns(env, now) {
 
 /** Merge {callsign: [hex, seen]} into the KV map (one write), forget entries older than KEEP_S
  *  and note the outcome under `key` ("_run": the cron, "_push": the monitor's /learn). */
-async function merge(env, pairs, now, key, status) {
+async function merge(env, pairs, now, key, status, alerts) {
   const map = (await env.CALLSIGNS.get("map", "json")) || {};
+  if (alerts) {  // [hex, flight, callsign, kind, epoch] from the monitor: kept a day, in the same value (no extra write)
+    const ok = a => Array.isArray(a) && /^~?[0-9a-f]{6}$/.test(String(a[0]).toLowerCase()) && /^[A-Z0-9]{0,8}$/.test(String(a[1] || ""))
+      && /^[A-Z0-9]{0,8}$/.test(String(a[2] || "")) && /^[A-Z_]{3,24}$/.test(String(a[3])) && now - (+a[4] || 0) <= ALERTS_KEEP_S && +a[4] <= now + 60;
+    const seen = new Set(), keep = [];
+    for (const r of [...(map._alerts || []), ...alerts.filter(ok)]) {
+      const a = [String(r[0]).toLowerCase(), r[1] || "", r[2] || "", r[3], Math.round(+r[4])];
+      const k = [a[0], a[3], a[4]].join("|");  // a batch resent after a lost answer is stored once
+      if (!seen.has(k) && now - a[4] <= ALERTS_KEEP_S) { seen.add(k); keep.push(a); }
+    }
+    map._alerts = keep.slice(-500);
+  }
   let n = 0;
   for (const [raw, v] of Object.entries(pairs || {})) {
     const cs = raw.trim().toUpperCase(), hex = Array.isArray(v) ? String(v[0] || "").toLowerCase() : "";
@@ -111,7 +125,8 @@ export default {
       if (body.length > 300000) return json(413, {error: "too large"});
       let pairs;
       try { pairs = JSON.parse(body); } catch (e) { return json(400, {error: "not JSON"}); }
-      return json(200, {stored: await merge(env, pairs, Date.now() / 1000, "_push", 200)});
+      const alerts = Array.isArray(pairs && pairs._alerts) ? pairs._alerts : [];
+      return json(200, {stored: await merge(env, pairs, Date.now() / 1000, "_push", 200, alerts)});
     }
     if (request.method !== "GET") return json(405, {error: "GET only"});
     if (origin && !ORIGINS.some(o => o.test(origin))) return json(403, {error: "origin not allowed"});
@@ -127,7 +142,16 @@ export default {
       return json(200, {version: VERSION, kv: !!env.CALLSIGNS, learnToken: !!env.LEARN_TOKEN,
         callsigns: map ? Object.keys(map).filter(k => !k.startsWith("_")).length : 0,
         lastPush: push ? {at: at(push), callsigns: push[2]} : null,
-        lastRun: run ? {at: at(run), upstreamHTTP: run[1], aircraft: run[2]} : null});
+        lastRun: run ? {at: at(run), upstreamHTTP: run[1], aircraft: run[2]} : null,
+        alerts: map && map._alerts ? map._alerts.length : 0});
+    }
+    if (url.pathname === "/alerts") {  // the flight board's warnings; `updated`: the monitor's last share (null: never)
+      const map = env.CALLSIGNS ? (await env.CALLSIGNS.get("map", {type: "json", cacheTtl: 60})) || {} : {};
+      const now = Date.now() / 1000;
+      return json(200, {version: VERSION, updated: map._push ? map._push[0] : null,
+        alerts: (map._alerts || []).filter(a => now - a[4] <= ALERTS_KEEP_S)
+          .map(a => ({hex: a[0], flight: a[1], callsign: a[2], kind: a[3], t: a[4]}))},
+        {"Cache-Control": "public, max-age=60"});
     }
     const hexof = /^\/hexof\/([0-9A-Za-z,]{1,1000})$/.exec(url.pathname);
     if (hexof) {

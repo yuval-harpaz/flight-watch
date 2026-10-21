@@ -352,6 +352,35 @@ FB.hexOf = async function (callsigns) {
   if (!FB.RELAY || !callsigns.length) return {};
   return FB.getJSON(FB.RELAY + "/hexof/" + callsigns.join(","));
 };
+
+// The monitor's warnings (the relay's /alerts: {updated, alerts: [{hex, flight, callsign, kind, t}]}), shown on the board
+// only when asked ("show warnings", ?alerts=true): an experimental monitor's alerts must not alarm a casual reader.
+FB.ALERT_NAMES = {EMERGENCY: "emergency squawk", DIVERSION: "diversion", RETURNED: "landed back", TURNING_BACK: "turning back",
+  OFF_COURSE: "off course", LOST_CONTACT: "lost contact", VERTICAL_RATE: "steep climb/descent", SHARP_TURN: "sharp turn",
+  COURSE_CHANGE: "course reversal", HOLDING: "long holding", ALTITUDE_WOBBLE: "altitude up and down",
+  EARLY_DESCENT: "early descent", GPS_SPOOFING: "GPS spoofing", SKYDIVE_PATTERN: "jump-plane pattern"};
+FB.fetchAlerts = async function () {
+  if (!FB.RELAY) return null;
+  return FB.getJSON(FB.RELAY + "/alerts");
+};
+/** flight id -> [{kind, t}] for the board's flights: an alert belongs to a flight when its flight number (any
+ *  codeshare) or callsign is the flight's, within `hours` of the flight's estimated time (numbers repeat daily). */
+FB.alertsFor = function (flights, data, hours = 12) {
+  const norm = n => String(n || "").toUpperCase().replace(/^([A-Z0-9]{2})0*(\d+)$/, "$1$2");
+  const out = new Map();
+  for (const a of (data && data.alerts) || []) {
+    const fl = norm(a.flight), cs = String(a.callsign || "").toUpperCase();
+    for (const f of flights) {
+      const mine = (fl && (norm(f.flight) === fl || f.codeshares.some(c => norm(c) === fl)))
+        || (cs && (f.callsigns.includes(cs) || f.altCallsigns.includes(cs)));
+      if (mine && Math.abs(a.t - f.est) <= hours * 3600) {
+        if (!out.has(f.id)) out.set(f.id, []);
+        out.get(f.id).push({kind: a.kind, t: a.t});
+      }
+    }
+  }
+  return out;
+};
 FB.onGround = ac => ac && (ac.alt_baro === "ground" || ((ac.gs || 0) < 50 && (+ac.alt_baro || 0) < 500));
 
 // ------------------------------------------------------------------ standing data (routes, airports)

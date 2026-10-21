@@ -237,6 +237,22 @@ class Situations(unittest.TestCase):
         f = {"dir": d, "status": status, "sched": fw_epoch(sched), "est": fw_epoch(est)}
         return node(f"FB.situation(DATA.f, {fw_epoch(now)})", {"f": f})
 
+    def test_board_alerts_find_their_flight(self):
+        """The relay's /alerts on the board: by flight number (any codeshare, LY025 = LY25) or callsign, within 12 h of
+        the flight's time - the same number flies again tomorrow."""
+        est = fw_epoch("10:00")
+        flights = [{"id": "a", "flight": "LY25", "codeshares": ["DL7441"], "callsigns": ["ELY025", "ELY25"], "altCallsigns": [], "est": est},
+                   {"id": "b", "flight": "W64603", "codeshares": [], "callsigns": [], "altCallsigns": ["WZZ4603"], "est": est}]
+        alerts = [{"hex": "738062", "flight": "LY025", "callsign": "", "kind": "EMERGENCY", "t": est - 3600},
+                  {"hex": "738062", "flight": "DL7441", "callsign": "", "kind": "DIVERSION", "t": est},
+                  {"hex": "4b1805", "flight": "", "callsign": "WZZ4603", "kind": "SHARP_TURN", "t": est + 600},
+                  {"hex": "738062", "flight": "LY25", "callsign": "", "kind": "HOLDING", "t": est - 20 * 3600},   # yesterday's
+                  {"hex": "123456", "flight": "FZ1073", "callsign": "FDB1073", "kind": "EMERGENCY", "t": est}]    # not on the board
+        got = node("Object.fromEntries(FB.alertsFor(DATA.flights, {alerts: DATA.alerts}))", {"flights": flights, "alerts": alerts})
+        self.assertEqual({k: [a["kind"] for a in v] for k, v in got.items()},
+                         {"a": ["EMERGENCY", "DIVERSION"], "b": ["SHARP_TURN"]})
+        self.assertEqual(node("Object.keys(FB.alertsFor([], null))"), [])   # the relay not answering: no warnings
+
     def test_live_lookup_only_when_it_can_help(self):
         def useful(d, status, est, now):
             return node(f"FB.liveUseful(DATA, {fw_epoch(now)})", {"dir": d, "status": status, "est": fw_epoch(est)})
@@ -412,6 +428,34 @@ class CorsWorker(unittest.TestCase):
         self.assertEqual(got["status"]["callsigns"], 2)
         self.assertTrue(got["status"]["learnToken"])
         self.assertEqual(got["status"]["lastPush"]["callsigns"], 1)   # received in the last push (an older hearing: map kept)
+
+
+    def test_board_alerts_kept_a_day_with_the_time_of_the_last_share(self):
+        """/learn's "_alerts" ride in the callsign map's one KV value; /alerts serves the last 24 h with `updated` (the
+        monitor's last share), bad rows dropped, duplicates (a resent batch) once."""
+        got = self.run_worker("""
+            env.LEARN_TOKEN = "s3cret";
+            const post = async body => (await w.fetch(new Request("https://relay.example/learn", {method: "POST",
+              body: JSON.stringify(body), headers: {Authorization: "Bearer s3cret"}}), env, ctx)).status;
+            const empty = JSON.parse((await req("/alerts", null))[3]);
+            const now = clock.now / 1000;
+            const batch = [["8965D1", "FZ1073", "FDB1073", "EMERGENCY", now - 60], ["738062", "LY5064", "ELY5064", "SHARP_TURN", now - 30],
+                           ["nothex", "X", "", "SHARP_TURN", now], ["738062", "LY1", "", "x", now],
+                           ["738062", "LY1", "", "COURSE_CHANGE", now - 30 * 3600]];
+            await post({"ELY5064": ["738062", now], "_alerts": batch});
+            await post({"_alerts": batch.slice(0, 1)});               // a resent batch
+            clock.now += 3600 * 1000;
+            const later = JSON.parse((await req("/alerts", "https://yuval-harpaz.github.io"))[3]);
+            const hexof = JSON.parse((await req("/hexof/ELY5064", null))[3]);
+            const status = JSON.parse((await req("/status", null))[3]);
+            return {empty, later, hexof, status};""")
+        self.assertEqual(got["empty"]["alerts"], [])
+        self.assertIsNone(got["empty"]["updated"])
+        self.assertEqual([(a["hex"], a["kind"]) for a in got["later"]["alerts"]], [("8965d1", "EMERGENCY"), ("738062", "SHARP_TURN")])
+        self.assertAlmostEqual(got["later"]["updated"], 1791400000, delta=1)
+        self.assertEqual(got["hexof"]["ELY5064"]["hex"], "738062")       # the callsign map as before
+        self.assertEqual(got["status"]["alerts"], 2)
+        self.assertEqual(got["status"]["version"], "0.7")
 
 
 class ShareCallsignsScript(unittest.TestCase):

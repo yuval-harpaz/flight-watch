@@ -624,7 +624,15 @@ and fetching a cold start's ~60 files in one cycle held up the local poll for ov
   disagrees with two built-in entries: GQ listed as `BSY` (a defunct US airline), but GQ720 / 721 fly as SEH720 / 721
   (Sky Express, SX- A20Ns; logs of 10-18 Oct 2026), so `SEH` is right; 9U `MLD` (Air Moldova) is absent and was never seen.
 
-- **Flight pages, next steps.** Show alerts on the board list (the map has them: `a=`, `analyze`). **Live data on GitHub
+- **Alerts on the board** (`flights.html`, issue #26, 21 Oct 2026): the owner's conditions - no store of anyone
+  else's, hidden by default ("show warnings", `?alerts=true`: naive users must not take an amateur system's warnings
+  for news), the time of the last update and "not available" when the monitor is not sharing. The monitor's alerts
+  of the kinds Telegram gets (`Notifier.telegram_wanted`, not GPS_SPOOFING: no flight) ride on its `/learn` POST as
+  `"_alerts"` ([hex, flight, callsign, kind, epoch]; kept for the next POST when one fails), and the worker (0.7)
+  keeps 24 h of them in the callsign map's KV value - no write of its own - and serves them at `/alerts` with
+  `updated` (the monitor's last share). `FB.alertsFor` puts them on a row by flight number (any codeshare) or
+  callsign within 12 h of its time. Older than 15 min: "not available since". GitHub Actions' share sends none.
+- **Flight pages, next steps.** **Live data on GitHub
   Pages needs a relay with CORS** (posts link the Pages map): adsb.lol sends no CORS header on any
   endpoint (`/v2/*`, `/data/traces/*`, Oct 2026), so a page there can't read it whatever it tries.
   `FB.RELAY` is the owner's Cloudflare Worker (https://flight-watch-relay.yuvharpaz.workers.dev, code
