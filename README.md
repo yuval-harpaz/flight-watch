@@ -6,6 +6,18 @@ contact, too-steep climbs/descents, sharp turns and course reversals, emergency 
 (7500/7600/7700), GPS-spoofing-style position jumps, arrivals flying away from TLV, departures
 turning back, diversions, and flights not bound for Israel turning toward it.
 
+## See it
+
+- **Alerts on Telegram**: [@flight_watch_tlv](https://t.me/flight_watch_tlv), a public read-only channel where the
+  monitor's bot posts its alerts as they happen, threaded per flight. These are automatic alerts from an experimental
+  hobby system, and most have a routine explanation (training, approach turns, GPS jamming in the region).
+- **Incidents** (Hebrew): [incidents.html](https://yuval-harpaz.github.io/flight-watch/incidents.html), real incidents
+  from 2001 to today (9/11, JT610, ET302, MU5735, AS1282, FZ1073 and more) replayed through the monitor as if it had
+  watched them live: which alerts it would have raised, and when.
+- **TLV flight board**: [flights.html](https://yuval-harpaz.github.io/flight-watch/flights.html), Ben Gurion arrivals
+  and departures from the official board, with past boards from the archive. The monitor's warnings are hidden unless
+  "show warnings" is ticked (`?alerts=true`). See [Flight pages](#flight-pages-board--live-map).
+
 ## Alerts
 
 | Kind | When | Priority |
