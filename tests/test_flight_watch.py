@@ -2271,6 +2271,22 @@ class FarEndTests(unittest.TestCase):
         self.assertEqual(got["AGP"], [])
         self.assertIn("DIVERSION", got["SOF"])  # (bound from Sofia, on the ground at Malaga)
 
+    def test_positioning_flight_climbing_out_away_from_its_origin(self):
+        """9A-BTM, 22 Oct 2026: 6H717 TLV -> BUD, then ISR178 (6H178 TIV -> TLV) out of Budapest heading 290 deg
+        before turning for Tivat: OFF_COURSE "1,174 nm out and opening" and a course reversal at 12,150 ft."""
+        mon, feed, clock, alerts = self.setup([board_row("6H", "152", "A", local_time(Clock(), 6), "AGP")])
+        ident = dict(flight="ISR152", r="4X-ABT", t="A320")
+        mad, agp = (40.4719, -3.5626), (36.6749, -4.4991)
+        fly(mon, feed, clock, "738288", [dict(lat=mad[0], lon=mad[1], alt_baro="ground", gs=5, track=190)] * 3,
+            local=False, **ident)
+        out = path(*mad, [300] * 30, [1500 + 500 * i for i in range(30)], gs=300)  # departure routing: away
+        fly(mon, feed, clock, "738288", out, local=False, **ident)
+        last = mon.tracks["738288"].last
+        brg = fw.bearing(last.lat, last.lon, *agp)
+        fly(mon, feed, clock, "738288", path(last.lat, last.lon, [300 - 10 * i for i in range(1, 11)] + [brg] * 40,
+                                             [16000] * 50, gs=300), local=False, **ident)
+        self.assertEqual(kinds(alerts, "738288"), [])
+
     def arrival_at_madrid(self, leaves):
         """An aircraft flying the 6H182 MAD -> TLV callsign coming down at Madrid; `leaves`: first seen
         departing Madrid, flying out 80 nm and back."""
@@ -2430,6 +2446,71 @@ def aero_post(clock, text, n=1, minutes_ago=3):
 
 OS82 = ("Emergency reported for Austrian flight.\nAustrian Airlines OS82 | A320\nTel-aviv (TLV) \u2192 Vienna (VIE)\n\n"
         "Squawked 7700. Monitoring.")
+
+
+class LegEndAndLightAircraftTests(unittest.TestCase):
+    def test_a_departure_landed_away_is_no_longer_followed(self):
+        """A6-AEO flew EY596 TLV -> AUH, then ETD238 to Bangalore still followed: its approach turn there was a
+        "course reversal 2,594 nm E of TLV" (22 Oct 2026)."""
+        mon, feed, clock, alerts = with_board([board_row("LY", "541", "D", local_time(mon_clock(), 0), "ATH")])
+        feed.local = {"999999"}
+        feed.aircraft["999999"] = airborne(32.5, 34.5, 10000, flight="LOC1")
+        ident = dict(flight="ELY541", r="4X-EKA", t="B738")
+        start = fw.destination(37.936, 23.944, 120, 12)  # 12 nm out on final into Athens
+        fly(mon, feed, clock, "738003", path(*start, [300] * 18, [4000 - 200 * i for i in range(18)], gs=180),
+            local=False, **ident)
+        self.assertTrue(mon.tracks["738003"].followed)
+        fly(mon, feed, clock, "738003", [dict(lat=37.936, lon=23.944, alt_baro="ground", gs=10, track=0)] * 3,
+            local=False, **ident)
+        self.assertFalse(mon.tracks["738003"].followed)
+        n = len(feed.calls)
+        for _ in range(12):
+            step(mon, clock)
+        self.assertFalse([q for m, q in feed.calls[n:] if "/hex/" in q and "738003" in q])
+        self.assertEqual(alerts, [])
+
+    def test_light_jet_alerts_once_whatever_its_callsign(self):
+        """BDK12 (survey lines west of Israel, 21-22 Oct 2026): 18 Telegram messages in 3 h. Its callsign looks
+        like an airline's, so the pattern-flying rule (one turn alert in 2 h) did not apply."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        lap = [115] * 30 + [296] * 30  # (out and back on the same line: a reversal each way, 10 min a lap)
+        fly(mon, feed, clock, "738685", path(32.6, 33.2, lap * 4, [25000] * 240, gs=400), flight="BDK12", r="", t="")
+        self.assertEqual(kinds(alerts), ["COURSE_CHANGE"])
+        self.assertIn("light / private aircraft with no known route: no further alerts", alerts[0]["message"])
+        self.assertTrue(mon.tracks["738685"].mil_held)  # (in its follow-up: "not alerted (light, ...)")
+
+    def test_a_kind_telegram_skips_does_not_use_up_its_one_alert(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        ident = dict(flight="HEZ652", r="4X-CZF", t="H25B")
+        states = path(32.6, 33.6, [90] * 8, [19000] * 8, dt=30, gs=400)
+        lat, lon = fw.destination(states[4]["lat"], states[4]["lon"], 0, 8)
+        states[4] = {**states[4], "lat": lat, "lon": lon}  # one position off the track and back: POSITION_JUMP
+        fly(mon, feed, clock, "73934e", states, dt=30, **ident)
+        last = states[-1]
+        dive = path(*fw.destination(last["lat"], last["lon"], 90, 3.3), [90] * 8,
+                    [19000 - 1000 * i for i in range(8)], gs=250)  # -6,000 ft/min at 250 kt: ~13 deg
+        fly(mon, feed, clock, "73934e", dive, **ident)
+        self.assertEqual(kinds(alerts), ["POSITION_JUMP", "VERTICAL_RATE"])
+        self.assertIn("light / private aircraft", alerts[1]["message"])
+
+    def test_a_jump_plane_keeps_its_ride_alert(self):
+        """4XDAN: an alert before its first lift must not hold back the ride's one steep-descent alert."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        ident = dict(flight="4XDAN", r="4X-DAN", t="P750", category="A1")
+        fly(mon, feed, clock, "739215", [dict(airborne(31.5, 35.4, 9000, gs=120), squawk="7600")] * 2, **ident)
+        fly(mon, feed, clock, "739215", [dict(airborne(31.5, 35.4, 9000, gs=120), squawk="1200")] * 2, **ident)
+        clock.t += 600
+        fly(mon, feed, clock, "739215", lift(), **ident)
+        self.assertEqual(kinds(alerts), ["EMERGENCY", "VERTICAL_RATE"])
+        self.assertIn("probably a skydiving ride", alerts[1]["message"])
+        self.assertFalse(mon.light(mon.tracks["739215"]))
+
+    def test_impossible_speed_of_a_bizjet_is_no_sharp_turn(self):
+        """HEZ652 (4X-CZF, Hawker 800) "134 -> 50 deg in 30 s at 728 kt (~62 deg bank)" at FL190 in GPS jamming."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "73934e", path(32.87, 33.88, [134] * 6 + [106, 78, 50] + [50] * 6, [19000] * 15,
+                                             gs=728), flight="HEZ652", r="4X-CZF", t="H25B")
+        self.assertNotIn("SHARP_TURN", kinds(alerts))
 
 
 class AeroSignalsTests(unittest.TestCase):

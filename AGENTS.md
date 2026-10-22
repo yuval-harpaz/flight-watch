@@ -255,7 +255,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   callsign changed in the air) and no emergency (`Monitor.positioning`): SWA512 (HNL -> SAN, 7700) watched from San
   Diego is first heard at FL360 on its way back to Honolulu - a return, alerted (the squawk replay relied on the
   landing being "seen leaving" before; 352 cases unchanged). One that flew away from its origin first and turns back
-  still alerts (FZ1073 toward Dubai).
+  still alerts (FZ1073 toward Dubai). Nor in its departure routing, `CLIMB_OUT_S` (20 min) after take-off, whatever
+  its heading: 9A-BTM flew 6H717 TLV -> BUD, then left Budapest for Tivat as ISR178 (6H178 TIV -> TLV) heading 290 deg,
+  "1,174 nm out and opening", and 9A-BTI as ISR174 out of Rome (22 Oct 2026).
   A landing within `DIVERTED_NM` of a stop listed in the route data (`planned_stop`: an airport between the ends,
   when the route's far end agrees with the board) is logged, not a DIVERSION: KLM461 AMS -> TLV is EHAM-LCLK-LLBG
   and "went silent ... probably landing at LCA" (20 Oct 2026). 113 routes through TLV list stops (crowd-sourced,
@@ -317,6 +319,14 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   pattern" among them - such types no longer count as jump planes), 7436ac (AT8T) 17 with its position jumping
   28 nm back and forth; 20 Oct: IAM4188 (Italian Air Force AT76, patrolling west of Israel) 7. Cost: a real accident
   of a military aircraft after its first alert is only logged (and in its follow-up).
+  **Light / private aircraft** the same (22 Oct 2026, the owner's wish; `Monitor.light`, `Track.quiet_why` "light"):
+  not military, not large, not on the board, no route data - whatever the callsign looks like (BDK12, an Israeli
+  survey jet with no type in the feed, sent 18 Telegram messages in 3 h of survey lines on 22 Oct; HEZ652, Hawker
+  4X-CZF, 4 in GPS jamming: their airline-style callsigns escaped the pattern-flying rule). Two differences: a fall at
+  `--vrate` or faster is still alerted, and the one alert is one Telegram gets - a `--telegram-skip` kind (lost
+  contact, position jump) passes as usual without starting the quiet. Jump planes (`JUMP_PLANES` types, or a lift
+  seen) keep their own rule: the owner wants the weekend skydiving's one steep-descent alert, which an earlier alert
+  must not use up. In the run of 21-22 Oct: 29 of 61 Telegram messages from six such aircraft, ~6 now plus follow-ups.
 - **ALTITUDE_WOBBLE / EARLY_DESCENT** (16 Oct 2026, from the incident fixtures; airline callsign and large
   aircraft only). Wobble: the altitude reverses 3+ times (each leg >= 150 ft, `reversals`) within 3 min below
   FL250, with the aircraft's own vertical rate both >= +500 and <= -500 (a lone bad altitude is 2 reversals with a
@@ -343,7 +353,12 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   turn is pending and skip circling (the outbound half of an orbit flies away from TLV), unless hot.
   Cost: a real reversal on a flight that has not alerted yet is reported ~2 min later.
   Nor below FL250 within 35 nm of the flight's own origin / destination far away (`own_airport_near`: board, route data;
-  19 Oct 2026: ELY552 out of Sofia, ELY386 / ISR362 out of Rome, ELY318 out of Heathrow, SWR5MP into Zurich, WMT3PH into Milan).
+  19 Oct 2026: ELY552 out of Sofia, ELY386 / ISR362 out of Rome, ELY318 out of Heathrow, SWR5MP into Zurich, WMT3PH into Milan),
+  nor within 35 nm of where it took off in this leg (`Track.takeoff_pos`; ISR178 out of Budapest, above).
+  `routine_turn_place` judges these when the turn starts; when it is reported, 2 min later, the destination is judged
+  again (ETD238, OMAA-VOBL, began its approach turn at Bangalore just over 35 nm out and was reported at 17 nm, 22 Oct
+  2026) - not the origin: AA1009 (ORD -> LAX, 6 Oct 2026) turning back to Chicago ended its turn within 35 nm of it,
+  12 min before squawking 7700 (squawk replay: the only case of 354 that changed with both).
   Not reported either when the held new track points at the route's destination (`turned_to_destination`,
   `--toward-dest-tol`; MEA312 Beirut - Amman, 16 Oct 2026: east past Damascus, then 186 deg with Amman at 193).
   Not after the flight was seen flying its route backwards (`route_dir` -1); a route stored the wrong way round
@@ -375,7 +390,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
 - **SHARP_TURN**: implied bank angle from the turn rate and speed >= `--max-bank` (35 deg),
   everywhere including near airports. Airliners stay below ~25-30; FZ1073's U-turn was a
   normal-rate turn (~25 deg), which is why reversals and sharpness are separate alerts.
-  Positions must agree with the speeds, so GNSS glitches don't count as turns.
+  Positions must agree with the speeds, so GNSS glitches don't count as turns, and the speed must be one the
+  climb / descent angle would trust (`trusted_gs`). A light aircraft (not large, not military) faster than
+  `SMALL_MAX_KT` (600) over the ground has a bad speed: HEZ652, a Hawker 800, "134 -> 50 deg in 30 s at 728 kt
+  (~62 deg bank)" at FL190 in GPS jamming (22 Oct 2026; the same aircraft had a corrupted velocity on 6 Oct).
 - **OFF_COURSE / TURNING_BACK**: long before landing, an arrival > 60 nm out flying >= 100 deg
   away from TLV for 150 s while the distance opens, or a departure flying back toward TLV
   (within 60 deg) while closing. OFF_COURSE also covers any flight with a plausible route
@@ -497,7 +515,11 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   `--repeat-minutes` (30), not every `--cooldown` (5 min); a clearly worse reading still escalates.
   (One tanker over Israel for 75 min gave 15 alerts.) The FZ1073 replay now has one OFF_COURSE.
 - Cooldowns and link dates use the **data timestamp**, not wall-clock time.
-- Any flight that alerts becomes **followed**, so its fate stays visible.
+- Any flight that alerts becomes **followed**, so its fate stays visible - until its flight is over: a landing
+  (seen, or missed: `end_leg`) or a new callsign on the ground ends the following unless the flight is hot
+  (`Monitor.unfollow`); the board or the route data follow its next leg again if it is ours. Before, nothing ended it
+  but 3 h of silence: A6-AEO flew EY596 TLV -> AUH, then ETD238 to Bangalore still followed, and its approach turn
+  there was a "course reversal 2,594 nm E of TLV" (22 Oct 2026); 156 aircraft were followed that afternoon.
 
 ## Links in alerts (no local storage)
 
