@@ -36,7 +36,10 @@ Each alert goes through `Monitor.alert()` (cooldowns, hot flights) to `Notifier`
 `alerts.jsonl`, the `Announcer` (social-media-style post, threaded per flight, printed as a feed
 and appended to `posts.jsonl`), and ntfy / Telegram when configured. `tests/replay.py` and
 `tools/` (incident capture, turn-zone learning, `plot_alert.py`
-3D replay of an alert, `squawk_cases.py`) are support code, not part of the monitor.
+3D replay of an alert, `squawk_cases.py`, `dashboard.py` - the owner's local control page, 24 Oct 2026: start / stop
+`monitor.sh`, a run's alerts by kind, a map of one; stdlib only, 127.0.0.1, other sites' requests refused; `nightly.sh` + `daily_digest.py` + `nightly_prompt.md` -
+the 03:00 UTC restart and unattended review, fixes on a `nightly/<date>` branch, never pushed) are support code,
+not part of the monitor.
 `tools/squawk_cases.py` (17 Oct 2026): the owner wanted real emergencies to measure the checks against,
 without keeping our own list. The AeroSignals bot on Bluesky (spotterintel.bsky.social, since 11 Apr 2026,
 ~2 squawks a day; public API, no login) posts each 7700 / 7600 / 7500 a few minutes after it starts, and the

@@ -149,6 +149,20 @@ unless the flight also has an alert of another kind. Each message sent is also a
 `posts_telegram.jsonl` (`--telegram-posts`; `monitor.sh`: `posts_telegram_YYYY-MM-DD.jsonl`), `"sent": false` when Telegram refused it.
 Only one monitor runs at a time: a second one exits with an error naming the first's pid (`--lock-file`, `.flight_watch.lock`; `--once` is not checked).
 
+**Control page.** `python tools/dashboard.py` opens http://localhost:8766/ (this machine only): start / stop
+`./monitor.sh` (it keeps running when the page or the server is closed; the Telegram channel is told of each stop and
+start), its printout and log in two tabs, a run's alerts by kind (those Telegram got marked
+TG), one alert's details and links, a map of it (`tools/plot_alert.py --map`) as `tmp_map.html`, `docs/<flight>_map.html`
+or a name of your own, the flights board and a menu of useful links. Start it from a terminal that has the monitor's
+environment variables (Telegram, `RELAY_TOKEN`): a monitor started from the page gets them from it.
+
+**Nightly cycle.** `tools/nightly.sh install` sets a systemd user timer for 03:00 UTC: the monitor is restarted (new day's
+files, no Telegram notice), `tools/daily_digest.py` sums up the day that ended (`reviews/<date>_digest.md`), and an
+unattended Claude Code run (`tools/nightly_prompt.md`) judges each Telegram message, commits obvious fixes with tests on
+branch `nightly/<date>` in the worktree `../flight-watch-nightly` (nothing is pushed), and writes `reviews/<date>.md` and
+the questions for the owner in `reviews/ISSUES.md` (`reviews/` is git-ignored). To take a night's fixes:
+`git log -p main..nightly/<date>`, `git merge nightly/<date>`, then restart the monitor.
+
 A flight's later messages are replies to its first one; once it lands (or 45 min after its last message) one more
 reply sums it up: how it ended, its alerts, and a map link with the whole flight.
 
