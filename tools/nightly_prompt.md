@@ -20,7 +20,7 @@ checks are as they are; do not undo a choice it records.
    `{ROOT}/.venv/bin/python -m unittest discover -s tests` (all must pass) and, when alert logic changed, the squawk
    replay: `rm -rf tmp_squawks && cp -r {ROOT}/squawks tmp_squawks && {ROOT}/.venv/bin/python
    tools/squawk_cases.py --out tmp_squawks --standing-data {ROOT}/standing-data --redo --no-fetch && {ROOT}/.venv/bin/python
-   tools/compare_cases.py {ROOT}/squawks/cases.jsonl tmp_squawks/cases.jsonl` - any changed case means the fix is
+   {ROOT}/tools/compare_cases.py {ROOT}/squawks/cases.jsonl tmp_squawks/cases.jsonl` - any changed case means the fix is
    not obvious: revert it and make it an issue instead. At most 3 fixes a night. Do not push.
 3. Anything that needs the owner (a trade-off, a new rule, an unclear case, data you cannot get) is an issue, not a fix.
 4. Write `{ROOT}/reviews/{DATE}.md` (at most ~60 lines): the verdict per Telegram message (one line each: time,
