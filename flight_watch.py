@@ -42,7 +42,7 @@ import sys
 import time
 import collections
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -173,6 +173,17 @@ MISSED_LANDING_S, MISSED_LANDING_KT = 2400, 150
 AMM_LOCAL_NM, AMM_LOCAL_S = 40, 1200  # around_amman: within 40 nm of Amman for 20 min
 HOLDING_LOCAL_ALT = 10000  # circling lower with no route is training, not holding (check_holding)
 HOLDING_LANDING_ALT = 3000  # circling that reaches its period descending below this is a landing approach
+# Restarts (the 03:00 UTC one, the dashboard's) keep each aircraft's leg in --state: KL463 climbing out of its stop at
+# Bucharest was a "course reversal" (its take-off unseen), BZ131 landing at Rome, its origin, a DIVERSION (where it came
+# from unseen), both after the restart of 24 Oct 2026 21:45 IDT
+STATE_FIELDS = ("callsign", "reg", "actype", "category", "military", "last_msg", "followed", "follow_why", "was_airborne",
+                "max_dist", "max_alt", "alerted", "squawk", "lifeguard_at", "hot_until", "israeli", "route_dir",
+                "leg_start", "amm_dep", "mil_quiet", "mil_held", "quiet_why", "takeoff", "takeoff_pos", "climb_peak",
+                "flown_cs", "feed", "left_home", "rose_home", "orig_first", "orig_max", "orig_left", "came_from", "sent")
+TG_RETRY_S = 3  # a Telegram message that failed to connect is sent once more after this
+TAKEOFF_POS_NM = 40  # on the ground, then airborne this near after a gap of any length: took off there (takeoff_pos)
+STATE_MAX_AGE_S = 3 * 3600  # aircraft heard longer ago are not kept
+STATE_SAVE_S = 600          # also written this often while running (a crash keeps the state of a few minutes ago)
 LIFEGUARD_HOLD_S = 20  # ADS-B status "lifeguard" alerted (MEDICAL_FLIGHT) when on reports this far apart
 LIFEGUARD_NOTE_S = 6 * 3600  # ... and noted, with its time, on the flight's other alerts this long after
 TAG_DETOUR = 1.25  # a board tag stop counts when on the way: origin -> stop -> TLV at most this x the straight line
@@ -1344,8 +1355,9 @@ class Bluesky:
     def wanted(self, rec: dict, post: dict) -> bool:
         if not self.enabled or not post:
             return False
-        # a skipped kind still goes out when the flight also has another anomaly ([also: ...]), as on Telegram
-        return rec["kind"] not in self.skip or bool(rec.get("recent"))
+        # a skipped kind still goes out when the flight also has another anomaly not resting on its positions, as on
+        # Telegram (Notifier.telegram_wanted)
+        return rec["kind"] not in self.skip or bool(set(rec.get("recent") or []) - self.skip - SPOOF_KINDS)
 
     def enqueue(self, post: dict) -> None:
         self.queue.put(post)
@@ -1507,11 +1519,20 @@ class Notifier:
                 "disable_web_page_preview": True}
         if reply_to:  # (the first message deleted: sent anyway, not as a reply)
             body["reply_parameters"] = {"message_id": reply_to, "allow_sending_without_reply": True}
-        try:
-            r = self.http.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json=body)
-        except requests.RequestException as e:
-            log.error("notification failed (api.telegram.org): %s", e)
-            return None
+        for attempt in (1, 2):
+            try:
+                r = self.http.post(f"https://api.telegram.org/bot{self.tg_token}/sendMessage", json=body)
+                break
+            except requests.RequestException as e:
+                # (some errors carry the URL, which holds the token: never logged)
+                why = str(e).replace(self.tg_token, "<token>") if self.tg_token else str(e)
+                if attempt == 1 and isinstance(e, (requests.ConnectionError, requests.Timeout)):
+                    # once more: N143's follow-up was lost to "Connection reset by peer" (25 Oct 2026)
+                    log.warning("Telegram send failed (%s) - trying again", why)
+                    time.sleep(TG_RETRY_S)
+                    continue
+                log.error("notification failed (api.telegram.org): %s", why)
+                return None
         try:
             return int(r.json()["result"]["message_id"])
         except (AttributeError, ValueError, KeyError, TypeError):
@@ -1585,8 +1606,10 @@ class Notifier:
                               segments)
 
     def telegram_wanted(self, rec: dict) -> bool:
-        """--telegram-skip kinds are left out, unless the flight also did something not skipped
-        ("[also: ...]": lost contact after a dive is sent, lost contact + position jump is not)."""
+        """--telegram-skip kinds are left out, unless the flight also did something not skipped and not resting on its
+        positions ("[also: ...]": lost contact after a dive is sent; after a position jump or a course change it is not:
+        GPS jamming makes both - N143's position jump and LY844's lost contact went out after a course change, 25 Oct
+        2026)."""
         if rec["kind"] == "GPS_SPOOFING":
             # jamming / spoofing is an every-day condition here, not news: the start of an episode,
             # at most one in TG_SPOOF_S, and never the summary at its end
@@ -1598,7 +1621,7 @@ class Notifier:
         if rec["kind"] not in self.tg_skip:
             return True
         also = re.search(r"\[also: ([^\]]+)\]", rec["message"])
-        return bool(also and {k.strip() for k in also.group(1).split(",")} - self.tg_skip)
+        return bool(also and {k.strip() for k in also.group(1).split(",")} - self.tg_skip - SPOOF_KINDS)
 
     @staticmethod
     def telegram_text(segments: list) -> str:
@@ -1634,6 +1657,7 @@ class Monitor:
         self.wall = time.time
         self.tracks: dict[str, Track] = {}
         self.rides = self.past_rides()
+        self.state_saved = -1e12  # wall time --state was last written
         self.aero_at = -1e12             # wall time AeroSignals' posts were last read
         self.aero_pending: dict = {}     # post uri -> its squawk case, while we look for the aircraft
         self.aero_seen = self.past_aero()  # post ids already announced, or post uris read
@@ -2219,6 +2243,12 @@ class Monitor:
             t.lost = False
             if t.lost_alerted:
                 self.alert(t, "CONTACT_RESTORED", f"heard again at {s.alt} ft")
+        if (t.followed and not t.lost and d > a.radius and kind not in CONFIRMED
+                and t.alerted and {k.split(":")[0] for k in t.alerted} <= {"LOST_CONTACT", "CONTACT_RESTORED"}):
+            # followed only for a lost contact, heard again and gone from our circle, not ours: QR1436 (no route) lost
+            # over Sinai, then its approach turn at Doha was a "course reversal 979 nm E of TLV"; NJE417A's at
+            # Rotterdam the same (25 Oct 2026)
+            self.unfollow(t, "back in contact and out of the circle, not our airport's")
         if (s.on_ground or (s.alt or 0) < 3000) and nearest_airport(s.lat, s.lon, israeli=True)[1] < 8:
             t.israeli = True
         if ((s.on_ground or (s.alt or 0) < 3000) and d < 8
@@ -2240,6 +2270,10 @@ class Monitor:
             t.takeoff, t.climb_peak = s.t, s.alt or 0
             t.rose_home = d < 15
             t.takeoff_pos = (prev.lat, prev.lon) if prev is not None and prev.on_ground else (s.lat, s.lon)
+        elif (not s.on_ground and not t.takeoff_pos and prev is not None and prev.on_ground
+              and haversine_nm(prev.lat, prev.lon, s.lat, s.lon) <= TAKEOFF_POS_NM):
+            # took off there, when is unknown (a gap in our polls, a restart): its departure routing all the same
+            t.takeoff_pos = (prev.lat, prev.lon)
         self.check_emergency(t, ac)
         self.check_skydive(t)  # before check_vrate, so the dive's alert says what it is
         self.check_vrate(t)
@@ -2471,6 +2505,10 @@ class Monitor:
             return
         gs = self.trusted_gs(t)
         angle = path_angle(s.vrate, gs) if gs else None
+        if t.military and s.mlat:
+            # a military aircraft on MLAT positions: only --vrate. USAF tankers (K35R x2, KC-46) descending into TLV
+            # at -3,800 to -4,900 ft/min were "-15 to -20 deg" from MLAT speeds, 3 Telegram messages (24-25 Oct 2026)
+            angle = None
         apt, ad = nearest_airport(s.lat, s.lon)
         terminal = ad <= a.terminal_radius and s.alt < a.terminal_alt
         if (not terminal and s.alt < a.terminal_alt and s.vrate > 0 and angle is not None
@@ -2719,6 +2757,60 @@ class Monitor:
         else:
             log.info("%s skydiving lift %d: %s, %.0f kt at %d ft, descending at %d ft",
                      t.label(), t.skydive_lifts, model, slow, top, s.alt)
+
+    def save_state(self, periodic: bool = False) -> None:
+        """Each aircraft heard within STATE_MAX_AGE_S: its leg (STATE_FIELDS) and last report, for the next start.
+        A few KB, overwritten each time; nothing kept once the aircraft is that old."""
+        now = self.wall()
+        if not self.args.state or periodic and now - self.state_saved < STATE_SAVE_S:
+            return
+        self.state_saved = now
+        tracks = {}
+        for h, t in self.tracks.items():
+            if t.last is None or now - t.last_msg > STATE_MAX_AGE_S:
+                continue
+            rec = {f: getattr(t, f) for f in STATE_FIELDS}
+            rec["alerted"] = {k: list(v) for k, v in t.alerted.items()}
+            rec["sent"], rec["mil_held"] = list(t.sent), list(t.mil_held)
+            rec["last"] = asdict(t.last)
+            tracks[h] = rec
+        try:
+            tmp = self.args.state + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"saved": now, "tracks": tracks}, f)
+            os.replace(tmp, self.args.state)
+            log.debug("state of %d aircraft written to %s", len(tracks), self.args.state)
+        except OSError as e:
+            log.warning("could not write %s: %s", self.args.state, e)
+
+    def load_state(self) -> None:
+        """The legs the last run saved (save_state). The aircraft start as lost (silent through the restart: its
+        silence was not seen to begin, so it is not alerted) and keep their leg, follows, cooldowns and map alerts."""
+        if not self.args.state or not os.path.exists(self.args.state):
+            return
+        try:
+            with open(self.args.state, encoding="utf-8") as f:
+                data = json.load(f)
+            now, n = self.wall(), 0
+            for h, rec in data.get("tracks", {}).items():
+                if now - rec.get("last_msg", 0) > STATE_MAX_AGE_S or h in self.tracks:
+                    continue
+                t = Track(h)
+                for f in STATE_FIELDS:
+                    if f in rec:
+                        setattr(t, f, rec[f])
+                t.alerted = {k: tuple(v) for k, v in rec.get("alerted", {}).items()}
+                t.sent = deque((tuple(x) for x in rec.get("sent", [])), maxlen=MAP_ALERTS)
+                t.mil_held = [tuple(x) for x in rec.get("mil_held", [])]
+                t.takeoff_pos = tuple(t.takeoff_pos) if t.takeoff_pos else None
+                t.samples.append(Sample(**rec["last"]))
+                t.lost = True
+                self.tracks[h] = t
+                n += 1
+            log.info("state of %d aircraft read from %s (saved %.0f min ago)", n, self.args.state,
+                     (now - data.get("saved", now)) / 60)
+        except (OSError, ValueError, TypeError, KeyError) as e:
+            log.warning("could not read %s: %s - starting without it", self.args.state, e)
 
     def past_rides(self) -> dict:
         """hex -> the skydiving state of each ride already announced in --jsonl (monitor.sh: today's file),
@@ -4043,6 +4135,8 @@ def parse_args(argv=None):
                         "repeated this rarely instead of every --cooldown")
     g = p.add_argument_group("notifications")
     g.add_argument("--jsonl", default="alerts.jsonl", help="append alerts here ('' to disable)")
+    g.add_argument("--state", default="", help="keep each aircraft's leg here across restarts (written at exit and "
+                   "every 10 min, read at start; '' = off)")
     g.add_argument("--posts", default="posts.jsonl",
                    help="append announcements (social-media style posts, threaded per flight) here")
     g.add_argument("--announce-min-priority", type=int, default=3,
@@ -4160,6 +4254,7 @@ def main(argv=None) -> None:
                 airline_map.update({k.upper(): v.upper() for k, v in json.load(f).items()})
         schedule = Schedule(http, airline_map, args.schedule_refresh, args.schedule_window)
     monitor = Monitor(args, Notifier(args, http), http, schedule)
+    monitor.load_state()
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     log.info("watching %s (%s) r=%.0fnm every %.0fs via %s",
@@ -4170,6 +4265,14 @@ def main(argv=None) -> None:
                 "Telegram on" + (", without " + ", ".join(sorted(tg.tg_skip)) if tg.tg_skip else ""))
     log.info(telegram)
     local_host = PROVIDERS[args.provider]["base"].split("/")[2]
+    try:
+        run(args, monitor, http, local_host, telegram)
+    finally:
+        monitor.save_state()
+
+
+def run(args, monitor: "Monitor", http: Http, local_host: str, telegram: str) -> None:
+    """The poll loop (main)."""
     backoff, counted = 0.0, False
     while True:
         started = time.monotonic()
@@ -4187,6 +4290,7 @@ def main(argv=None) -> None:
                 print(f"{time.strftime('%H:%M:%S')}  watching {args.airport}: {st['local']} aircraft within "
                       f"{args.radius:.0f} nm, {st['scheduled']} scheduled flights; {telegram}", flush=True)
             backoff = 0.0
+            monitor.save_state(periodic=True)
         except Throttled as e:
             # Cooling down after a 429: skip this cycle's local poll but keep the --interval
             # cadence; the Budget's jittered cooldown decides when requests resume.

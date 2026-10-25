@@ -9,4 +9,4 @@ cd "$(dirname "$0")" || exit 1
 D=$(date +%F)
 exec .venv/bin/python flight_watch.py --jsonl "alerts_$D.jsonl" --posts "posts_$D.jsonl" \
     --telegram-posts "posts_telegram_$D.jsonl" --log-file "flight_watch_$D.log" \
-    --telegram-to "$SENDTO" "$@"
+    --telegram-to "$SENDTO" --state flight_watch_state.json "$@"

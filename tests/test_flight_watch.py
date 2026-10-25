@@ -1076,6 +1076,71 @@ class EmergencyStatusTests(unittest.TestCase):
         self.assertEqual(got, {"held": ["MEDICAL_FLIGHT"], "lone": [], "general": ["EMERGENCY"]})
 
 
+class RestartStateTests(unittest.TestCase):
+    """The restart of 24 Oct 2026 21:45 IDT: KL463 on the ground at Bucharest (its stop) climbed out after it and its
+    departure turn was a "course reversal"; BZ131 landed at Rome, its origin, and was a DIVERSION (where it came from,
+    seen before the restart, was lost). --state keeps each aircraft's leg."""
+
+    def test_leg_survives_a_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path_ = os.path.join(tmp, "state.json")
+            mon, feed, clock, alerts = make(["--state", path_])
+            fly(mon, feed, clock, "4d21e6", path(41.0, 13.0, [300] * 6, [20000] * 6),
+                flight="BBG131", r="9H-KAR", t="B738")
+            t = mon.tracks["4d21e6"]
+            t.came_from, t.orig_first, t.followed = True, 120.0, True
+            t.alerted["COURSE_CHANGE"] = (clock(), 80)
+            mon.save_state()
+            mon2, feed2, clock2, alerts2 = make(["--state", path_])
+            clock2.t = clock.t + 300
+            mon2.load_state()
+            t2 = mon2.tracks["4d21e6"]
+            self.assertEqual((t2.callsign, t2.came_from, t2.orig_first, t2.followed, t2.lost),
+                             ("BBG131", True, 120.0, True, True))
+            self.assertEqual(t2.alerted["COURSE_CHANGE"], t.alerted["COURSE_CHANGE"])
+            self.assertEqual(t2.last, t.last)
+            last = t.last  # heard again: no lost contact nor "restored" for the restart's silence
+            fly(mon2, feed2, clock2, "4d21e6", path(last.lat, last.lon, [300] * 6, [20000] * 6),
+                flight="BBG131", r="9H-KAR", t="B738")
+            self.assertEqual(kinds(alerts2, "4d21e6"), [])
+            clock2.t += fw.STATE_MAX_AGE_S + 3600  # too old: not read
+            mon3 = make(["--state", path_])[0]
+            mon3.clock = mon3.wall = clock2
+            mon3.load_state()
+            self.assertNotIn("4d21e6", mon3.tracks)
+
+    def test_take_off_after_a_gap_is_its_departure_routing(self):
+        """On the ground at Bucharest, then (after a restart or refused polls) first heard again climbing 15 nm out."""
+        mon, feed, clock, alerts = make()
+        ident = dict(flight="KLM463", r="PH-BXR", t="B739")
+        fly(mon, feed, clock, "48418c", [dict(lat=44.5711, lon=26.0850, alt_baro="ground", gs=5, track=90)] * 3,
+            **ident)
+        clock.t += 1800
+        fly(mon, feed, clock, "48418c", path(44.70, 25.80, [150] * 3, [12000, 12400, 12800]), **ident)
+        self.assertEqual(mon.tracks["48418c"].takeoff_pos, (44.5711, 26.0850))
+        self.assertEqual(mon.tracks["48418c"].takeoff, 0.0)  # when, unknown: no EARLY_DESCENT from it
+
+
+class LostOnlyFollowTests(unittest.TestCase):
+    def test_followed_for_a_lost_contact_only_ends_out_of_the_circle(self):
+        """QR1436 (no route) lost contact over Sinai, stayed followed, and its approach turn at Doha 2 h later was a
+        "course reversal 979 nm E of TLV" (25 Oct 2026). Followed for another alert: still followed."""
+        got = {}
+        for kinds_ in (("LOST_CONTACT", "CONTACT_RESTORED"), ("LOST_CONTACT", "COURSE_CHANGE")):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            ident = dict(flight="QTR1436", r="A7-ALA", t="A359")
+            fly(mon, feed, clock, "06a0a1", path(31.0, 33.0, [250] * 3, [37000] * 3, gs=480), **ident)
+            t = mon.tracks["06a0a1"]
+            t.followed, t.follow_why = True, "LOST_CONTACT"
+            t.alerted = {k: (clock() - 600, 0) for k in kinds_}
+            last = t.last
+            feed.local.discard("06a0a1")
+            fly(mon, feed, clock, "06a0a1", path(last.lat, last.lon, [250] * 100, [37000] * 100, gs=480),
+                local=False, **ident)
+            got[kinds_[1]] = (fw.haversine_nm(t.last.lat, t.last.lon, 32.0114, 34.8867) > 150, t.followed)
+        self.assertEqual(got, {"CONTACT_RESTORED": (True, False), "COURSE_CHANGE": (True, True)})
+
+
 class LifeguardNoteTests(unittest.TestCase):
     def test_lone_lifeguard_report_is_noted_on_a_later_alert(self):
         """The owner: a lone lifeguard report need not alert, but a later alert on the flight (a diversion) must say
@@ -1589,6 +1654,19 @@ class MlatSpeedTests(unittest.TestCase):
         self.assertIn("MLAT position: speed from its positions", hits[0]["message"])
 
 
+    def test_military_on_mlat_is_judged_by_rate_only(self):
+        """USAF tankers into TLV, -3,800 to -4,900 ft/min, were "-15 to -20 deg" from MLAT speeds (24-25 Oct 2026).
+        A military aircraft on MLAT positions alerts only at --vrate; others keep the angle."""
+        got = {}
+        for mil in (1, 0):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            n = 30
+            states = path(32.65, 34.45, [215] * n, [30000] * 12 + [30000 - 850 * i for i in range(n - 12)], gs=250)
+            states = [{**st, "type": "mlat", "mlat": ["lat", "lon", "gs"]} for st in states]
+            fly(mon, feed, clock, "ae01ce", states, flight="QID61" if mil else "TST001", r="", t="K35R", dbFlags=mil)
+            got[mil] = "VERTICAL_RATE" in kinds(alerts)
+        self.assertEqual(got, {1: False, 0: True})
+
 class StandingDataTests(unittest.TestCase):
     def test_airline_name_and_flight_number_in_alerts(self):
         """An airline missing from AIRLINE_ICAO still gets its name and IATA number from the list."""
@@ -1821,6 +1899,29 @@ class AnnouncerTests(unittest.TestCase):
                          time="2026-09-30T12:00:00Z", **kw))
         self.assertEqual(len(http.calls), 2)
 
+    def test_telegram_send_is_tried_again_after_a_connection_reset(self):
+        """N143's follow-up was lost to "Connection reset by peer" (25 Oct 2026). Tried once more; the token, which
+        is in the URL, never reaches the log."""
+        class Flaky:
+            def __init__(self, fails):
+                self.fails, self.calls = fails, 0
+
+            def post(self, url, **kw):
+                self.calls += 1
+                if self.calls <= self.fails:
+                    raise requests.ConnectionError(f"reset while sending to {url}")
+                return FakeResponse(200, {"ok": True, "result": {"message_id": 7}})
+        args = fw.parse_args(["--jsonl", "", "--posts", "", "--turn-zones", "", "--telegram-posts", ""])
+        got = {}
+        for fails in (1, 2):
+            http = Flaky(fails)
+            with mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "123:SECRET", "TELEGRAM_CHAT_ID": "@c"}):
+                n = fw.Notifier(args, http, fw.Announcer(args, out=lambda text: None), console=lambda text: None)
+            with mock.patch.object(fw.time, "sleep"), self.assertLogs(fw.log, "WARNING") as logs:
+                got[fails] = (n.telegram([{"text": "hello"}]), http.calls)
+            self.assertNotIn("SECRET", "\n".join(logs.output))
+        self.assertEqual(got, {1: (7, 2), 2: (None, 2)})
+
     def test_telegram_skips_common_kinds_and_sends_the_post_wording(self):
         class Sent:
             def __init__(self):
@@ -1838,6 +1939,9 @@ class AnnouncerTests(unittest.TestCase):
         n.send(alert_rec("LOST_CONTACT", "silent 124s; last 5875 ft, 56 nm from TLV, track 165 deg", **kw))
         n.send(alert_rec("CONTACT_RESTORED", "heard again after 300s", **kw))
         n.send(alert_rec("POSITION_JUMP", "90.0 nm in 20s (~16200 kt) [also: LOST_CONTACT]", **kw))
+        # a course change rests on positions too (GPS jamming: N143, LY844, 25 Oct 2026)
+        n.send(alert_rec("LOST_CONTACT", "silent 61s; last 8000 ft, track 310 deg [also: COURSE_CHANGE]", **kw))
+        n.send(alert_rec("POSITION_JUMP", "23.8 nm in 19s (~4500 kt) [also: COURSE_CHANGE]", **kw))
         self.assertEqual(http.calls, [])
         n.send(alert_rec("LOST_CONTACT", "silent 124s; last 5875 ft, track 165 deg [also: VERTICAL_RATE]",
                          route_text="A <-> B", **kw))

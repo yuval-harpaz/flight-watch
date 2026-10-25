@@ -8,7 +8,8 @@ Start it from a terminal whose environment has the monitor's variables (TELEGRAM
 monitor started from the page inherits them. It runs `./monitor.sh` in its own session, so closing the
 page or stopping this server leaves it running; "stop" sends it SIGTERM (as Ctrl+C, a clean exit). Both
 tell the Telegram channel (TELEGRAM_BOT_TOKEN, and TELEGRAM_CHANNEL_ID or with SENDTO=chat TELEGRAM_CHAT_ID), so
-subscribers know when alerts stop and resume. Tabs show the monitor's printout and its log.
+subscribers know when alerts stop and resume - only when it stays stopped longer than QUIET_S (10 s): a stop and a start
+straight after (a restart for a code change) tell nobody. Tabs show the monitor's printout and its log.
 Maps are made by `tools/plot_alert.py --map` and open in the browser by themselves. Only this machine can
 reach the page (127.0.0.1), and requests from other sites' pages are refused. Standard library only.
 """
@@ -177,9 +178,29 @@ def telegram(text: str) -> str:
         return "Telegram not reached"
 
 
+QUIET_S = 10  # stopped this long before the channel hears of it (the owner: no messages for a quick restart)
+DOWN = {"timer": None, "told": False}  # a stop's pending notice, and whether the channel was told of the stop
+DOWN_LOCK = threading.Lock()
+
+
+def tell_down() -> None:
+    with DOWN_LOCK:
+        if DOWN["timer"] is None or monitor_proc():
+            return
+        DOWN["timer"] = None
+        DOWN["told"] = "Telegram told" == telegram("🔴 flight-watch is stopped for maintenance: no alerts until it is "
+                                                     "running again (a message will say so).")
+
+
 def start(notify: bool = True) -> str:
     if monitor_proc():
         return "already running"
+    with DOWN_LOCK:  # back within QUIET_S: the stop's notice is not sent, and no "running again" either
+        pending, DOWN["timer"] = DOWN["timer"], None
+        if pending:
+            pending.cancel()
+        told, DOWN["told"] = DOWN["told"], False
+    notify = notify and (told or not pending)
     console = open(CONSOLE, "ab")
     console.write(f"--- started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
     console.flush()
@@ -190,7 +211,7 @@ def start(notify: bool = True) -> str:
         time.sleep(0.2)
         if monitor_proc():
             return "started" + ("; " + telegram("🟢 flight-watch is running again: alerts on TLV flights resume.")
-                                if notify else "")
+                                if notify else "; back within 10 s: Telegram not told" if pending else "")
     return "did not start - see the Monitor tab"
 
 
@@ -202,8 +223,15 @@ def stop(notify: bool = True) -> str:
     for _ in range(50):
         time.sleep(0.2)
         if not monitor_proc():
-            return "stopped" + ("; " + telegram("🔴 flight-watch is stopped for maintenance: no alerts until it is "
-                                                "running again (a message will say so).") if notify else "")
+            if not notify:
+                return "stopped"
+            with DOWN_LOCK:
+                if DOWN["timer"]:
+                    DOWN["timer"].cancel()
+                DOWN["timer"] = threading.Timer(QUIET_S, tell_down)
+                DOWN["timer"].daemon = True
+                DOWN["timer"].start()
+            return f"stopped; Telegram is told if it is still stopped in {QUIET_S} s"
     return "still stopping"
 
 

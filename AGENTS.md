@@ -37,7 +37,7 @@ Each alert goes through `Monitor.alert()` (cooldowns, hot flights) to `Notifier`
 and appended to `posts.jsonl`), and ntfy / Telegram when configured. `tests/replay.py` and
 `tools/` (incident capture, turn-zone learning, `plot_alert.py`
 3D replay of an alert, `squawk_cases.py`, `dashboard.py` - the owner's local control page, 24 Oct 2026: start / stop
-`monitor.sh`, a run's alerts by kind, a map of one; stdlib only, 127.0.0.1, other sites' requests refused; `nightly.sh` + `daily_digest.py` + `nightly_prompt.md` -
+`monitor.sh` - Telegram told only when it stays stopped > 10 s, so a restart for a code change sends nothing (25 Oct 2026) -, a run's alerts by kind, a map of one; stdlib only, 127.0.0.1, other sites' requests refused; `nightly.sh` + `daily_digest.py` + `nightly_prompt.md` -
 the 03:00 UTC restart and unattended review, fixes on a `nightly/<date>` branch, never pushed) are support code,
 not part of the monitor.
 `tools/squawk_cases.py` (17 Oct 2026): the owner wanted real emergencies to measure the checks against,
@@ -318,6 +318,8 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   positions over 1-3 min, and the alert says so. One set of limits for all (the owner: the simpler the
   better); alerts on military and on light / private aircraft carry a note that steep profiles are common
   there (4 of the 15 VERTICAL_RATE alerts on disk: GLF5 x2, C295, P750).
+  A military aircraft on an MLAT position is judged by `--vrate` only (no angle; 25 Oct 2026, the owner's choice): USAF
+  tankers (K35R x2, KC-46) descending into TLV at -3,800 to -4,900 ft/min were "-15 to -20 deg", 3 Telegram messages.
   A military aircraft (large too, since 20 Oct 2026) gets one alert of any kind, then only EMERGENCY until
   `MILITARY_QUIET_S` (2 h) after the last alert it would have had (`Track.mil_quiet`; those are kept in
   `Track.mil_held`, once per cooldown), and a Telegram follow-up as a reply when it lands or has been silent
@@ -535,6 +537,15 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   (`Monitor.unfollow`); the board or the route data follow its next leg again if it is ours. Before, nothing ended it
   but 3 h of silence: A6-AEO flew EY596 TLV -> AUH, then ETD238 to Bangalore still followed, and its approach turn
   there was a "course reversal 2,594 nm E of TLV" (22 Oct 2026); 156 aircraft were followed that afternoon.
+  Nor does an aircraft followed only for a lost contact (its alerts LOST_CONTACT / CONTACT_RESTORED, not ours by board or
+  route) stay followed once heard again outside `--radius`: QR1436 (no route), lost over Sinai, made a "course reversal
+  979 nm E of TLV" on approach to Doha 2 h later, NJE417A another at Rotterdam (25 Oct 2026).
+- **Restarts** keep each aircraft's leg (`--state`, `STATE_FIELDS`; monitor.sh: `flight_watch_state.json`, git-ignored):
+  written at exit and every `STATE_SAVE_S` (10 min), aircraft heard within `STATE_MAX_AGE_S` (3 h), read at start as lost
+  (silent through the restart: not alerted). The owner chose this small, overwritten file (25 Oct 2026): the restart of 24
+  Oct 21:45 IDT lost KL463's take-off from its stop at Bucharest (its departure turn a "course reversal") and where BZ131
+  came from (its landing at Rome, its origin, a DIVERSION). Also: on the ground, then airborne within `TAKEOFF_POS_NM` (40)
+  after a gap of any length, sets `takeoff_pos` (its departure routing) but not `takeoff` (when is unknown).
 
 ## Links in alerts (no local storage)
 
@@ -548,7 +559,8 @@ placed at the alert; a live link opened later shows whatever the aircraft flies 
 days than airplanes.live, which showed "No data". Tapping an ntfy notification opens live ADSBx.
 Telegram gets the post's wording as HTML (`Notifier.telegram_text`), without `--telegram-skip` kinds
 (LOST_CONTACT, CONTACT_RESTORED, POSITION_JUMP: 355 of 429 alerts in the run of 10-11 Oct 2026; GPS_DEGRADED) unless
-the message's `[also: ...]` names another kind; 83 of the 429 would have been sent. Jamming / spoofing is daily here:
+the message's `[also: ...]` names another kind - not one resting on positions (`SPOOF_KINDS`; 25 Oct 2026, GPS jamming:
+N143's position jump and LY844's lost contact went out after a course change); 83 of the 429 would have been sent. Jamming / spoofing is daily here:
 NIC 0 is the aircraft saying it does not trust its GPS, while it flies on inertial and its track looks normal (16 Oct
 2026: an episode near Amman went out as a start and an end with nothing to see on the map). So GPS_DEGRADED is skipped,
 and GPS_SPOOFING sends one start in `TG_SPOOF_S` (6 h) and never an end; all stay in the files. MASS_SILENCE is
@@ -556,7 +568,8 @@ skipped too (18 Oct 2026: 9 of 66 messages, nothing to see on a map, mostly whil
 TOWARD_ISRAEL (19 Oct 2026, the owner's wish; still checked, logged and in the files).
 `--telegram-to chat|channel` picks `TELEGRAM_CHAT_ID` (default) or `TELEGRAM_CHANNEL_ID` (the public, read-only
 channel); `monitor.sh` sets it from `SENDTO` (channel).
-Each message is also appended to `--telegram-posts` (`posts_telegram.jsonl`, with `sent`), apart from `posts.jsonl`. **Threads** (20 Oct 2026, IZ992 JFK -> TLV, 7700: three
+A send that fails to connect is tried once more after `TG_RETRY_S` (3 s; N143's follow-up was lost to a connection
+reset, 25 Oct 2026); the token is never logged. Each message is also appended to `--telegram-posts` (`posts_telegram.jsonl`, with `sent`), apart from `posts.jsonl`. **Threads** (20 Oct 2026, IZ992 JFK -> TLV, 7700: three
 messages in two minutes, each map showing only the track flown by then; the owner: post early, then integrate): a flight's
 later messages reply to its first (`Notifier.tg_threads`, rebuilt from `--telegram-posts` at start: `message_id`, `reply_to`),
 and `Monitor.telegram_followups` sends one reply, `FOLLOW_UP`, when it lands or `TG_FOLLOWUP_S` (45 min) after its last

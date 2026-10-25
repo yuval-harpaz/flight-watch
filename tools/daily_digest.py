@@ -58,11 +58,18 @@ def log_lines(start: datetime, end: datetime) -> list[tuple[datetime, str]]:
         if datetime.fromtimestamp(os.path.getmtime(path), timezone.utc) < start:
             continue
         with open(path, encoding="utf-8", errors="replace") as f:
+            prev = None
             for line in f:
                 try:  # the log's times are the machine's local time
-                    t = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S").astimezone(timezone.utc)
+                    naive = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S")
                 except ValueError:
                     continue
+                t = naive.astimezone(timezone.utc)
+                if prev and t < prev - timedelta(minutes=5):
+                    # the hour repeated when summer time ends (02:00 IDT -> 01:00 IST): the second time round,
+                    # read on from the line before - it was a "gap" of an hour (25 Oct 2026)
+                    t = naive.replace(fold=1).astimezone(timezone.utc)
+                prev = t
                 if start <= t < end:
                     out.append((t, line[20:].rstrip()))
     return sorted(out)
