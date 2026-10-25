@@ -4,7 +4,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://unpkg.com/deck.gl@9.1.14/dist.min.js"></script>
 <script src="https://unpkg.com/@loaders.gl/terrain@4.2.1/dist/dist.min.js"></script>
-<script src="flightboard.js?v=19e1fd9e"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
+<script src="flightboard.js?v=bd95c33c"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
 <style>
 html,body{margin:0;height:100%;font-family:sans-serif;color:#222;background:#fff}
 body{display:flex;flex-direction:column}
@@ -698,8 +698,8 @@ function draw() {
       if (skip && skip.has(k + d.kind)) continue;
       at.set(k, {pos: d.pos, text: at.has(k) ? at.get(k).text + "\n" + d.kind : d.kind});
     }
-    return new deck.TextLayer({id, data: [...at.values()], getPosition: d => d.pos, getText: d => d.text, getSize: 11,
-      getTextAnchor: "start", getAlignmentBaseline: dy < 0 ? "bottom" : "top", getPixelOffset: [12, dy], getColor: color, fontSettings: {sdf: true},
+    return new deck.TextLayer({id, data: [...at.values()], getPosition: d => d.pos, getText: d => d.text, getSize: 13,
+      fontWeight: "bold", getTextAnchor: "start", getAlignmentBaseline: dy < 0 ? "bottom" : "top", getPixelOffset: [12, dy], getColor: color, fontSettings: {sdf: true},
       outlineWidth: 4, outlineColor: [255, 255, 255, 230], updateTriggers: {getPosition: Z}});
   };
   const label = ac ? `${String(ac.flight || ac.hex).trim()} ${ac.alt_baro === "ground" ? "ground" : Math.round((ac.alt_baro || 0) * FB.M) + " m"}`
@@ -719,10 +719,10 @@ function draw() {
     new deck.PathLayer({id: "shadow" + TERRAIN, data: trail.length > 1 ? [{path: trail.map(p => [p.lon, p.lat])}] : [],
       getPath: d => d.path, getColor: [60, 60, 60, 90], widthMinPixels: 1, ...onGround()}),
     new deck.PathLayer({id: "trail", data: paths.filter(p => p.length > 1).map(path => ({path})),
-      getPath: d => d.path, getColor: [31, 111, 178, 230], widthUnits: "pixels", getWidth: 5,
+      getPath: d => d.path, getColor: [31, 111, 178, 230], widthUnits: "pixels", getWidth: 5, billboard: true,
       updateTriggers: {getPath: [Z, path3.length, segs.length]}}),
     new deck.PathLayer({id: "segments", data: segData, pickable: true, getPath: d => d.path, getColor: d => d.color,
-      widthUnits: "pixels", getWidth: d => d.width + 1, widthMinPixels: 2, updateTriggers: {getPath: Z}}),
+      widthUnits: "pixels", getWidth: d => d.width + 1, widthMinPixels: 2, billboard: true, updateTriggers: {getPath: Z}}),
     new deck.LineLayer({id: "drop", data: pos && pos[2] > 0 ? [{a: [pos[0], pos[1], 0], b: pos}] : [],
       getSourcePosition: d => d.a, getTargetPosition: d => d.b, getColor: [220, 60, 40, 150], getWidth: 1}),
     new deck.LineLayer({id: "ahead", data: ahead, getSourcePosition: d => d.a, getTargetPosition: d => d.b,
@@ -740,8 +740,8 @@ function draw() {
       getLineColor: [0, 128, 128], lineWidthMinPixels: 3, radiusMinPixels: 10, updateTriggers: {getPosition: Z}}),
     new deck.ScatterplotLayer({id: "sent", data: sent, getPosition: d => d.pos, pickable: true, getFillColor: [240, 140, 0],
       stroked: true, getLineColor: [255, 255, 255], lineWidthMinPixels: 2, radiusMinPixels: 6, updateTriggers: {getPosition: Z}}),
-    labels(sent, "sent-labels", [160, 80, 0], -2),
-    labels(anal, "analysis-labels", [0, 95, 95], 2, sentAt),
+    labels(sent, "sent-labels", [130, 55, 0], -2),
+    labels(anal, "analysis-labels", [0, 80, 80], 2, sentAt),
     new deck.ScatterplotLayer({id: "plane", data: pos ? [{p: pos, tip: label}] : [], getPosition: d => d.p, pickable: true,
       getFillColor: [220, 60, 40], stroked: true, getLineColor: [255, 255, 255], lineWidthMinPixels: 2, radiusMinPixels: 7}),
     new deck.TextLayer({id: "plane-label", data: pos ? [{p: pos}] : [], getPosition: d => d.p, getText: () => label,

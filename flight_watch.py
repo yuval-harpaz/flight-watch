@@ -133,7 +133,7 @@ PRIORITY = {"EMERGENCY": 5, "LOST_CONTACT": 5, "DIVERSION": 5, "TOWARD_ISRAEL": 
             "RETURNED": 4, "TURNING_BACK": 4, "VERTICAL_RATE": 4, "SHARP_TURN": 4,
             "COURSE_CHANGE": 4, "HOLDING": 4, "POSITION_JUMP": 3, "GPS_SPOOFING": 3, "MASS_SILENCE": 3,
             "GPS_DEGRADED": 3, "SKYDIVE_PATTERN": 5, "ALTITUDE_WOBBLE": 5, "EARLY_DESCENT": 5,
-            "CONTACT_RESTORED": 2}
+            "CONTACT_RESTORED": 2, "MEDICAL_FLIGHT": 3}
 # kinds that describe abnormal flying; two different ones on one flight within --hot-minutes
 # are reported as a pattern (priority 5)
 ANOMALIES = {"EMERGENCY", "LOST_CONTACT", "DIVERSION", "TOWARD_ISRAEL", "OFF_COURSE", "TURNING_BACK",
@@ -173,6 +173,9 @@ MISSED_LANDING_S, MISSED_LANDING_KT = 2400, 150
 AMM_LOCAL_NM, AMM_LOCAL_S = 40, 1200  # around_amman: within 40 nm of Amman for 20 min
 HOLDING_LOCAL_ALT = 10000  # circling lower with no route is training, not holding (check_holding)
 HOLDING_LANDING_ALT = 3000  # circling that reaches its period descending below this is a landing approach
+LIFEGUARD_HOLD_S = 20  # ADS-B status "lifeguard" alerted (MEDICAL_FLIGHT) when on reports this far apart
+LIFEGUARD_NOTE_S = 6 * 3600  # ... and noted, with its time, on the flight's other alerts this long after
+TAG_DETOUR = 1.25  # a board tag stop counts when on the way: origin -> stop -> TLV at most this x the straight line
 DIVERTED_NM = 30  # a departure on the ground this far from its destination landed elsewhere (check_landing)
 BLIND_S = 180  # no answered local poll for this long after an aircraft's last report: we did not see it go
 TAKEOFF_MAX_GAP_S, TAKEOFF_MAX_ALT = 180, 10000  # a take-off is seen: ground, then airborne within 3 min, low
@@ -768,6 +771,7 @@ class SchedFlight:
     codeshares: tuple = ()         # other flight numbers on the same physical flight
     callsigns: tuple = ()          # searched first (operating carrier, best guess)
     alt_callsigns: tuple = ()      # codeshare callsigns, searched only as a fallback
+    stop: str = ""                 # an arrival's probable stop on the way (IATA; Schedule.tag_stops)
 
     def route(self, home: str) -> str:
         return (f"{self.flight} {self.other}->{home}" if self.direction == "ARR"
@@ -791,6 +795,9 @@ class Track:
     sched: SchedFlight | None = None
     alerted: dict = field(default_factory=dict)      # key -> (time, severity)
     squawk: str = ""
+    em_status: str = ""      # the last ADS-B emergency status (check_emergency)
+    em_since: float = 0.0    # data time it began
+    lifeguard_at: float = 0.0  # data time this flight first reported ADS-B status lifeguard (noted on its alerts)
     category: str = ""     # ADS-B emitter category, e.g. A1 = light aircraft
     last_query: float = 0.0  # server time we last asked a remote feed for this hex and got an answer
     hot_until: float = 0.0   # data time until which the flight is "hot" (alerted recently)
@@ -1058,10 +1065,39 @@ class Schedule:
             flights.append(sf)
             for cs in sf.callsigns + sf.alt_callsigns:
                 out[cs] = sf
+        self.tag_stops(records, flights)
         self.by_callsign, self.flights = out, flights
         log.info("flight board: %d active flights (%d with codeshares, %d callsign variants)%s",
                  len(flights), sum(bool(f.codeshares) for f in flights), len(out),
                  f"; unmapped airlines: {', '.join(sorted(unmapped))}" if unmapped else "")
+
+    def tag_stops(self, records: list[dict], flights: list[SchedFlight]) -> None:
+        """An arrival's next number leaving within 6 h for an airport the airline never flies in from names its
+        stop on the way: KL463 AMS -> TLV, KL464 TLV -> OTP, and KL463 landed at Bucharest - a DIVERSION
+        (24 Oct 2026); KL461 / KL462 -> LCA the week before, when it stopped at Larnaca. The route data lists
+        only the stop it had once (EHAM-LCLK-LLBG). An ordinary rotation (LY318 from LHR, LY319 to CDG) is not
+        one: El Al flies in from Paris too. `Monitor.planned_stop` also wants the stop on the way."""
+        def num(r):
+            return str(r.get("CHFLTN") or "").strip().lstrip("0")
+        inbound, out = set(), {}
+        for r in records:
+            op, loc = str(r.get("CHOPER") or "").strip().upper(), str(r.get("CHLOC1") or "")
+            if str(r.get("CHAORD", "")).upper().startswith("A"):
+                inbound.add((op, loc))
+            else:
+                out.setdefault((op, num(r)), []).append((str(r.get("CHSTOL") or ""), loc))
+        for sf in flights:
+            m = re.fullmatch(r"([A-Z0-9]{2,3}?)(\d+)", sf.flight)
+            if sf.direction != "ARR" or not m:
+                continue
+            op, n = m.group(1), int(m.group(2))
+            try:
+                due = datetime.fromtimestamp(sf.ts, self.tz).replace(tzinfo=None)
+                sf.stop = next((loc for when, loc in out.get((op, str(n + 1)), [])
+                                if loc != sf.other and (op, loc) not in inbound
+                                and 0 < (datetime.fromisoformat(when) - due).total_seconds() <= 6 * 3600), "")
+            except ValueError:
+                continue
 
     def search_order(self, now: float, exclude: set, departed_max_h: float) -> list[str]:
         """Callsigns worth a global search, most likely airborne first.
@@ -1120,7 +1156,8 @@ class Announcer:
                  "GPS_SPOOFING": ("\U0001f6f0️", "GPS spoofing"),
                  "MASS_SILENCE": ("\U0001f4e1", "Many aircraft silent at once"),
                  "GPS_DEGRADED": ("\U0001f6f0️", "GPS jamming / spoofing"),
-                 "SKYDIVE_PATTERN": ("\U0001fa82", "Large aircraft flying like a jump plane")}
+                 "SKYDIVE_PATTERN": ("\U0001fa82", "Large aircraft flying like a jump plane"),
+                 "MEDICAL_FLIGHT": ("⚕️", "Medical flight (ADS-B lifeguard status)")}
 
     def __init__(self, args, out=None):
         self.args = args
@@ -1184,7 +1221,8 @@ class Announcer:
              "VERTICAL_RATE": "steep climb/descent", "SHARP_TURN": "sharp turn",
              "COURSE_CHANGE": "course reversal", "HOLDING": "long holding", "POSITION_JUMP": "position jump",
              "SKYDIVE_PATTERN": "skydiving pattern", "ALTITUDE_WOBBLE": "altitude up and down",
-             "EARLY_DESCENT": "early descent", "CONTACT_RESTORED": "contact restored"}
+             "EARLY_DESCENT": "early descent", "CONTACT_RESTORED": "contact restored",
+             "MEDICAL_FLIGHT": "medical flight"}
     DETAILS = {  # kind -> (pattern in the alert message, compact wording)
         "LOST_CONTACT": (r"silent (\d+)s.*?track (\S+) deg", "silent {0} s, last track {1}°"),
         "VERTICAL_RATE": (r"([+-]\d+) ft/min, (-?[\d.]+) deg", "{0} ft/min ({1}°)"),
@@ -1198,7 +1236,7 @@ class Announcer:
 
     def detail(self, rec: dict) -> str:
         """The facts the headline and position don't already say, compactly."""
-        kind, msg = rec["kind"], re.sub(r" \[(also|skydiving pattern|from the feed's recent trace|military aircraft|light / private|MLAT position)[^\]]*\]", "", rec["message"])
+        kind, msg = rec["kind"], re.sub(r" \[(also|skydiving pattern|from the feed's recent trace|military aircraft|light / private|MLAT position|lifeguard status)[^\]]*\]", "", rec["message"])
         if kind in self.DETAILS:
             m = re.search(self.DETAILS[kind][0], msg)
             out = self.DETAILS[kind][1].format(*m.groups()) if m else msg
@@ -1214,6 +1252,11 @@ class Announcer:
                     f"{SKYDIVE_QUIET_S / 3600:.0f} h unless an emergency")
             else:
                 out = (out + ". " if out else "") + f"Skydiving lift {k['lift']} ({k['model']})"
+        lifeguard = re.search(r"\[lifeguard status at (\S+)\]", rec["message"])
+        if lifeguard:
+            at = datetime.fromisoformat(lifeguard.group(1).replace("Z", "+00:00")).astimezone(self.tz)
+            # first: a long detail is cut at the post's end
+            out = f"⚕️ ADS-B lifeguard (medical) status at {at:%H:%M}" + (". " + out if out else "")
         also = re.search(r"\[also: ([^\]]+)\]", rec["message"])
         if also:
             names = [self.NAMES.get(k.strip(), k.strip().lower()) for k in also.group(1).split(",")]
@@ -2071,7 +2114,7 @@ class Monitor:
         t.was_airborne, t.max_dist, t.route_dir, t.max_alt, t.left_home = False, 0.0, 0, 0, d < 15
         t.rose_home = False
         t.orig_first, t.orig_max, t.orig_left, t.came_from = -1.0, 0.0, False, False
-        t.takeoff_pos = None
+        t.takeoff_pos, t.lifeguard_at = None, 0.0
         if unseen:
             t.takeoff, t.leg_start = 0.0, t.last.t
         self.unfollow(t, "landed")
@@ -2399,8 +2442,24 @@ class Monitor:
             elif changed:  # alert when the code is set or changes, not every cooldown
                 self.alert(t, "EMERGENCY", f"squawk {sq} ({EMERGENCY_SQUAWKS[sq]})",
                            key=f"EMERGENCY:{sq}", force=True)
+        elif em == "lifeguard":
+            # a medical / priority flight, not trouble: its own kind, once a flight, when held on reports
+            # LIFEGUARD_HOLD_S apart. NJE417A (CS-CHK, CL35, TLV -> Rotterdam) was "Emergency status: lifeguard"
+            # over Germany on one 30 s follow report; ADS-B Exchange's trace never had it (25 Oct 2026)
+            now = t.last.t if t.last else 0
+            if t.em_status != em:
+                t.em_since = now
+                if now - t.lifeguard_at > LIFEGUARD_NOTE_S:
+                    t.lifeguard_at = now
+                log.info("%s ADS-B status lifeguard (medical / priority flight)", t.label())
+            elif (now - t.em_since >= LIFEGUARD_HOLD_S
+                  and now - t.alerted.get("MEDICAL_FLIGHT", (-1e12,))[0] > MILITARY_QUIET_S):
+                since = time.strftime("%H:%M:%S", time.gmtime(t.em_since))
+                self.alert(t, "MEDICAL_FLIGHT", f"ADS-B status lifeguard (medical / priority flight) since {since} UTC",
+                           force=True)
         elif em and em != "none":
             self.alert(t, "EMERGENCY", f"ADS-B emergency status: {em}")
+        t.em_status = em or ""
 
     def check_vrate(self, t: Track) -> None:
         """Too steep a climb or descent, as a flight-path angle (rate alone flags every fast jet).
@@ -3111,7 +3170,7 @@ class Monitor:
         home = (self.args.airport, self.args.icao)
         far = self.other_end(t, kind) if len(parts) >= 2 else None
         if not far:
-            return None
+            return self.board_stop(t, s, kind)
         stops = parts[1:-1] if far[0] == (parts[0] if kind == "ARR" else parts[-1]) else []
         if (t.sched and t.sched.direction == kind and len(parts) == 2 and far[0] != (parts[0] if kind == "ARR" else parts[-1])
                 and (parts[-1] if kind == "ARR" else parts[0]) in home):
@@ -3126,7 +3185,23 @@ class Monitor:
                 pos = None
             if pos and haversine_nm(s.lat, s.lon, *pos) <= DIVERTED_NM:
                 return icao
-        return None
+        return self.board_stop(t, s, kind)
+
+    def board_stop(self, t: Track, s: Sample, kind: str) -> str | None:
+        """The board's tag stop (`Schedule.tag_stops`) within DIVERTED_NM, on the way: at most TAG_DETOUR
+        longer than flying straight in (Bucharest adds 2% to Amsterdam - TLV)."""
+        if kind != "ARR" or not (t.sched and t.sched.direction == "ARR" and t.sched.stop) or not self.standing:
+            return None
+        try:
+            stop, org = self.standing.airport_by_iata(t.sched.stop), self.standing.airport_by_iata(t.sched.other)
+        except requests.RequestException:
+            return None
+        if not stop or not org or haversine_nm(s.lat, s.lon, stop[1], stop[2]) > DIVERTED_NM:
+            return None
+        home = (self.args.lat, self.args.lon)
+        straight = haversine_nm(org[1], org[2], *home)
+        via = haversine_nm(org[1], org[2], stop[1], stop[2]) + haversine_nm(stop[1], stop[2], *home)
+        return stop[0] if straight and via <= TAG_DETOUR * straight else None
 
     def own_airport_near(self, t: Track, s: Sample, nm: float) -> str | None:
         """Its own origin or destination (board, route data) within `nm`, far from our airport too."""
@@ -3766,7 +3841,7 @@ class Monitor:
         falling = (kind == "VERTICAL_RATE" and key.endswith("DESCENT") and severity >= a.vrate
                    or kind == "LOST_CONTACT" and "falling" in msg)
         if (k and k.get("quiet") and now - max(k["t"], k.get("quiet_from", 0)) <= SKYDIVE_QUIET_S
-                and kind != "EMERGENCY" and not falling):
+                and kind not in ("EMERGENCY", "MEDICAL_FLIGHT") and not falling):
             if k["told"] or kind != "VERTICAL_RATE":
                 if kind == "VERTICAL_RATE":
                     k["quiet_from"] = now  # another lift's dive (its jump run unseen): still riding
@@ -3786,7 +3861,7 @@ class Monitor:
             # Light / private aircraft too (Monitor.light), also a fall at --vrate or faster; their one alert is
             # one Telegram gets (the --telegram-skip kinds pass without starting the quiet). 21-22 Oct 2026: BDK12
             # (survey lines west of Israel) 18 Telegram messages in 3 h, HEZ652 (a Hawker in GPS jamming) 4.
-            if t.mil_quiet and now - t.mil_quiet <= MILITARY_QUIET_S:
+            if t.mil_quiet and now - t.mil_quiet <= MILITARY_QUIET_S and kind != "MEDICAL_FLIGHT":
                 t.mil_quiet = now
                 if not any(k == key and now - x < cooldown for k, x in t.mil_held):  # (counted as alerts would be)
                     t.mil_held.append((key, now))
@@ -3828,6 +3903,9 @@ class Monitor:
         apt, ad = nearest_airport(s.lat, s.lon)
         if kind != "SKYDIVE_PATTERN":
             msg += self.skydive_note(t, now)
+        if kind != "MEDICAL_FLIGHT" and t.lifeguard_at and now - t.lifeguard_at <= LIFEGUARD_NOTE_S:
+            # also a lone report, not alerted itself: the owner wants it on whatever else happens (a diversion)
+            msg += f" [lifeguard status at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t.lifeguard_at))}]"
         if self.from_trace:  # raised on a report our polls missed (backfill), at that report's time
             msg += " [from the feed's recent trace: missed by our polls]"
         self.notifier.send({

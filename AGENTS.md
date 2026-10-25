@@ -268,6 +268,11 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   A tag flight is a stop too: when the board's origin (destination) differs from the route data's and the route data's
   leg ends (starts) at our airport, the route data's other end is the stop. BZ131 BGY -> TLV (board), BBG131 LIRF-LLBG,
   and BZ703 AMS -> TLV, BBG703 LGAV-LLBG, landed at Rome and Athens: two DIVERSIONs each (20 Oct 2026).
+  So is the board's own tag (`Schedule.tag_stops`, `Monitor.board_stop`, 25 Oct 2026): an arrival's next number leaving within
+  6 h for an airport the airline never flies in from, when that airport is on the way (`TAG_DETOUR` 1.25). KL463 AMS -> TLV
+  landed at Bucharest (DIVERSION, 24 Oct) with KL464 TLV -> OTP an hour later; the week before KL462 left for LCA while KL461
+  stopped at Larnaca (over.org.il). The route data keeps only the old stop. On the board of 25 Oct this names KLM's stop only;
+  LY318 from LHR / LY319 to CDG and LY382 / LY383 (MXP / FCO) are rotations, El Al flies in from both.
   A landing elsewhere must be believable (13 Oct 2026; all 4 DIVERSIONs of the run of 11-12 Oct were
   arrivals on approach to TLV with spoofed GPS - ETD3QF, AIZ282, ISR972, ELY5462): "on the ground" within
   `LANDING_AIRPORT_NM` (5) of an airport of the local `standing-data/` checkout (`StandingData.airfield_near`;
@@ -342,7 +347,14 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   below 2,000 ft; 18 Oct 2026: on the ground before hours of refused polls and descending into its destination
   after them was "1-8 min after take-off", 11 EARLY_DESCENTs). AS1282 01:14:24, 13 min before
   RETURNED; of 184 large-aircraft take-offs the nearest was a 400 ft step by an E75L at 9.6 min.
-- **EMERGENCY**: alerts on squawk *transition* into 7500/7600/7700, not every cooldown.
+- **EMERGENCY**: alerts on squawk *transition* into 7500/7600/7700, not every cooldown. The ADS-B emergency status
+  "lifeguard" (a medical / priority flight) is its own kind, **MEDICAL_FLIGHT** (⚕️, priority 3; the owner wants it, not
+  as an emergency), once a flight when held on reports `LIFEGUARD_HOLD_S` (20 s) apart; it passes a light / military
+  aircraft's quiet. NJE417A (CL35 CS-CHK, TLV -> Rotterdam) was "Emergency status: lifeguard" over Germany from one 30 s
+  follow report, 25 Oct 2026; ADS-B Exchange's trace never had it (emergency "none", then absent after the squawk went
+  5412 -> 1000), so it could not be checked. A lone report is not alerted, but noted with its time on the flight's other
+  alerts for `LIFEGUARD_NOTE_S` (6 h, until it lands): `[lifeguard status at <UTC>]`, first in the post's detail ("⚕️ ADS-B
+  lifeguard (medical) status at HH:MM") - the owner: "if anything else happens like divert alert, it should be reported too".
 - **COURSE_CHANGE**: a large reversal (>= 70 deg in 2 min) above `--turn-min-alt`. Not
   reported within ~35 nm of a regional airport below FL250 (all 10 replay false alarms were
   departure/arrival routings at Beirut, Amman, Damascus, TLV) nor at learned route corners

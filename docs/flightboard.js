@@ -358,7 +358,8 @@ FB.hexOf = async function (callsigns) {
 FB.ALERT_NAMES = {EMERGENCY: "emergency squawk", DIVERSION: "diversion", RETURNED: "landed back", TURNING_BACK: "turning back",
   OFF_COURSE: "off course", LOST_CONTACT: "lost contact", VERTICAL_RATE: "steep climb/descent", SHARP_TURN: "sharp turn",
   COURSE_CHANGE: "course reversal", HOLDING: "long holding", ALTITUDE_WOBBLE: "altitude up and down",
-  EARLY_DESCENT: "early descent", GPS_SPOOFING: "GPS spoofing", SKYDIVE_PATTERN: "jump-plane pattern"};
+  EARLY_DESCENT: "early descent", GPS_SPOOFING: "GPS spoofing", SKYDIVE_PATTERN: "jump-plane pattern",
+  MEDICAL_FLIGHT: "medical flight"};
 FB.fetchAlerts = async function () {
   if (!FB.RELAY) return null;
   return FB.getJSON(FB.RELAY + "/alerts");

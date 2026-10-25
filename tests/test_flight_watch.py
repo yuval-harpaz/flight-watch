@@ -1060,6 +1060,42 @@ def local_time(clock, hours):
     return datetime.fromtimestamp(clock() + hours * 3600, fw.ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-%dT%H:%M")
 
 
+class EmergencyStatusTests(unittest.TestCase):
+    def test_lifeguard_is_a_medical_flight_not_an_emergency(self):
+        """NJE417A set ADS-B status "lifeguard" (a medical / priority flight) over Germany: "Emergency status" on
+        Telegram from one report (25 Oct 2026). Now MEDICAL_FLIGHT once, when held 20 s; a lone report only logged;
+        other statuses still EMERGENCY."""
+        got = {}
+        for case, reports in (("held", 8), ("lone", 1), ("general", 1)):
+            mon, feed, clock, alerts = make()
+            em = "general" if case == "general" else "lifeguard"
+            states = [dict(st, emergency=em if i < reports else "none")
+                      for i, st in enumerate(path(32.3, 34.3, [300] * 10, [35000] * 10))]
+            fly(mon, feed, clock, "490d0b", states, flight="NJE417A", r="CS-CHK", t="CL35")
+            got[case] = kinds(alerts, "490d0b")
+        self.assertEqual(got, {"held": ["MEDICAL_FLIGHT"], "lone": [], "general": ["EMERGENCY"]})
+
+
+class LifeguardNoteTests(unittest.TestCase):
+    def test_lone_lifeguard_report_is_noted_on_a_later_alert(self):
+        """The owner: a lone lifeguard report need not alert, but a later alert on the flight (a diversion) must say
+        it, with its time. Here a steep descent 2 min after one report of the status."""
+        mon, feed, clock, alerts = make()
+        ident = dict(flight="NJE417A", r="CS-CHK", t="CL35")
+        states = [dict(st, emergency="lifeguard" if i == 0 else "none")
+                  for i, st in enumerate(path(32.3, 34.3, [300] * 12, [35000] * 12))]
+        fly(mon, feed, clock, "490d0b", states, **ident)
+        at = fw.time.strftime("%Y-%m-%dT%H:%M:%SZ", fw.time.gmtime(mon.tracks["490d0b"].lifeguard_at))
+        last = states[-1]
+        fly(mon, feed, clock, "490d0b", path(last["lat"], last["lon"], [300] * 12,
+                                             [35000 - 1500 * i for i in range(12)]), **ident)
+        rec = next(r for r in alerts if r["hex"] == "490d0b")
+        self.assertEqual(rec["kind"], "VERTICAL_RATE")
+        self.assertIn(f"[lifeguard status at {at}]", rec["message"])
+        text = fw.Announcer(mon.args).detail(rec)
+        self.assertTrue(text.startswith("⚕️ ADS-B lifeguard (medical) status at "), text)
+
+
 class SteepnessTests(unittest.TestCase):
     def test_fast_but_shallow_descent_is_normal(self):
         mon, feed, clock, alerts = make(["--no-routes"])
@@ -2360,6 +2396,43 @@ class FarEndTests(unittest.TestCase):
                 step(mon, clock)
             got[route] = "DIVERSION" in kinds(alerts, "48418c")
         self.assertEqual(got, {"EHAM-LCLK-LLBG": False, "EHAM-LLBG": True})
+
+    def test_board_tag_stop_is_not_a_diversion(self):
+        """KL463 AMS -> TLV landed at Bucharest (DIVERSION, 24 Oct 2026): its route data is EHAM-LCLK-LLBG, but the
+        board's KL464 leaves TLV for OTP an hour after it is due. Not when KLM flew in from Bucharest too (an ordinary
+        rotation, as LY318 from LHR and LY319 to CDG), nor when the board's next number goes off the way."""
+        got = {}
+        for case in ("tag", "inbound", "off the way"):
+            stop = "LIS" if case == "off the way" else "OTP"
+            rows = [board_row("KL", "463", "A", local_time(Clock(), 3), "AMS"),
+                    board_row("KL", "464", "D", local_time(Clock(), 4), stop)]
+            if case == "inbound":
+                rows.append(board_row("KL", "1234", "A", local_time(Clock(), 8), "OTP"))
+            mon, feed, clock, alerts = self.setup(rows)
+            feed.files.update({"routes/schema-01/K/KLM-all.csv": "Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                                                  "KLM463,KLM,463,KLM,EHAM-LCLK-LLBG\n",
+                               "airports/schema-01/E/EH.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,"
+                                                              "Longitude,AltitudeFeet\nEHAM,Schiphol,EHAM,AMS,"
+                                                              "Amsterdam,NL,52.3086,4.7639,-11\n",
+                               "airports/schema-01/L/LR.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,"
+                                                              "Longitude,AltitudeFeet\nLROP,Henri Coanda,LROP,OTP,"
+                                                              "Bucharest,RO,44.5711,26.0850,314\n",
+                               "airports/schema-01/L/LP.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,"
+                                                              "Longitude,AltitudeFeet\nLPPT,Humberto Delgado,LPPT,LIS,"
+                                                              "Lisbon,PT,38.7742,-9.1342,374\n"})
+            for icao in ("EHAM", "LROP", "LPPT"):
+                mon.standing.airport(icao)
+            ident = dict(flight="KLM463", r="PH-BXR", t="B739")
+            start = (44.95, 25.55)  # ~30 nm NW of Bucharest
+            brg = fw.bearing(*start, 44.5711, 26.0850)
+            approach = path(*start, [brg] * 120, [max(14000 - 150 * i, 1400) for i in range(120)], gs=220)
+            approach = approach[:next(i for i, st in enumerate(approach)
+                                      if fw.haversine_nm(st["lat"], st["lon"], 44.5711, 26.0850) < 5)]
+            fly(mon, feed, clock, "48418c", approach, local=False, **ident)
+            fly(mon, feed, clock, "48418c", [dict(lat=44.5711, lon=26.0850, alt_baro="ground", gs=10, track=90)] * 4,
+                local=False, **ident)
+            got[case] = (mon.schedule.by_callsign["KLM463"].stop, "DIVERSION" in kinds(alerts, "48418c"))
+        self.assertEqual(got, {"tag": ("OTP", False), "inbound": ("", True), "off the way": ("LIS", True)})
 
     def test_board_origin_before_the_routes_leg_is_a_stop(self):
         """BZ131 BGY -> TLV (board), BBG131 LIRF-LLBG: a tag flight via Rome, two DIVERSIONs on landing there."""
