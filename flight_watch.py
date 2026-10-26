@@ -178,7 +178,7 @@ HOLDING_LANDING_ALT = 3000  # circling that reaches its period descending below 
 # Bucharest was a "course reversal" (its take-off unseen), BZ131 landing at Rome, its origin, a DIVERSION (where it came
 # from unseen), both after the restart of 24 Oct 2026 21:45 IDT
 STATE_FIELDS = ("callsign", "reg", "actype", "category", "military", "last_msg", "followed", "follow_why", "was_airborne",
-                "max_dist", "max_alt", "alerted", "squawk", "lifeguard_at", "hot_until", "israeli", "route_dir",
+                "max_dist", "max_alt", "alerted", "squawk", "status_at", "status_seen", "hot_until", "israeli", "route_dir",
                 "leg_start", "amm_dep", "mil_quiet", "mil_held", "quiet_why", "takeoff", "takeoff_pos", "climb_peak",
                 "flown_cs", "feed", "left_home", "rose_home", "orig_first", "orig_max", "orig_left", "came_from", "sent",
                 "stop_wait")
@@ -186,8 +186,10 @@ TG_RETRY_S = 3  # a Telegram message that failed to connect is sent once more af
 TAKEOFF_POS_NM = 40  # on the ground, then airborne this near after a gap of any length: took off there (takeoff_pos)
 STATE_MAX_AGE_S = 3 * 3600  # aircraft heard longer ago are not kept
 STATE_SAVE_S = 600          # also written this often while running (a crash keeps the state of a few minutes ago)
-LIFEGUARD_HOLD_S = 20  # ADS-B status "lifeguard" alerted (MEDICAL_FLIGHT) when on reports this far apart
-LIFEGUARD_NOTE_S = 6 * 3600  # ... and noted, with its time, on the flight's other alerts this long after
+STATUS_HOLD_S = 20  # an ADS-B emergency status is alerted (lifeguard: MEDICAL_FLIGHT) when on reports this far apart
+STATUS_NOTE_S = 6 * 3600  # ... and a lone report noted, with its time, on the flight's other alerts this long after
+STATUS_NAMES = {"general": "emergency", "lifeguard": "medical", "minfuel": "minimum fuel", "nordo": "radio failure",
+                "unlawful": "unlawful interference", "downed": "downed aircraft"}
 TAG_DETOUR = 1.25  # a board tag stop counts when on the way: origin -> stop -> TLV at most this x the straight line
 STOP_KT, STOP_TURN_S = 420, 1200  # an arrival's time from a stop on its way: block speed, and on the ground there
 DIVERTED_NM = 30  # a departure on the ground this far from its destination landed elsewhere (check_landing)
@@ -811,7 +813,8 @@ class Track:
     squawk: str = ""
     em_status: str = ""      # the last ADS-B emergency status (check_emergency)
     em_since: float = 0.0    # data time it began
-    lifeguard_at: float = 0.0  # data time this flight first reported ADS-B status lifeguard (noted on its alerts)
+    status_at: float = 0.0   # data time this flight first reported an ADS-B emergency status (noted on its alerts)
+    status_seen: str = ""    # ... which one
     category: str = ""     # ADS-B emitter category, e.g. A1 = light aircraft
     last_query: float = 0.0  # server time we last asked a remote feed for this hex and got an answer
     hot_until: float = 0.0   # data time until which the flight is "hot" (alerted recently)
@@ -1267,11 +1270,13 @@ class Announcer:
                     f"{SKYDIVE_QUIET_S / 3600:.0f} h unless an emergency")
             else:
                 out = (out + ". " if out else "") + f"Skydiving lift {k['lift']} ({k['model']})"
-        lifeguard = re.search(r"\[lifeguard status at (\S+)\]", rec["message"])
-        if lifeguard:
-            at = datetime.fromisoformat(lifeguard.group(1).replace("Z", "+00:00")).astimezone(self.tz)
+        status = re.search(r"\[(\w+) status at (\S+)\]", rec["message"])
+        if status:
+            em, at = status.group(1), datetime.fromisoformat(status.group(2).replace("Z", "+00:00")).astimezone(self.tz)
             # first: a long detail is cut at the post's end
-            out = f"⚕️ ADS-B lifeguard (medical) status at {at:%H:%M}" + (". " + out if out else "")
+            out = ("⚕️ ADS-B lifeguard (medical) status at" if em == "lifeguard" else
+                   f"ADS-B {em} ({STATUS_NAMES.get(em, em)}) status, one unconfirmed report at") + f" {at:%H:%M}" + (
+                ". " + out if out else "")
         also = re.search(r"\[also: ([^\]]+)\]", rec["message"])
         if also:
             names = [self.NAMES.get(k.strip(), k.strip().lower()) for k in also.group(1).split(",")]
@@ -2143,7 +2148,7 @@ class Monitor:
         t.was_airborne, t.max_dist, t.route_dir, t.max_alt, t.left_home = False, 0.0, 0, 0, d < 15
         t.rose_home = False
         t.orig_first, t.orig_max, t.orig_left, t.came_from = -1.0, 0.0, False, False
-        t.takeoff_pos, t.lifeguard_at = None, 0.0
+        t.takeoff_pos, t.status_at, t.status_seen = None, 0.0, ""
         if unseen:
             t.takeoff, t.leg_start = 0.0, t.last.t
         if not t.stop_wait:  # (an early stop: still followed, to see it leave - check_stops)
@@ -2482,23 +2487,25 @@ class Monitor:
             elif changed:  # alert when the code is set or changes, not every cooldown
                 self.alert(t, "EMERGENCY", f"squawk {sq} ({EMERGENCY_SQUAWKS[sq]})",
                            key=f"EMERGENCY:{sq}", force=True)
-        elif em == "lifeguard":
-            # a medical / priority flight, not trouble: its own kind, once a flight, when held on reports
-            # LIFEGUARD_HOLD_S apart. NJE417A (CS-CHK, CL35, TLV -> Rotterdam) was "Emergency status: lifeguard"
-            # over Germany on one 30 s follow report; ADS-B Exchange's trace never had it (25 Oct 2026)
+        elif em and em != "none":
+            # alerted when held on reports STATUS_HOLD_S apart (lifeguard, a medical / priority flight: its own kind,
+            # not an emergency); a lone report is noted on the flight's other alerts. All three statuses alerted by
+            # 26 Oct 2026 came from one 30 s follow report over Bavaria at squawk 1000, none in ADS-B Exchange's trace
+            # (a bad receiver?): NJE417A "lifeguard" (25 Oct), ELY323 and BEL1UG "nordo". A real emergency squawks
+            # 7700 / 7600 / 7500 (alerted at once above), which sets the status by itself.
             now = t.last.t if t.last else 0
             if t.em_status != em:
                 t.em_since = now
-                if now - t.lifeguard_at > LIFEGUARD_NOTE_S:
-                    t.lifeguard_at = now
-                log.info("%s ADS-B status lifeguard (medical / priority flight)", t.label())
-            elif (now - t.em_since >= LIFEGUARD_HOLD_S
-                  and now - t.alerted.get("MEDICAL_FLIGHT", (-1e12,))[0] > MILITARY_QUIET_S):
+                if t.status_seen != em or now - t.status_at > STATUS_NOTE_S:
+                    t.status_at, t.status_seen = now, em
+                log.info("%s ADS-B emergency status %s (%s)", t.label(), em, STATUS_NAMES.get(em, em))
+            elif now - t.em_since >= STATUS_HOLD_S:
                 since = time.strftime("%H:%M:%S", time.gmtime(t.em_since))
-                self.alert(t, "MEDICAL_FLIGHT", f"ADS-B status lifeguard (medical / priority flight) since {since} UTC",
-                           force=True)
-        elif em and em != "none":
-            self.alert(t, "EMERGENCY", f"ADS-B emergency status: {em}")
+                kind, key = ("MEDICAL_FLIGHT", "MEDICAL_FLIGHT") if em == "lifeguard" else ("EMERGENCY", f"EMERGENCY:{em}")
+                if now - t.alerted.get(key, (-1e12,))[0] > MILITARY_QUIET_S:  # (once a flight)
+                    text = ("ADS-B status lifeguard (medical / priority flight)" if em == "lifeguard" else
+                            f"ADS-B emergency status: {em} ({STATUS_NAMES.get(em, em)})")
+                    self.alert(t, kind, f"{text} since {since} UTC", key=key, force=True)
         t.em_status = em or ""
 
     def check_vrate(self, t: Track) -> None:
@@ -4083,9 +4090,11 @@ class Monitor:
         apt, ad = nearest_airport(s.lat, s.lon)
         if kind != "SKYDIVE_PATTERN":
             msg += self.skydive_note(t, now)
-        if kind != "MEDICAL_FLIGHT" and t.lifeguard_at and now - t.lifeguard_at <= LIFEGUARD_NOTE_S:
+        if (t.status_at and now - t.status_at <= STATUS_NOTE_S
+                and key not in ("MEDICAL_FLIGHT", f"EMERGENCY:{t.status_seen}")):
             # also a lone report, not alerted itself: the owner wants it on whatever else happens (a diversion)
-            msg += f" [lifeguard status at {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t.lifeguard_at))}]"
+            msg += (f" [{t.status_seen} status at "
+                    f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(t.status_at))}]")
         if self.from_trace:  # raised on a report our polls missed (backfill), at that report's time
             msg += " [from the feed's recent trace: missed by our polls]"
         self.notifier.send({

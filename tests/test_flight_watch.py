@@ -1087,17 +1087,18 @@ def local_time(clock, hours):
 class EmergencyStatusTests(unittest.TestCase):
     def test_lifeguard_is_a_medical_flight_not_an_emergency(self):
         """NJE417A set ADS-B status "lifeguard" (a medical / priority flight) over Germany: "Emergency status" on
-        Telegram from one report (25 Oct 2026). Now MEDICAL_FLIGHT once, when held 20 s; a lone report only logged;
-        other statuses still EMERGENCY."""
+        Telegram from one report (25 Oct 2026). Now MEDICAL_FLIGHT once, when held 20 s; a lone report only logged.
+        The other statuses too, as EMERGENCY: ELY323 and BEL1UG "nordo" from one report each over Bavaria at squawk
+        1000, nothing in ADS-B Exchange's trace (26 Oct 2026)."""
         got = {}
-        for case, reports in (("held", 8), ("lone", 1), ("general", 1)):
+        for case, reports in (("held", 8), ("lone", 1), ("nordo", 1), ("nordo held", 8)):
             mon, feed, clock, alerts = make()
-            em = "general" if case == "general" else "lifeguard"
+            em = "nordo" if case.startswith("nordo") else "lifeguard"
             states = [dict(st, emergency=em if i < reports else "none")
                       for i, st in enumerate(path(32.3, 34.3, [300] * 10, [35000] * 10))]
             fly(mon, feed, clock, "490d0b", states, flight="NJE417A", r="CS-CHK", t="CL35")
             got[case] = kinds(alerts, "490d0b")
-        self.assertEqual(got, {"held": ["MEDICAL_FLIGHT"], "lone": [], "general": ["EMERGENCY"]})
+        self.assertEqual(got, {"held": ["MEDICAL_FLIGHT"], "lone": [], "nordo": [], "nordo held": ["EMERGENCY"]})
 
 
 class RestartStateTests(unittest.TestCase):
@@ -1168,21 +1169,23 @@ class LostOnlyFollowTests(unittest.TestCase):
 class LifeguardNoteTests(unittest.TestCase):
     def test_lone_lifeguard_report_is_noted_on_a_later_alert(self):
         """The owner: a lone lifeguard report need not alert, but a later alert on the flight (a diversion) must say
-        it, with its time. Here a steep descent 2 min after one report of the status."""
-        mon, feed, clock, alerts = make()
-        ident = dict(flight="NJE417A", r="CS-CHK", t="CL35")
-        states = [dict(st, emergency="lifeguard" if i == 0 else "none")
-                  for i, st in enumerate(path(32.3, 34.3, [300] * 12, [35000] * 12))]
-        fly(mon, feed, clock, "490d0b", states, **ident)
-        at = fw.time.strftime("%Y-%m-%dT%H:%M:%SZ", fw.time.gmtime(mon.tracks["490d0b"].lifeguard_at))
-        last = states[-1]
-        fly(mon, feed, clock, "490d0b", path(last["lat"], last["lon"], [300] * 12,
-                                             [35000 - 1500 * i for i in range(12)]), **ident)
-        rec = next(r for r in alerts if r["hex"] == "490d0b")
-        self.assertEqual(rec["kind"], "VERTICAL_RATE")
-        self.assertIn(f"[lifeguard status at {at}]", rec["message"])
-        text = fw.Announcer(mon.args).detail(rec)
-        self.assertTrue(text.startswith("⚕️ ADS-B lifeguard (medical) status at "), text)
+        it, with its time. Here a steep descent 2 min after one report of the status; nordo the same."""
+        for em, start in (("lifeguard", "⚕️ ADS-B lifeguard (medical) status at "),
+                          ("nordo", "ADS-B nordo (radio failure) status, one unconfirmed report at ")):
+            mon, feed, clock, alerts = make()
+            ident = dict(flight="NJE417A", r="CS-CHK", t="CL35")
+            states = [dict(st, emergency=em if i == 0 else "none")
+                      for i, st in enumerate(path(32.3, 34.3, [300] * 12, [35000] * 12))]
+            fly(mon, feed, clock, "490d0b", states, **ident)
+            at = fw.time.strftime("%Y-%m-%dT%H:%M:%SZ", fw.time.gmtime(mon.tracks["490d0b"].status_at))
+            last = states[-1]
+            fly(mon, feed, clock, "490d0b", path(last["lat"], last["lon"], [300] * 12,
+                                                 [35000 - 1500 * i for i in range(12)]), **ident)
+            rec = next(r for r in alerts if r["hex"] == "490d0b")
+            self.assertEqual(rec["kind"], "VERTICAL_RATE")
+            self.assertIn(f"[{em} status at {at}]", rec["message"])
+            text = fw.Announcer(mon.args).detail(rec)
+            self.assertTrue(text.startswith(start), text)
 
 
 class SteepnessTests(unittest.TestCase):

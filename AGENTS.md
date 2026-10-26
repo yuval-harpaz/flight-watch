@@ -358,12 +358,16 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   (`field_ahead`; a turn back still alerts): AYT253 (Ayeet E145) into Ramon AB, 24 nm ahead (26 Oct 2026).
 - **EMERGENCY**: alerts on squawk *transition* into 7500/7600/7700, not every cooldown. The ADS-B emergency status
   "lifeguard" (a medical / priority flight) is its own kind, **MEDICAL_FLIGHT** (⚕️, priority 3; the owner wants it, not
-  as an emergency), once a flight when held on reports `LIFEGUARD_HOLD_S` (20 s) apart; it passes a light / military
-  aircraft's quiet. NJE417A (CL35 CS-CHK, TLV -> Rotterdam) was "Emergency status: lifeguard" over Germany from one 30 s
-  follow report, 25 Oct 2026; ADS-B Exchange's trace never had it (emergency "none", then absent after the squawk went
-  5412 -> 1000), so it could not be checked. A lone report is not alerted, but noted with its time on the flight's other
-  alerts for `LIFEGUARD_NOTE_S` (6 h, until it lands): `[lifeguard status at <UTC>]`, first in the post's detail ("⚕️ ADS-B
-  lifeguard (medical) status at HH:MM") - the owner: "if anything else happens like divert alert, it should be reported too".
+  as an emergency), once a flight; it passes a light / military aircraft's quiet. Every other status (nordo, minfuel,
+  general, unlawful, downed) is an EMERGENCY, once a flight. Either only when held on reports `STATUS_HOLD_S` (20 s) apart:
+  all three statuses alerted by 26 Oct 2026 came from one 30 s follow report over Bavaria at squawk 1000 (Europe's Mode S
+  conspicuity code), none in ADS-B Exchange's trace (emergency "none", absent while squawking 1000) - NJE417A (CL35,
+  TLV -> Rotterdam) "lifeguard" 25 Oct, ELY323 (B788, TLV -> CDG) and BEL1UG (A20N, TLV -> BRU) "nordo" 26 Oct, both on
+  Telegram as EMERGENCY. A real emergency squawks 7700 / 7600 / 7500, alerted at once, and that sets the status itself.
+  A lone report is not alerted, but noted with its time on the flight's other alerts for `STATUS_NOTE_S` (6 h, until it
+  lands): `[<status> status at <UTC>]`, first in the post's detail ("⚕️ ADS-B lifeguard (medical) status at HH:MM",
+  "ADS-B nordo (radio failure) status, one unconfirmed report at HH:MM") - the owner: "if anything else happens like
+  divert alert, it should be reported too".
 - **COURSE_CHANGE**: a large reversal (>= 70 deg in 2 min) above `--turn-min-alt`. Not
   reported within ~35 nm of a regional airport below FL250 (all 10 replay false alarms were
   departure/arrival routings at Beirut, Amman, Damascus, TLV) nor at learned route corners
