@@ -3081,8 +3081,9 @@ class Monitor:
         # positions must agree with the speeds, or the "turn" is a GNSS/position glitch
         moved = haversine_nm(old.lat, old.lon, s.lat, s.lon)
         expect = (s.gs + old.gs) / 2 * dt / 3600
-        if not 0.6 <= moved / expect <= 1.4:
-            return
+        if not 0.6 <= moved / expect <= 1.4 or not 0.6 <= moved / (s.gs * dt / 3600) <= 1.4:
+            return  # (the bank uses the new speed: IZ98, an A321 at FL123 in GPS jamming, 300 then "675 kt" while
+            #          its positions moved at ~320, was "~53 deg bank", 25 Oct 2026)
         # ...and the path must bend like the reported tracks: a corrupted velocity message (4X-CZF,
         # 6 Oct 2026: straight on 131 deg, one reading 262 deg / 3,571 kt) is a "turn" otherwise
         c_old, c_new = t.course_into(old), t.course_into(s)

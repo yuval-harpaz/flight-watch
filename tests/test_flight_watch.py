@@ -1004,6 +1004,16 @@ class SharpTurnGlitchTests(unittest.TestCase):
         fly(mon, feed, clock, "73934e", states, flight="4XCZF", r="4X-CZF", t="H25B")
         self.assertNotIn("SHARP_TURN", kinds(alerts))
 
+    def test_speed_its_positions_do_not_back_is_no_sharp_turn(self):
+        """IZ98 (A321 LZ-EAM, HER -> TLV, 25 Oct 2026) at FL123 in GPS jamming: "128 -> 59 deg in 33 s at 675 kt
+        (~53 deg bank)", NIC-0 positions next. Its positions moved at ~320 kt: ~34 deg, a normal turn."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        states = [{**s, "gs": 300} for s in path(32.4, 33.6, [128] * 6 + [105, 82, 59] + [59] * 5, [12350] * 14,
+                                                 gs=320)]
+        states[8] = {**states[8], "gs": 675}
+        fly(mon, feed, clock, "452199", states, flight="AIZ098", r="LZ-EAM", t="A321")
+        self.assertNotIn("SHARP_TURN", kinds(alerts))
+
 
 class GapAndDetourJumps(unittest.TestCase):
     """POSITION_JUMP beyond short hops: reappearing too far after a gap (THY1KG, 5 Oct 2026: 94 nm

@@ -411,6 +411,8 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   climb / descent angle would trust (`trusted_gs`). A light aircraft (not large, not military) faster than
   `SMALL_MAX_KT` (600) over the ground has a bad speed: HEZ652, a Hawker 800, "134 -> 50 deg in 30 s at 728 kt
   (~62 deg bank)" at FL190 in GPS jamming (22 Oct 2026; the same aircraft had a corrupted velocity on 6 Oct).
+  The positions must back the new speed itself, not only the average of both ends (the bank uses it): IZ98, an A321 at
+  FL123 at the onset of GPS jamming, reported 300 then "675 kt" while its positions moved at ~320: "~53 deg bank" (25 Oct 2026).
 - **OFF_COURSE / TURNING_BACK**: long before landing, an arrival > 60 nm out flying >= 100 deg
   away from TLV for 150 s while the distance opens, or a departure flying back toward TLV
   (within 60 deg) while closing. OFF_COURSE also covers any flight with a plausible route
