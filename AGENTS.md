@@ -38,7 +38,8 @@ and appended to `posts.jsonl`), and ntfy / Telegram when configured. `tests/repl
 `tools/` (incident capture, turn-zone learning, `plot_alert.py`
 3D replay of an alert, `squawk_cases.py`, `dashboard.py` - the owner's local control page, 24 Oct 2026: start / stop
 `monitor.sh` - Telegram told only when it stays stopped > 10 s, so a restart for a code change sends nothing (25 Oct 2026) -, a run's alerts by kind, a map of one; stdlib only, 127.0.0.1, other sites' requests refused; `nightly.sh` + `daily_digest.py` + `nightly_prompt.md` -
-the 03:00 UTC restart and unattended review, fixes on a `nightly/<date>` branch, never pushed) are support code,
+the 03:00 UTC restart and unattended review, fixes on a `nightly/<date>` branch, never pushed; each start logs its code -
+commit, `+changes` when `flight_watch.py` differs from it, the file's sha256 - so the review judges an alert by the code that raised it) are support code,
 not part of the monitor.
 `tools/squawk_cases.py` (17 Oct 2026): the owner wanted real emergencies to measure the checks against,
 without keeping our own list. The AeroSignals bot on Bluesky (spotterintel.bsky.social, since 11 Apr 2026,

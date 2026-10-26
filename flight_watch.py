@@ -29,6 +29,7 @@ import argparse
 import bisect
 import csv
 import glob
+import hashlib
 import html
 import io
 import json
@@ -38,6 +39,7 @@ import os
 import random
 import re
 import signal
+import subprocess
 import sys
 import time
 import collections
@@ -329,6 +331,21 @@ def minutes_to(poly, lat, lon, track, gs, horizon_min, inside=None) -> float | N
 def over_israel(lat, lon) -> bool:
     """Inside the rough outline, the surroundings of Eilat left out (see EILAT)."""
     return in_polygon(lat, lon, ISRAEL) and haversine_nm(lat, lon, *EILAT) > EILAT_ALLOW_NM
+
+
+def code_version() -> str:
+    """The code a run started with, for the log (the nightly review tells which alerts came after a fix): the git
+    commit, "+changes" when flight_watch.py differs from it, and the file's own sha256 (8 hex)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.abspath(__file__), "rb") as f:
+        sha = hashlib.sha256(f.read()).hexdigest()[:8]
+    try:
+        run = lambda *c: subprocess.run(["git", *c], cwd=here, capture_output=True, text=True, timeout=5).stdout.strip()
+        commit = run("rev-parse", "--short", "HEAD") or "?"
+        changed = "+changes" if run("status", "--porcelain", "--", "flight_watch.py") else ""
+    except (OSError, subprocess.SubprocessError):
+        commit, changed = "?", ""
+    return f"{commit}{changed} (flight_watch.py {sha})"
 
 
 def nearest_airport(lat, lon, israeli: bool | None = None, exclude=()) -> tuple[str | None, float]:
@@ -4354,8 +4371,8 @@ def main(argv=None) -> None:
     monitor.load_state()
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    log.info("watching %s (%s) r=%.0fnm every %.0fs via %s",
-             args.airport, args.icao, args.radius, args.interval, args.provider)
+    log.info("watching %s (%s) r=%.0fnm every %.0fs via %s, code %s",
+             args.airport, args.icao, args.radius, args.interval, args.provider, code_version())
     tg = monitor.notifier  # said at the start: unset (not exported) variables otherwise fail silently
     missing = [n for n, v in (("TELEGRAM_BOT_TOKEN", tg.tg_token), (tg.tg_var, tg.tg_chat)) if not v]
     telegram = ("Telegram off (" + ", ".join(missing) + " not in the environment)" if missing else

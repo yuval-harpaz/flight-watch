@@ -11,7 +11,9 @@ checks are as they are; do not undo a choice it records.
 
 1. Judge each Telegram message of the day (what the public saw): **valid** (a real irregularity, or a
    correct sanity alert), **false** (a routine flight we misread - say what misled us), or **unclear**.
-   Use the log lines of that aircraft (grep its hex) and AGENTS.md. Note also anything alerted that the
+   Use the log lines of that aircraft (grep its hex) and AGENTS.md. Each start in the digest names the code it ran
+   (`code <commit>[+changes] (flight_watch.py <sha256 8>)`): judge an alert by the code that raised it, and do not
+   report as new a false alarm that a later commit (`git log`) already fixed. Note also anything alerted that the
    digest shows as noisy (many alerts on one aircraft, a kind suddenly frequent) and monitor health (restarts,
    gaps, refused polls, errors).
 2. Fix only what is obvious: a false alarm whose cause is clear, a fix that is small and local, in the spirit of the

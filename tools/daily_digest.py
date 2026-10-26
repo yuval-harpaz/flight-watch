@@ -91,13 +91,14 @@ def digest(end: datetime) -> str:
     out = [f"# flight-watch day {il(start)} - {il(end)} Israel ({start:%Y-%m-%dT%H:%MZ} - {end:%H:%MZ})", ""]
 
     # the monitor itself
-    starts = [t for t, m in log if " watching " in m and " every " in m]
+    starts = [(t, (re.search(r", code (\S+)", m) or [""])[0].replace(", code ", " code "))
+              for t, m in log if " watching " in m and " every " in m]  # (the code each run started with)
     status = [t for t, m in log if " local | " in m]
     skipped = sum(1 for _, m in log if m.startswith("INFO    local poll skipped"))
     gaps = [(a, b) for (a, _), (b, _) in zip(log, log[1:]) if (b - a).total_seconds() > 300]
     errors = collections.Counter(re.sub(r"\d+", "N", m[8:90]) for _, m in log if m.startswith("ERROR"))
     out += ["## Monitor", "",
-            f"- started {len(starts)} times: " + ", ".join(il(t) for t in starts) if starts else "- no start in the window",
+            f"- started {len(starts)} times: " + ", ".join(il(t) + c for t, c in starts) if starts else "- no start in the window",
             f"- local polls answered {len(status)}, skipped (refused / cooling down) {skipped}"
             + (f" ({100 * skipped / (len(status) + skipped):.0f}% skipped)" if status or skipped else ""),
             "- log gaps > 5 min: " + (", ".join(f"{il(a)} - {b.astimezone(IL):%H:%M}" for a, b in gaps[:10]) or "none"),
