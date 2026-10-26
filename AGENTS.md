@@ -273,6 +273,11 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   landed at Bucharest (DIVERSION, 24 Oct) with KL464 TLV -> OTP an hour later; the week before KL462 left for LCA while KL461
   stopped at Larnaca (over.org.il). The route data keeps only the old stop. On the board of 25 Oct this names KLM's stop only;
   LY318 from LHR / LY319 to CDG and LY382 / LY383 (MXP / FCO) are rotations, El Al flies in from both.
+  A route that lists a stop stops anywhere on the way (`TAG_DETOUR`; 26 Oct 2026): KLM462 LLBG-LCLK-EHAM landed at Bucharest,
+  KLM's stop since 24 Oct, a DIVERSION. An arrival on the ground on its way early enough to fly on and land by its board time
+  (`early_stop`: the distance at `STOP_KT` 420 + `STOP_TURN_S` 20 min) is logged and still followed; a DIVERSION only if still
+  there when that is too late (`Track.stop_wait`, `check_stops`): IB1873 MAD -> TLV on the ground at Athens 01:41, at TLV 04:16,
+  due 04:30. Cost: a real diversion to an airport on the way is alerted late (up to its board time less the flight on).
   A landing elsewhere must be believable (13 Oct 2026; all 4 DIVERSIONs of the run of 11-12 Oct were
   arrivals on approach to TLV with spoofed GPS - ETD3QF, AIZ282, ISR972, ELY5462): "on the ground" within
   `LANDING_AIRPORT_NM` (5) of an airport of the local `standing-data/` checkout (`StandingData.airfield_near`;
@@ -349,6 +354,8 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   below 2,000 ft; 18 Oct 2026: on the ground before hours of refused polls and descending into its destination
   after them was "1-8 min after take-off", 11 EARLY_DESCENTs). AS1282 01:14:24, 13 min before
   RETURNED; of 184 large-aircraft take-offs the nearest was a 400 ft step by an E75L at 9.6 min.
+  Not for a flight with no board row nor route descending toward an airfield `EARLY_FIELD_NM` (30) ahead, not its own
+  (`field_ahead`; a turn back still alerts): AYT253 (Ayeet E145) into Ramon AB, 24 nm ahead (26 Oct 2026).
 - **EMERGENCY**: alerts on squawk *transition* into 7500/7600/7700, not every cooldown. The ADS-B emergency status
   "lifeguard" (a medical / priority flight) is its own kind, **MEDICAL_FLIGHT** (⚕️, priority 3; the owner wants it, not
   as an emergency), once a flight when held on reports `LIFEGUARD_HOLD_S` (20 s) apart; it passes a light / military
@@ -458,6 +465,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   when another anomaly came within `--hot-minutes`; 11 Oct 2026. Refusals do not come from this: in the run of
   10-11 Oct each hour had ~120 answered and ~240 refused local polls whatever the alerts - the 10 s poll against
   ~2 req/min allowed; the status line now counts hot flights and those followed only for lost contact).
+  A kind Telegram skips (`--telegram-skip`) makes no flight hot, nor counts as the other anomaly of a lost contact (26 Oct
+  2026, the owner's choice): RJ302, holding near Ovda / Aqaba after a logged TOWARD_ISRAEL, sent each leg of the hold as a
+  course reversal, 5 messages; N720LE a 74 deg turn. Squawk replay: UA915's ocean coverage gaps after a POSITION_JUMP no
+  longer alert.
   Hot lasts `--hot-minutes` (20): queried
   every cycle instead of every `--follow-interval`, every anomaly reported (no terminal or
   route-corner exemptions), and two different anomalies within that time are sent at

@@ -206,6 +206,20 @@ class AlertSimulation(unittest.TestCase):
         self.assertIn("[also: VERTICAL_RATE]", alerts[-1]["message"])
         self.assertGreater(t.hot_until, t.last.t)
 
+    def test_kind_telegram_skips_makes_no_flight_hot(self):
+        # RJ302 25 Oct 2026: a logged TOWARD_ISRAEL made it hot, and each leg of its hold went out as a reversal
+        mon, feed, clock, alerts = make(["--no-routes"])
+        feed.local = {"738001"}
+        for i in range(3):
+            feed.aircraft["738001"] = airborne(32.6, 34.0 + i * 0.03, 20000, flight="RJA302")
+            step(mon, clock)
+        t = mon.tracks["738001"]
+        self.assertTrue(mon.alert(t, "TOWARD_ISRAEL", "turned toward Israel", force=True))
+        self.assertTrue(t.followed)
+        self.assertFalse(mon.hot(t))
+        self.assertTrue(mon.alert(t, "COURSE_CHANGE", "reversal", force=True))
+        self.assertTrue(mon.hot(t))
+
     def test_heard_again_within_lost_confirm_is_not_lost(self):
         mon, feed, clock, alerts = make(["--no-routes"])
         feed.local = {"738001", "738002"}
@@ -2186,6 +2200,21 @@ class Run18OctTests(unittest.TestCase):
         self.assertNotIn("EARLY_DESCENT", kinds(alerts))
         self.assertEqual(mon.tracks["738070"].takeoff, 0)
 
+    def test_short_hop_descending_toward_an_airfield_is_no_early_descent(self):
+        """AYT253 (Ayeet E145, no route, 25 Oct 2026) climbed to 11,050 ft and descended into Ramon AB 24 nm ahead
+        9 min after take-off: EARLY_DESCENT on Telegram. Toward Ovda here; heading west, no airfield ahead, it alerts."""
+        got = {}
+        for heading in (180, 270):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            ident = dict(flight="AYT253", r="4X-EMT", t="E145", category="A3")
+            fly(mon, feed, clock, "73934a", [dict(lat=30.55, lon=34.94, alt_baro="ground", gs=10, track=heading)] * 3,
+                **ident)
+            fly(mon, feed, clock, "73934a", path(30.55, 34.94, [heading] * 24,
+                                                 [1000 + 600 * i for i in range(18)] + [11200 - 300 * i for i in range(6)],
+                                                 gs=250), **ident)
+            got[heading] = "EARLY_DESCENT" in kinds(alerts)
+        self.assertEqual(got, {180: False, 270: True})
+
     def test_circuits_near_amman_with_no_route_are_not_holding(self):
         """RJA017 (A321 JY-AYV): took off from Amman and circled east of it at 4,300 ft 2 h later."""
         mon, feed, clock, alerts = make(["--no-routes"])
@@ -2514,17 +2543,18 @@ class FarEndTests(unittest.TestCase):
     def test_board_tag_stop_is_not_a_diversion(self):
         """KL463 AMS -> TLV landed at Bucharest (DIVERSION, 24 Oct 2026): its route data is EHAM-LCLK-LLBG, but the
         board's KL464 leaves TLV for OTP an hour after it is due. Not when KLM flew in from Bucharest too (an ordinary
-        rotation, as LY318 from LHR and LY319 to CDG), nor when the board's next number goes off the way."""
+        rotation, as LY318 from LHR and LY319 to CDG), nor when the board's next number goes off the way. (The route
+        here lists no stop and the flight is due too soon to stop on its way: those are stops too, StopOnTheWayTests.)"""
         got = {}
         for case in ("tag", "inbound", "off the way"):
             stop = "LIS" if case == "off the way" else "OTP"
-            rows = [board_row("KL", "463", "A", local_time(Clock(), 3), "AMS"),
+            rows = [board_row("KL", "463", "A", local_time(Clock(), 1), "AMS"),
                     board_row("KL", "464", "D", local_time(Clock(), 4), stop)]
             if case == "inbound":
                 rows.append(board_row("KL", "1234", "A", local_time(Clock(), 8), "OTP"))
             mon, feed, clock, alerts = self.setup(rows)
             feed.files.update({"routes/schema-01/K/KLM-all.csv": "Callsign,Code,Number,AirlineCode,AirportCodes\n"
-                                                                  "KLM463,KLM,463,KLM,EHAM-LCLK-LLBG\n",
+                                                                  "KLM463,KLM,463,KLM,EHAM-LLBG\n",
                                "airports/schema-01/E/EH.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,"
                                                               "Longitude,AltitudeFeet\nEHAM,Schiphol,EHAM,AMS,"
                                                               "Amsterdam,NL,52.3086,4.7639,-11\n",
@@ -2547,6 +2577,68 @@ class FarEndTests(unittest.TestCase):
                 local=False, **ident)
             got[case] = (mon.schedule.by_callsign["KLM463"].stop, "DIVERSION" in kinds(alerts, "48418c"))
         self.assertEqual(got, {"tag": ("OTP", False), "inbound": ("", True), "off the way": ("LIS", True)})
+
+    KLM_FILES = {"airports/schema-01/E/EH.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                                                "EHAM,Schiphol,EHAM,AMS,Amsterdam,NL,52.3086,4.7639,-11\n",
+                 "airports/schema-01/L/LR.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                                                "LROP,Henri Coanda,LROP,OTP,Bucharest,RO,44.5711,26.0850,314\n",
+                 "airports/schema-01/L/LC.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                                                "LCLK,Larnaca,LCLK,LCA,Larnaca,CY,34.8751,33.6249,8\n"}
+
+    def land_at_otp(self, mon, feed, clock, hx, ident):
+        start = (44.95, 25.55)  # ~30 nm NW of Bucharest
+        approach = path(*start, [fw.bearing(*start, 44.5711, 26.0850)] * 120,
+                        [max(14000 - 150 * i, 1400) for i in range(120)], gs=220)
+        approach = approach[:next(i for i, st in enumerate(approach)
+                                  if fw.haversine_nm(st["lat"], st["lon"], 44.5711, 26.0850) < 5)]
+        fly(mon, feed, clock, hx, approach, local=False, **ident)
+        fly(mon, feed, clock, hx, [dict(lat=44.5711, lon=26.0850, alt_baro="ground", gs=10, track=90)] * 4,
+            local=False, **ident)
+
+    def test_a_route_with_stops_stops_anywhere_on_the_way(self):
+        """KLM462 TLV -> AMS, listed LLBG-LCLK-EHAM, landed at Bucharest: KLM's stop moved there (KL463, 24 Oct), the
+        route data keeps Larnaca; a DIVERSION on 26 Oct 2026. A route with no stop listed still alerts."""
+        got = {}
+        for route in ("LLBG-LCLK-EHAM", "LLBG-EHAM"):
+            mon, feed, clock, alerts = self.setup([])
+            feed.files.update(self.KLM_FILES)
+            feed.files["routes/schema-01/K/KLM-all.csv"] = ("Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                                           f"KLM462,KLM,462,KLM,{route}\n")
+            for icao in ("EHAM", "LROP", "LCLK"):
+                mon.standing.airport(icao)
+            ident = dict(flight="KLM462", r="PH-BXT", t="B739")
+            tlv = (32.0114, 34.8867)
+            fly(mon, feed, clock, "4841a6", [dict(lat=tlv[0], lon=tlv[1], alt_baro="ground", gs=5, track=320)] * 3,
+                **ident)
+            fly(mon, feed, clock, "4841a6", path(*tlv, [320] * 6, [1500 + 800 * i for i in range(6)], gs=200), **ident)
+            clock.t += 2 * 3600
+            self.land_at_otp(mon, feed, clock, "4841a6", ident)
+            got[route] = "DIVERSION" in kinds(alerts, "4841a6")
+        self.assertEqual(got, {"LLBG-LCLK-EHAM": False, "LLBG-EHAM": True})
+
+    def test_an_early_arrival_on_its_way_waits_for_its_board_time(self):
+        """IB1873 MAD -> TLV on the ground at Athens 01:41, landed at TLV 04:16, due 04:30 (26 Oct 2026): a stop
+        neither the board nor the route data names. A DIVERSION only once it can no longer make its time."""
+        got = {}
+        for case in ("flies on", "stays", "due soon"):
+            due = 1 if case == "due soon" else 4  # Bucharest - TLV ~870 nm: ~2.4 h with the turn-round
+            mon, feed, clock, alerts = self.setup([board_row("KL", "463", "A", local_time(Clock(), due), "AMS")])
+            feed.files.update(self.KLM_FILES)
+            feed.files["routes/schema-01/K/KLM-all.csv"] = ("Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                                           "KLM463,KLM,463,KLM,EHAM-LLBG\n")
+            for icao in ("EHAM", "LROP"):
+                mon.standing.airport(icao)
+            ident = dict(flight="KLM463", r="PH-BXR", t="B739")
+            self.land_at_otp(mon, feed, clock, "48418c", ident)
+            first = "DIVERSION" in kinds(alerts, "48418c")
+            if case == "flies on":
+                fly(mon, feed, clock, "48418c", path(44.5711, 26.0850, [150] * 6, [1500 + 800 * i for i in range(6)],
+                                                     gs=200), local=False, **ident)
+            clock.t += 3 * 3600
+            fly(mon, feed, clock, "48418c", [dict(lat=44.5711, lon=26.0850, alt_baro="ground", gs=0, track=90)] * 2
+                if case != "flies on" else path(40.0, 30.0, [150] * 3, [30000] * 3, gs=450), local=False, **ident)
+            got[case] = (first, "DIVERSION" in kinds(alerts, "48418c"))
+        self.assertEqual(got, {"flies on": (False, False), "stays": (False, True), "due soon": (True, True)})
 
     def test_board_origin_before_the_routes_leg_is_a_stop(self):
         """BZ131 BGY -> TLV (board), BBG131 LIRF-LLBG: a tag flight via Rome, two DIVERSIONs on landing there."""

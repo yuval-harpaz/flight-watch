@@ -166,6 +166,7 @@ WOBBLE_TURNS, WOBBLE_FT, WOBBLE_S, WOBBLE_MAX_ALT, WOBBLE_RATE = 3, 150, 180, 25
 # 7 min after take-off at ~2,000 ft/min, neither steep nor fast; the first descent of the other 184
 # large-aircraft take-offs in the fixtures came later (a 400 ft step by an E75L at 9.6 min).
 EARLY_DROP, EARLY_MIN = 1000, 10
+EARLY_FIELD_NM = 30  # no EARLY_DESCENT for a flight with no route descending toward an airfield this near (field_ahead)
 # A track heard again after MISSED_LANDING_S having moved less than MISSED_LANDING_KT on average landed
 # in between: 18 Oct 2026, ELY353 (TLV -> MUC) unheard 100 min, then 70 nm on climbing out of Munich, and
 # HYS236 (TLV -> OTP) unheard 3.7 h, then 145 nm on, back toward TLV: both "TLV departure heading back".
@@ -179,7 +180,8 @@ HOLDING_LANDING_ALT = 3000  # circling that reaches its period descending below 
 STATE_FIELDS = ("callsign", "reg", "actype", "category", "military", "last_msg", "followed", "follow_why", "was_airborne",
                 "max_dist", "max_alt", "alerted", "squawk", "lifeguard_at", "hot_until", "israeli", "route_dir",
                 "leg_start", "amm_dep", "mil_quiet", "mil_held", "quiet_why", "takeoff", "takeoff_pos", "climb_peak",
-                "flown_cs", "feed", "left_home", "rose_home", "orig_first", "orig_max", "orig_left", "came_from", "sent")
+                "flown_cs", "feed", "left_home", "rose_home", "orig_first", "orig_max", "orig_left", "came_from", "sent",
+                "stop_wait")
 TG_RETRY_S = 3  # a Telegram message that failed to connect is sent once more after this
 TAKEOFF_POS_NM = 40  # on the ground, then airborne this near after a gap of any length: took off there (takeoff_pos)
 STATE_MAX_AGE_S = 3 * 3600  # aircraft heard longer ago are not kept
@@ -187,6 +189,7 @@ STATE_SAVE_S = 600          # also written this often while running (a crash kee
 LIFEGUARD_HOLD_S = 20  # ADS-B status "lifeguard" alerted (MEDICAL_FLIGHT) when on reports this far apart
 LIFEGUARD_NOTE_S = 6 * 3600  # ... and noted, with its time, on the flight's other alerts this long after
 TAG_DETOUR = 1.25  # a board tag stop counts when on the way: origin -> stop -> TLV at most this x the straight line
+STOP_KT, STOP_TURN_S = 420, 1200  # an arrival's time from a stop on its way: block speed, and on the ground there
 DIVERTED_NM = 30  # a departure on the ground this far from its destination landed elsewhere (check_landing)
 BLIND_S = 180  # no answered local poll for this long after an aircraft's last report: we did not see it go
 TAKEOFF_MAX_GAP_S, TAKEOFF_MAX_ALT = 180, 10000  # a take-off is seen: ground, then airborne within 3 min, low
@@ -842,6 +845,7 @@ class Track:
     quiet_why: str = ""      # "military" or "light": why it gets one alert, then quiet (alert())
     amm_near: float = 0.0    # data time since which it has stayed within AMM_LOCAL_NM of Amman
     takeoff: float = 0.0     # data time of its take-off (left the ground, or first heard climbing low)
+    stop_wait: tuple | None = None  # (data time it is late, ICAO, lat, lon, landed): an arrival on the ground on its way early
     takeoff_pos: tuple | None = None  # (lat, lon) of its take-off in this leg: its departure routing (check_turn)
     climb_peak: int = 0      # highest altitude since take-off held on two reports in a row (EARLY_DESCENT)
     flown_cs: str = ""       # a callsign whose flight to / from our airport it has completed (end_leg)
@@ -2103,6 +2107,7 @@ class Monitor:
         for t, prev, ac, spoofed in updated:
             self.check_track(t, prev, ac, spoofed, server_now)
         self.aero_alerts()
+        self.check_stops(server_now)
         self.telegram_followups(server_now)
 
         # Don't declare mass "lost contact" after a feed glitch; after our own outage, see check_lost.
@@ -2141,7 +2146,8 @@ class Monitor:
         t.takeoff_pos, t.lifeguard_at = None, 0.0
         if unseen:
             t.takeoff, t.leg_start = 0.0, t.last.t
-        self.unfollow(t, "landed")
+        if not t.stop_wait:  # (an early stop: still followed, to see it leave - check_stops)
+            self.unfollow(t, "landed")
 
     def light(self, t: Track, route: str | None = None) -> bool:
         """Light / private aircraft: not military (their own rule), not large, not on the board, no route data -
@@ -2576,9 +2582,32 @@ class Monitor:
         drop = t.climb_peak - s.alt
         t.climb_peak = max(t.climb_peak, min(s.alt, p.alt))
         if drop >= EARLY_DROP and s.alt <= p.alt and airline_like(t) and t.large and not t.military:
+            field = self.field_ahead(t, s, EARLY_FIELD_NM)
+            if field:
+                self.note(t, "early", f"{drop} ft below its climb's peak {(s.t - t.takeoff) / 60:.0f} min after "
+                          f"take-off, with no route and {field} ahead: a short hop landing there, not alerted")
+                return
             self.alert(t, "EARLY_DESCENT", f"descending {s.vrate if s.vrate is not None else '?'} ft/min, "
                        f"{drop} ft below the {t.climb_peak} ft it climbed to, {(s.t - t.takeoff) / 60:.0f} min "
                        "after take-off - departures do not turn down this early (AS1282)")
+
+    def field_ahead(self, t: Track, s: Sample, nm: float) -> str | None:
+        """For a flight with no board row nor route: an airfield (the region's, a local standing-data checkout's)
+        within `nm` and --toward-dest-tol of its track, not the one it took off from (a turn back stays alerted).
+        AYT253 (Ayeet E145, 25 Oct 2026) climbed to 11,050 ft and descended into Ramon AB, 24 nm ahead:
+        EARLY_DESCENT + LOST_CONTACT on Telegram."""
+        if t.sched or s.track is None or (t.callsign and self.routes.get(t.callsign, (0, None))[1]):
+            return None
+        fields = [(lat, lon, code) for code, (lat, lon, _) in REGION_AIRPORTS.items()]
+        fields += self.standing.all_fields() if self.standing else []
+        for lat, lon, code in fields:
+            if abs(lat - s.lat) > 1 or abs(lon - s.lon) > 1.5:
+                continue
+            d = haversine_nm(s.lat, s.lon, lat, lon)
+            if (2 < d <= nm and heading_diff(s.track, bearing(s.lat, s.lon, lat, lon)) <= self.args.toward_dest_tol
+                    and not (t.takeoff_pos and haversine_nm(*t.takeoff_pos, lat, lon) <= LANDING_AIRPORT_NM)):
+                return code
+        return None
 
     def trusted_gs(self, t: Track) -> float | None:
         """Ground speed fit for judging a climb / descent angle, else None (then only the --vrate
@@ -2803,6 +2832,7 @@ class Monitor:
                 t.sent = deque((tuple(x) for x in rec.get("sent", [])), maxlen=MAP_ALERTS)
                 t.mil_held = [tuple(x) for x in rec.get("mil_held", [])]
                 t.takeoff_pos = tuple(t.takeoff_pos) if t.takeoff_pos else None
+                t.stop_wait = tuple(t.stop_wait) if t.stop_wait else None
                 t.samples.append(Sample(**rec["last"]))
                 t.lost = True
                 self.tracks[h] = t
@@ -3132,6 +3162,24 @@ class Monitor:
                            f"({ab + d:.0f} nm in {span:.0f}s via it, ~{(ab + d) / (span / 3600):.0f} kt) - "
                            "possible GPS spoofing or bad data")
 
+    def check_stops(self, now: float) -> None:
+        """An arrival waiting at a stop on its way (`early_stop`): airborne again = a stop; still on the ground
+        there when it can no longer land at our airport by its board time = a DIVERSION."""
+        for t in self.tracks.values():
+            if not t.stop_wait or not t.last:
+                continue
+            late, apt, lat, lon, landed = t.stop_wait
+            if not t.last.on_ground:
+                t.stop_wait = None
+                log.info("%s airborne again after its stop at %s", t.label(), apt)
+            elif now > late:
+                t.stop_wait = None
+                if haversine_nm(t.last.lat, t.last.lon, lat, lon) <= DIVERTED_NM:
+                    t.followed = True
+                    self.alert(t, "DIVERSION", f"{self.args.airport} arrival on the ground {self.dist(t.last):.0f} "
+                               f"nm away at {apt} since {time.strftime('%H:%M', time.gmtime(landed))}"
+                               f"Z, too late to land by its scheduled {t.sched.when if t.sched else '?'}")
+
     def check_landing(self, t: Track, kind: str, d: float) -> None:
         s = t.last
         if not (s.on_ground and t.was_airborne):
@@ -3145,6 +3193,12 @@ class Monitor:
             stop = self.planned_stop(t, s, kind)
             if stop:
                 log.info("%s on the ground at %s, a stop on its route - not a diversion", t.label(), stop)
+                return
+            stop = self.early_stop(t, s) if self.landing_place(t, d) is not None else None
+            if stop:
+                log.info("%s on the ground at %s on its way, in time to land by %s: probably a stop - a "
+                         "DIVERSION if still there at %s", t.label(), stop, t.sched.when,
+                         time.strftime("%H:%M:%SZ", time.gmtime(t.stop_wait[0])))
                 return
             place = self.landing_place(t, d)
             if place is not None:
@@ -3278,7 +3332,37 @@ class Monitor:
                 pos = None
             if pos and haversine_nm(s.lat, s.lon, *pos) <= DIVERTED_NM:
                 return icao
+        if len(parts) > 2 and stops and self.on_the_way(s, far):  # (listed: not a tag the board implies)
+            # a route with stops: wherever it stops on the way. KLM462 LLBG-LCLK-EHAM landed at Bucharest (KLM's
+            # stop since KL463 of 24 Oct; the crowd-sourced route keeps the old one), a DIVERSION (26 Oct 2026)
+            return self.field_name(s)
         return self.board_stop(t, s, kind)
+
+    def on_the_way(self, s: Sample, far: tuple) -> bool:
+        """`s` on the way between our airport and `far` (ICAO, lat, lon): at most TAG_DETOUR longer than flying straight."""
+        home = (self.args.lat, self.args.lon)
+        straight = haversine_nm(far[1], far[2], *home)
+        return bool(straight) and (haversine_nm(far[1], far[2], s.lat, s.lon)
+                                   + haversine_nm(s.lat, s.lon, *home)) <= TAG_DETOUR * straight
+
+    def field_name(self, s: Sample) -> str:
+        """The airport at `s`: the standing data's nearest (a local checkout), else the region's list, else its position."""
+        field = self.standing.airfield_near(s.lat, s.lon) if self.standing else None
+        apt, ad = field if field and field[1] <= LANDING_AIRPORT_NM else nearest_airport(s.lat, s.lon)
+        return apt if ad <= LANDING_AIRPORT_NM else f"{s.lat:.4f},{s.lon:.4f}"
+
+    def early_stop(self, t: Track, s: Sample) -> str | None:
+        """An arrival on the ground on its way, early enough to fly on and still land by its board time: a stop
+        the board and route data do not name (IB1873 MAD -> TLV on the ground at Athens 01:41, landed at TLV 04:16,
+        due 04:30; 26 Oct 2026). Waits in `Track.stop_wait` until that is too late (check_stops)."""
+        far = self.other_end(t, "ARR")
+        if not (far and t.sched and t.sched.direction == "ARR" and t.sched.ts and self.on_the_way(s, far)):
+            return None
+        late = t.sched.ts - self.dist(s) / STOP_KT * 3600 - STOP_TURN_S
+        if s.t > late:
+            return None
+        t.stop_wait = (late, self.field_name(s), s.lat, s.lon, s.t)
+        return t.stop_wait[1]
 
     def board_stop(self, t: Track, s: Sample, kind: str) -> str | None:
         """The board's tag stop (`Schedule.tag_stops`) within DIVERTED_NM, on the way: at most TAG_DETOUR
@@ -3987,8 +4071,11 @@ class Monitor:
         t.followed = True  # keep its fate visible wherever it goes
         # Silence alone is mostly a coverage gap (157 of 429 alerts, 10-11 Oct 2026) and asking for a
         # silent aircraft every cycle finds nothing: followed at --follow-interval, hot only with
-        # another anomaly within --hot-minutes.
-        if kind in ANOMALIES and (kind != "LOST_CONTACT" or pattern):
+        # another anomaly within --hot-minutes. A kind Telegram skips makes no flight hot (that lifts the turn
+        # exemptions): RJ302, holding near Ovda / Aqaba after a logged TOWARD_ISRAEL, sent each leg of the hold as
+        # a course reversal, 25 Oct 2026.
+        skip = self.notifier.tg_skip
+        if kind in ANOMALIES and (kind not in skip or kind == "LOST_CONTACT" and set(recent) - skip):
             t.hot_until = max(t.hot_until, now + a.hot_minutes * 60)
             if kind not in SPOOF_KINDS:
                 t.gps_free_until = max(t.gps_free_until, now + a.hot_minutes * 60)
