@@ -185,6 +185,7 @@ STATE_FIELDS = ("callsign", "reg", "actype", "category", "military", "last_msg",
                 "flown_cs", "feed", "left_home", "rose_home", "orig_first", "orig_max", "orig_left", "came_from", "sent",
                 "stop_wait")
 TG_RETRY_S = 3  # a Telegram message that failed to connect is sent once more after this
+AWAY_CLIMB_NM = 300  # our departure first heard climbing (below FL250) farther than this: another leg on its callsign
 TAKEOFF_POS_NM = 40  # on the ground, then airborne this near after a gap of any length: took off there (takeoff_pos)
 STATE_MAX_AGE_S = 3 * 3600  # aircraft heard longer ago are not kept
 STATE_SAVE_S = 600          # also written this often while running (a crash keeps the state of a few minutes ago)
@@ -915,6 +916,11 @@ class Track:
     def course_into(self, x: Sample) -> float | None:
         """Direction of travel from the positions (not the reported track) arriving at sample x:
         from the latest earlier sample 2-60 s before it, if it moved at least 0.1 nm."""
+        path = self.path_into(x)
+        return path[0] if path else None
+
+    def path_into(self, x: Sample) -> tuple[float, float] | None:
+        """(course, data time it held: halfway between the two positions) of `course_into`."""
         prev = None
         for y in self.samples:
             if y.t > x.t - 2:
@@ -922,7 +928,7 @@ class Track:
             prev = y
         if prev is None or x.t - prev.t > 60 or haversine_nm(prev.lat, prev.lon, x.lat, x.lon) < 0.1:
             return None
-        return bearing(prev.lat, prev.lon, x.lat, x.lon)
+        return bearing(prev.lat, prev.lon, x.lat, x.lon), (prev.t + x.t) / 2
 
     def track_ok(self, x: Sample) -> bool:
         """The reported track agrees with the path into x (when known). The path's direction is the
@@ -2282,6 +2288,16 @@ class Monitor:
         if ((s.on_ground or (s.alt or 0) < 3000) and d < 8
                 or len(t.samples) <= 2 and d < 30 and (s.alt or 0) < 10000 and (s.vrate or 0) > 300):
             t.left_home = True  # (or first heard climbing out: RYR6VV at 5,600 ft 6 nm from Nador)
+        elif (len(t.samples) <= 2 and not t.left_home and not s.on_ground and d > AWAY_CLIMB_NM
+              and (s.alt or 0) < 25000 and (s.vrate or 0) > 300 and self.classify(t)[0] == "DEP"):
+            # first heard climbing far from our airport: it took off there, another leg on our departure's callsign.
+            # W46404 (9H-WZR, board TLV -> MXP) first heard after a restart climbing out near Rome at FL197, flying on
+            # to Romania: two TURNING_BACK "1,223 nm out and closing" (26 Oct 2026). (At cruise it may be ours: the
+            # squawk replay's departures are often first heard far out at cruise, SWA512 362 nm from Honolulu)
+            t.flown_cs, t.sched = t.callsign, None
+            t.takeoff_pos = t.takeoff_pos or (s.lat, s.lon)
+            log.info("%s first heard climbing at %s ft %.0f nm from %s: another leg on our departure's callsign",
+                     t.label(), s.alt, d, self.args.airport)
         amm = haversine_nm(s.lat, s.lon, *REGION_AIRPORTS["AMM"][:2])
         if (s.on_ground and amm < 5) or (len(t.samples) <= 2 and amm < 15 and (s.alt or 0) < 8000
                                          and (s.vrate or 0) > 300):
@@ -3140,14 +3156,18 @@ class Monitor:
             #          its positions moved at ~320, was "~53 deg bank", 25 Oct 2026)
         # ...and the path must bend like the reported tracks: a corrupted velocity message (4X-CZF,
         # 6 Oct 2026: straight on 131 deg, one reading 262 deg / 3,571 kt) is a "turn" otherwise
-        c_old, c_new = t.course_into(old), t.course_into(s)
-        if c_old is None or c_new is None:
+        p_old, p_new = t.path_into(old), t.path_into(s)
+        if p_old is None or p_new is None or p_new[1] <= p_old[1]:
             return
         by_track = (s.track - old.track + 540) % 360 - 180
-        by_path = (c_new - c_old + 540) % 360 - 180
+        by_path = (p_new[0] - p_old[0] + 540) % 360 - 180
         if by_track * by_path <= 0 or abs(by_path) < abs(by_track) / 2:
             return
-        bank = math.degrees(math.atan(math.radians(dtrk) / dt * s.gs * 0.5144 / 9.81))
+        # the turn rate the positions show counts too, the lower one: LY316 (B789, FL146, 26 Oct 2026) "7 -> 116 deg
+        # in 28 s (~48 deg bank)" from its reported tracks, a steady 23-30 deg turn of 60 s in ADS-B Exchange's trace;
+        # VPCMV (GLEX) out of Amman "39 deg", 24-29 in the trace
+        rate = min(math.radians(dtrk) / dt, math.radians(abs(by_path)) / (p_new[1] - p_old[1]))
+        bank = math.degrees(math.atan(rate * s.gs * 0.5144 / 9.81))
         if bank >= a.max_bank:
             self.alert(t, "SHARP_TURN", f"{old.track:.0f} -> {s.track:.0f} deg in {dt:.0f}s at "
                        f"{s.gs:.0f} kt (~{bank:.0f} deg bank) at {s.alt} ft", severity=bank)
@@ -4098,7 +4118,9 @@ class Monitor:
         # another anomaly within --hot-minutes. A kind Telegram skips makes no flight hot (that lifts the turn
         # exemptions): RJ302, holding near Ovda / Aqaba after a logged TOWARD_ISRAEL, sent each leg of the hold as
         # a course reversal, 25 Oct 2026.
-        skip = self.notifier.tg_skip
+        # Nor a SHARP_TURN (a bank worked out from ~30 s of track): VPCMV out of Amman and LY316 turned back toward
+        # TLV then sent their departure / approach turns as course reversals too (26 Oct 2026).
+        skip = self.notifier.tg_skip | {"SHARP_TURN"}
         if kind in ANOMALIES and (kind not in skip or kind == "LOST_CONTACT" and set(recent) - skip):
             t.hot_until = max(t.hot_until, now + a.hot_minutes * 60)
             if kind not in SPOOF_KINDS:

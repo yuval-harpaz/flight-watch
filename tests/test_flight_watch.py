@@ -1029,6 +1029,31 @@ class SharpTurnGlitchTests(unittest.TestCase):
         self.assertNotIn("SHARP_TURN", kinds(alerts))
 
 
+    def test_turn_rate_its_positions_do_not_back_is_no_sharp_turn(self):
+        """LY316 (B789, FL146, 26 Oct 2026): "7 -> 116 deg in 28 s at 316 kt (~48 deg bank)" from its reported tracks;
+        ADS-B Exchange's trace has a steady 23-30 deg turn of 60 s. Here the track lags, then catches up; the
+        positions turn at 2 deg/s (~30 deg). The same turn at 4 deg/s in both is a sharp turn."""
+        got = {}
+        for case, step in (("lagging track", 20), ("sharp", 40)):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            heads = [7] * 4 + [7 + step * (i + 1) for i in range(5)] + [7 + step * 5] * 4
+            states = path(32.4, 33.9, heads, [14600] * len(heads), gs=316)
+            if case == "lagging track":
+                for i in (4, 5, 6):
+                    states[i] = {**states[i], "track": 7}
+            fly(mon, feed, clock, "7380c4", states, flight="ELY316", r="4X-EDE", t="B789")
+            got[case] = "SHARP_TURN" in kinds(alerts)
+        self.assertEqual(got, {"lagging track": False, "sharp": True})
+
+    def test_a_sharp_turn_alone_makes_no_flight_hot(self):
+        """VPCMV out of Amman, LY316 toward TLV (26 Oct 2026): hot from a SHARP_TURN, their routine turns went out as
+        course reversals too."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "4002c5", path(31.9, 35.9, [250] * 3, [7000] * 3), flight="VPCMV", r="VP-CMV", t="GLEX")
+        t = mon.tracks["4002c5"]
+        self.assertTrue(mon.alert(t, "SHARP_TURN", "339 -> 250 deg", force=True))
+        self.assertFalse(mon.hot(t))
+
 class GapAndDetourJumps(unittest.TestCase):
     """POSITION_JUMP beyond short hops: reappearing too far after a gap (THY1KG, 5 Oct 2026: 94 nm
     in 408 s, ~833 kt, over the Eastern Mediterranean) and one position off the track and back."""
@@ -1288,11 +1313,20 @@ class DestinationTests(unittest.TestCase):
         self.assertNotIn("OFF_COURSE", kinds(alerts))  # 60 deg off the direct line: a route bend
 
     def test_departure_turning_back(self):
-        mon, feed, clock, alerts = with_board([board_row("LY", "315", "D", local_time(mon_clock(), -0.5), "LHR")])
-        tracks = [255] * 6 + [255 + 15 * i for i in range(1, 13)] + [75] * 24
-        fly(mon, feed, clock, "738315", path(32.45, 32.6, tracks, [33000] * len(tracks)), flight="ELY315",
-            r="4X-EDC")
-        self.assertIn("TURNING_BACK", kinds(alerts))
+        """Out at cruise, it turns back. First heard climbing far away: W46404 (9H-WZR, board TLV -> MXP) first heard
+        after a restart climbing out near Rome at FL197, then flying on to Romania - two TURNING_BACK (26 Oct 2026):
+        another leg on its callsign, not alerted."""
+        got = {}
+        for case in ("cruise", "climbing far away"):
+            mon, feed, clock, alerts = with_board([board_row("LY", "315", "D", local_time(mon_clock(), -0.5), "LHR")])
+            if case == "cruise":
+                tracks = [255] * 6 + [255 + 15 * i for i in range(1, 13)] + [75] * 24
+                states = path(32.45, 32.6, tracks, [33000] * len(tracks))
+            else:
+                states = path(41.6, 12.3, [110] * 40, [min(19700 + 1000 * i, 37000) for i in range(40)])
+            fly(mon, feed, clock, "738315", states, flight="ELY315", r="4X-EDC")
+            got[case] = "TURNING_BACK" in kinds(alerts)
+        self.assertEqual(got, {"cruise": True, "climbing far away": False})
 
 
 def mon_clock():

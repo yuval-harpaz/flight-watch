@@ -262,6 +262,12 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   still alerts (FZ1073 toward Dubai). Nor in its departure routing, `CLIMB_OUT_S` (20 min) after take-off, whatever
   its heading: 9A-BTM flew 6H717 TLV -> BUD, then left Budapest for Tivat as ISR178 (6H178 TIV -> TLV) heading 290 deg,
   "1,174 nm out and opening", and 9A-BTI as ISR174 out of Rome (22 Oct 2026).
+  Our departure first heard climbing below FL250 more than `AWAY_CLIMB_NM` (300) out took off there: another leg on its
+  callsign (`flown_cs`, the board row dropped, `takeoff_pos` there; 27 Oct 2026, the owner's choice). W46404 (9H-WZR, board
+  TLV -> MXP) was first heard after a restart climbing out near Rome at FL197 and flew on to Romania: two TURNING_BACK
+  "1,223 nm out and closing". Requiring every departure to be seen leaving (as DIVERSION does off the board) was tried
+  first: 12 squawk-replay turn-backs lost their TURNING_BACK, departures first heard far out at cruise (SWA512 362 nm from
+  Honolulu at FL360) - ADS-B Exchange's coverage, as a TLV departure after our polls were refused.
   A landing within `DIVERTED_NM` of a stop listed in the route data (`planned_stop`: an airport between the ends,
   when the route's far end agrees with the board) is logged, not a DIVERSION: KLM461 AMS -> TLV is EHAM-LCLK-LLBG
   and "went silent ... probably landing at LCA" (20 Oct 2026). 113 routes through TLV list stops (crowd-sourced,
@@ -425,6 +431,11 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   (~62 deg bank)" at FL190 in GPS jamming (22 Oct 2026; the same aircraft had a corrupted velocity on 6 Oct).
   The positions must back the new speed itself, not only the average of both ends (the bank uses it): IZ98, an A321 at
   FL123 at the onset of GPS jamming, reported 300 then "675 kt" while its positions moved at ~320: "~53 deg bank" (25 Oct 2026).
+  The turn rate is the lower of the reported tracks' and the positions' (`Track.path_into`: the course between two positions,
+  at the time halfway; 27 Oct 2026, the owner's choice): 4 of 4 SHARP_TURNs on Telegram on 26 Oct were routine turns, LY316
+  (B789, FL146) "7 -> 116 deg in 28 s (~48 deg)" and VPCMV (GLEX) out of Amman "39 deg", 23-30 deg in ADS-B Exchange's traces.
+  Squawk replay: AZG5512's two SHARP_TURNs (35, 38 deg) in its hold before diverting are gone; its other alerts stay.
+  A SHARP_TURN makes no flight hot (see Hot flights).
 - **OFF_COURSE / TURNING_BACK**: long before landing, an arrival > 60 nm out flying >= 100 deg
   away from TLV for 150 s while the distance opens, or a departure flying back toward TLV
   (within 60 deg) while closing. OFF_COURSE also covers any flight with a plausible route
@@ -473,7 +484,8 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   A kind Telegram skips (`--telegram-skip`) makes no flight hot, nor counts as the other anomaly of a lost contact (26 Oct
   2026, the owner's choice): RJ302, holding near Ovda / Aqaba after a logged TOWARD_ISRAEL, sent each leg of the hold as a
   course reversal, 5 messages; N720LE a 74 deg turn. Squawk replay: UA915's ocean coverage gaps after a POSITION_JUMP no
-  longer alert.
+  longer alert. Nor does a SHARP_TURN (27 Oct 2026): VPCMV's departure turn out of Amman and LY316's turn toward TLV then
+  went out as course reversals too.
   Hot lasts `--hot-minutes` (20): queried
   every cycle instead of every `--follow-interval`, every anomaly reported (no terminal or
   route-corner exemptions), and two different anomalies within that time are sent at
