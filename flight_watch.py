@@ -259,6 +259,11 @@ ISRAELI_CODES = {c for c, v in REGION_AIRPORTS.items() if v[2]} | {"LLBG", "LLHA
 # callsign of its sister 4X-ABF for 55 s and of another for 100 s (12 Oct 2026, see new_callsign)
 CALLSIGN_HOLD = 120
 SMALL_MAX_KT = 600   # faster over the ground than a bizjet / light aircraft flies: a bad speed (check_sharp_turn)
+# A SHARP_TURN waits this long (s, data time) for a report back on its old course where it would have been without
+# the turn - a velocity / position glitch (settle_turn); sent when a trusted report after it is not, or nothing is
+# heard for TURN_HOLD_MAX_S
+TURN_HOLD_S = 40
+TURN_HOLD_MAX_S = 120
 CLIMB_OUT_S = 20 * 60  # an arrival on its way to its own origin, this soon after take-off: in its departure routing
 # no aircraft rolls on the ground faster (kt): AIZ282 "on the ground" at 575 kt, 11 Oct 2026
 GROUND_MAX_KT = 250
@@ -867,6 +872,8 @@ class Track:
     amm_near: float = 0.0    # data time since which it has stayed within AMM_LOCAL_NM of Amman
     takeoff: float = 0.0     # data time of its take-off (left the ground, or first heard climbing low)
     stop_wait: tuple | None = None  # (data time it is late, ICAO, lat, lon, landed): an arrival on the ground on its way early
+    turn_held: tuple | None = None  # (report before, turn report, message, bank): a SHARP_TURN waiting (settle_turn)
+    turn_glitch: float = 0.0  # data time of the report that showed a held SHARP_TURN was a glitch (settle_turn)
     takeoff_pos: tuple | None = None  # (lat, lon) of its take-off in this leg: its departure routing (check_turn)
     climb_peak: int = 0      # highest altitude since take-off held on two reports in a row (EARLY_DESCENT)
     flown_cs: str = ""       # a callsign whose flight to / from our airport it has completed (end_leg)
@@ -2122,6 +2129,7 @@ class Monitor:
                 sample.alt = int(sample.alt - t.geo_offset)
             label = (self.spoofed(t, sample) or self.integrity(t, sample)  # a fake / untrustworthy
                      or self.unreal_ground(t, sample))
+            self.settle_turn(t, sample, label)
             if not label and (prev is None or sample.t > prev.t + 0.5):  # position is kept out of the track
                 t.samples.append(sample)
             updated.append((t, prev, ac, label))
@@ -2136,6 +2144,9 @@ class Monitor:
             self.check_track(t, prev, ac, spoofed, server_now)
         self.aero_alerts()
         self.check_stops(server_now)
+        for t in self.tracks.values():
+            if t.turn_held and server_now - t.turn_held[1].t > TURN_HOLD_MAX_S:
+                self.settle_turn(t, None, "")  # nothing heard since: sent
         self.telegram_followups(server_now)
 
         # Don't declare mass "lost contact" after a feed glitch; after our own outage, see check_lost.
@@ -2475,6 +2486,7 @@ class Monitor:
             for x, info in self.thin(newer, 2):
                 prev = t.last
                 label = self.spoofed(t, x) or self.integrity(t, x) or self.unreal_ground(t, x)
+                self.settle_turn(t, x, label)
                 if not label and (prev is None or x.t > prev.t + 0.5):
                     t.samples.append(x)
                 t.last_msg = max(t.last_msg, x.t)
@@ -3141,11 +3153,11 @@ class Monitor:
                 or s.gs > (a.max_gap_speed if t.large or t.military else SMALL_MAX_KT)):
             return  # (faster than any airliner flies: a bad speed - THY6219 "843 kt" at 8,700 ft, 14 Oct 2026;
             #          HEZ652, a Hawker 800 "at 728 kt" at FL190 in GPS jamming, 22 Oct 2026)
-        if self.trusted_gs(t) is None:
-            return  # a speed its positions do not back (the check the climb / descent angle uses)
+        if self.trusted_gs(t) is None or t.turn_held:
+            return  # a speed its positions do not back (the check the climb / descent angle uses); one waiting
         old = t.sample_ago(25)
-        if not old or old.track is None or not old.gs:
-            return
+        if not old or old.track is None or not old.gs or old.t < t.turn_glitch:
+            return  # (from a glitch's report: its way back is no turn either)
         dt = s.t - old.t
         dtrk = heading_diff(s.track, old.track)
         if dt <= 0 or dtrk < 20:
@@ -3171,8 +3183,35 @@ class Monitor:
         rate = min(math.radians(dtrk) / dt, math.radians(abs(by_path)) / (p_new[1] - p_old[1]))
         bank = math.degrees(math.atan(rate * s.gs * 0.5144 / 9.81))
         if bank >= a.max_bank:
-            self.alert(t, "SHARP_TURN", f"{old.track:.0f} -> {s.track:.0f} deg in {dt:.0f}s at "
-                       f"{s.gs:.0f} kt (~{bank:.0f} deg bank) at {s.alt} ft", severity=bank)
+            base = next((y for y in reversed(t.samples) if old.t <= y.t < s.t and y.track is not None and y.gs
+                         and heading_diff(y.track, old.track) <= 10), old)  # its last report on the old course
+            t.turn_held = (base, s, f"{old.track:.0f} -> {s.track:.0f} deg in {dt:.0f}s at {s.gs:.0f} kt "
+                           f"(~{bank:.0f} deg bank) at {s.alt} ft", bank)
+
+    def settle_turn(self, t: Track, x: Sample | None, label: str) -> None:
+        """A held SHARP_TURN (check_sharp_turn) against a later report x, trusted or not (`label`): back on the old
+        course within 30 deg, where the report before the turn would have flown to (1.5 nm, or 10% of the way), is a
+        glitch - dropped; a trusted report TURN_HOLD_S after the turn that is not, or x None (nothing heard), sends it.
+        4X-CZF (H25B, FL240, 27 Oct 2026): straight on 349 deg at 388 kt, it reported 58 deg at 551 kt for 22 s, its
+        positions running off ENE, then 349 deg again where it would have been: "~48 deg bank" on Telegram. Turning
+        aircraft draw an arc; a velocity / position glitch zig-zags back. Cost: a SHARP_TURN is sent ~40 s later."""
+        held = t.turn_held
+        if not held or (x is not None and x.t <= held[1].t):
+            return
+        base, turn, msg, bank = held
+        if x is not None:
+            way = (base.gs or 0) * (x.t - base.t) / 3600
+            there = destination(base.lat, base.lon, base.track, way)
+            if (x.track is not None and heading_diff(x.track, base.track) <= 30
+                    and haversine_nm(x.lat, x.lon, *there) <= max(1.5, 0.1 * way)):
+                t.turn_held, t.turn_glitch = None, x.t
+                log.info("%s SHARP_TURN %s not alerted: %.0f s later on %.0f deg where it would have been "
+                         "without it - a velocity / position glitch", t.label(), msg, x.t - turn.t, x.track)
+                return
+            if label or x.t - turn.t < TURN_HOLD_S:
+                return
+        t.turn_held = None
+        self.alert(t, "SHARP_TURN", msg, severity=bank, sample=turn)
 
     def check_jump(self, t: Track, prev: Sample | None) -> None:
         s = t.last

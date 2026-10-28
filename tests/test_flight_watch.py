@@ -1045,6 +1045,23 @@ class SharpTurnGlitchTests(unittest.TestCase):
             got[case] = "SHARP_TURN" in kinds(alerts)
         self.assertEqual(got, {"lagging track": False, "sharp": True})
 
+    def test_zig_zag_back_onto_its_course_is_no_sharp_turn(self):
+        """4X-CZF (H25B, FL240, 27 Oct 2026): straight on 349 deg at 388 kt, it reported 58 deg at 551 kt for 22 s, the
+        positions running off ENE, then 349 again where it would have been: "~48 deg bank". A real turn holds."""
+        got = {}
+        for case in ("glitch", "turned"):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            if case == "glitch":
+                states = path(32.33, 34.42, [349] * 14, [24000] * 14, gs=388)
+                for i in (6, 7, 8):
+                    lat, lon = fw.destination(states[5]["lat"], states[5]["lon"], 58, 551 * (i - 5) * 10 / 3600)
+                    states[i] = {**states[i], "lat": lat, "lon": lon, "track": 58, "gs": 551}
+            else:
+                states = path(32.33, 34.42, [349] * 6 + [24, 58] + [58] * 6, [24000] * 14, gs=388)
+            fly(mon, feed, clock, "73934e", states, flight="4XCZF", r="4X-CZF", t="H25B")
+            got[case] = kinds(alerts).count("SHARP_TURN")
+        self.assertEqual(got, {"glitch": 0, "turned": 1})
+
     def test_a_sharp_turn_alone_makes_no_flight_hot(self):
         """VPCMV out of Amman, LY316 toward TLV (26 Oct 2026): hot from a SHARP_TURN, their routine turns went out as
         course reversals too."""

@@ -438,6 +438,15 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   (B789, FL146) "7 -> 116 deg in 28 s (~48 deg)" and VPCMV (GLEX) out of Amman "39 deg", 23-30 deg in ADS-B Exchange's traces.
   Squawk replay: AZG5512's two SHARP_TURNs (35, 38 deg) in its hold before diverting are gone; its other alerts stay.
   A SHARP_TURN makes no flight hot (see Hot flights).
+  A turning aircraft draws an arc; a velocity / position glitch zig-zags back. So a SHARP_TURN waits `TURN_HOLD_S` (40 s)
+  for a report - trusted or not - back on its old course (30 deg) where it would have been without the turn (1.5 nm, or
+  10% of the way): then it was a glitch and is only logged; sent at the first trusted report after that, or after
+  `TURN_HOLD_MAX_S` (120 s) unheard (`Track.turn_held`, `settle_turn`; 28 Oct 2026, the owner: "were the aircraft to turn we
+  would have seen a circle"). 4X-CZF (H25B, FL240, 27 Oct 2026) flew straight on 349 deg at 388 kt and reported 58 deg at
+  551 kt for 22 s, its positions running off ENE, then 349 again on its line: "~48 deg bank" on Telegram (the monitor then
+  dropped its true positions as NIC 0 out of reach of the fake ones). Not aircraft size: the same speed ceiling would not
+  catch it. Turns measured from a glitch's reports are skipped (its way back). Replayed from ADS-B Exchange's traces, the
+  43 live SHARP_TURNs of 6-27 Oct: only that one changes. Cost: a SHARP_TURN is sent ~40 s later.
 - **OFF_COURSE / TURNING_BACK**: long before landing, an arrival > 60 nm out flying >= 100 deg
   away from TLV for 150 s while the distance opens, or a departure flying back toward TLV
   (within 60 deg) while closing. OFF_COURSE also covers any flight with a plausible route
