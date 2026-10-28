@@ -2843,10 +2843,12 @@ class LegEndAndLightAircraftTests(unittest.TestCase):
 
     def test_light_jet_alerts_once_whatever_its_callsign(self):
         """BDK12 (survey lines west of Israel, 21-22 Oct 2026): 18 Telegram messages in 3 h. Its callsign looks
-        like an airline's, so the pattern-flying rule (one turn alert in 2 h) did not apply."""
+        like an airline's, so the pattern-flying rule (one turn alert in 2 h) did not apply. Its wake category is A3
+        (large): BDK04, the same aircraft, 19 messages on 28 Oct 2026 - the rule had judged it large."""
         mon, feed, clock, alerts = make(["--no-routes"])
         lap = [115] * 30 + [296] * 30  # (out and back on the same line: a reversal each way, 10 min a lap)
-        fly(mon, feed, clock, "738685", path(32.6, 33.2, lap * 4, [25000] * 240, gs=400), flight="BDK12", r="", t="")
+        fly(mon, feed, clock, "738685", path(32.6, 33.2, lap * 4, [25000] * 240, gs=400), flight="BDK12", r="", t="",
+            category="A3")
         self.assertEqual(kinds(alerts), ["COURSE_CHANGE"])
         self.assertIn("light / private aircraft with no known route: no further alerts", alerts[0]["message"])
         self.assertTrue(mon.tracks["738685"].mil_held)  # (in its follow-up: "not alerted (light, ...)")

@@ -2194,8 +2194,11 @@ class Monitor:
         """Light / private aircraft: not military (their own rule), not large, not on the board, no route data -
         bizjets, survey and training flights, air taxis, whatever their callsign looks like (BDK12 and HEZ652 have
         airline-style ones). Jump planes keep their skydiving rule: one alert for their first dive (SKYDIVE_QUIET_S),
-        which an earlier alert of this rule must not use up."""
-        return not (t.military or t.large or t.sched or route or t.actype in JUMP_PLANES or t.skydive)
+        which an earlier alert of this rule must not use up. Large by an airliner's type only, not the wake category: A3
+        covers big bizjets (G550, Global) too, and BDK12 / BDK04 (738685, survey lines west of Israel at FL350-440, no
+        type in the feed) sent A3 - 16 Telegram messages on 22 Oct 2026 and 19 on 28 Oct, the rule never applied."""
+        return not (t.military or LARGE_TYPES.fullmatch(t.actype or "") or t.sched or route or t.actype in JUMP_PLANES
+                    or t.skydive)
 
     def unfollow(self, t: Track, why: str) -> None:
         """Its flight is over (landed, or a new callsign on the ground): no longer followed, unless hot. It is

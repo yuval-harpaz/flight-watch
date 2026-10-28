@@ -344,7 +344,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   28 nm back and forth; 20 Oct: IAM4188 (Italian Air Force AT76, patrolling west of Israel) 7. Cost: a real accident
   of a military aircraft after its first alert is only logged (and in its follow-up).
   **Light / private aircraft** the same (22 Oct 2026, the owner's wish; `Monitor.light`, `Track.quiet_why` "light"):
-  not military, not large, not on the board, no route data - whatever the callsign looks like (BDK12, an Israeli
+  not military, not an airliner type (`LARGE_TYPES`; not the wake category: A3 covers big bizjets too, and BDK12 /
+  BDK04, 738685 with no type in the feed, sends A3 - the rule never applied to it: 19 Telegram messages on 28 Oct 2026),
+  not on the board, no route data - whatever the callsign looks like (BDK12, an Israeli
   survey jet with no type in the feed, sent 18 Telegram messages in 3 h of survey lines on 22 Oct; HEZ652, Hawker
   4X-CZF, 4 in GPS jamming: their airline-style callsigns escaped the pattern-flying rule). Two differences: a fall at
   `--vrate` or faster is still alerted, and the one alert is one Telegram gets - a `--telegram-skip` kind (lost
