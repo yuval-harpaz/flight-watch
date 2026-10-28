@@ -3753,6 +3753,11 @@ class Monitor:
                 elif stop:
                     log.info("%s silent %.0fs descending near %s, a stop on its route - not a diversion",
                              t.label(), silent, stop)
+                elif kind == "ARR" and t.position_only() and not self.hot(t):
+                    # MLAT coverage, as for LOST_CONTACT below: IZ598 (D-AUSC, A343, positions only) went silent
+                    # at 10,225 ft over Amman 47 nm from TLV and landed at TLV 10 min later (27 Oct 2026)
+                    log.info("%s silent %.0fs, %s, %.0f nm from %s - position-only track (MLAT coverage), not "
+                             "taken as a landing", t.label(), silent, where, ad, apt)
                 elif kind == "ARR":  # a TLV arrival descending into another airport
                     t.lost_alerted = True
                     self.alert(t, "DIVERSION", f"{a.airport} arrival went silent {silent:.0f}s, "

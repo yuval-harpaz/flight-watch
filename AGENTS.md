@@ -494,6 +494,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   POSITION_JUMP and no LOST_CONTACT (unless hot or falling), only logged. On 14 Oct 2026 an Israeli military
   GLF5 ("676", callsign "@@@@@@@@") at FL350 and Jordanian military trainers (hex 7434xx, callsigns "BK", "DE",
   "0") over the Jordan valley jumped 10-56 nm and dropped out: 59 of 63 POSITION_JUMPs, 46 of 82 LOST_CONTACTs.
+  Nor a DIVERSION for going silent low near another airport (28 Oct 2026 nightly review): IZ598 HKT -> TLV (D-AUSC,
+  A343, positions only) went silent at 10,225 ft over Amman, 47 nm from TLV, "probably landing at ADJ", and landed at
+  TLV 10 min later. Cost: a real diversion of a position-only arrival is only logged.
 - **Pattern flying**: a COURSE_CHANGE / SHARP_TURN on an aircraft with no route that is not large, within 2 h
   of its last turn alert and with no other anomaly, is only logged. 14 Oct 2026: G-FPLD (CLB230, BE20) and
   4X-CVH (BDK09, G280) flew survey lines west of Israel for hours: 15 of 17 turn alerts (now 3). SHARP_TURN

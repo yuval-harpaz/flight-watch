@@ -1386,6 +1386,23 @@ class LostContactTests(unittest.TestCase):
         self.assertEqual(len(hits), 1, kinds(alerts))
         self.assertIn("landing at AMM", hits[0]["message"])
 
+    def test_position_only_arrival_doing_that_is_not_a_diversion(self):
+        """IZ598 (D-AUSC, A343, MLAT positions only) silent at 10,225 ft over Amman, then landed at TLV (27 Oct 2026)."""
+        mon, feed, clock, alerts = with_board([board_row("IZ", "598", "A", local_time(mon_clock(), 0.5))])
+        feed.local.add("999999")
+        feed.aircraft["999999"] = airborne(31.0, 34.0, 20000, flight="KEEP1")
+        states = path(31.72, 35.70, [270] * 5, [10000 - 250 * i for i in range(5)], gs=220)
+        for st in states:
+            st.pop("gs", None)
+            st.pop("track", None)
+        fly(mon, feed, clock, "3c0f0b", states, flight="AIZ598", r="D-AUSC", t="A343")
+        feed.local.discard("3c0f0b")
+        del feed.aircraft["3c0f0b"]
+        for _ in range(12):
+            step(mon, clock)
+        self.assertNotIn("DIVERSION", kinds(alerts))
+        self.assertNotIn("LOST_CONTACT", kinds(alerts))
+
     def plunge_and_vanish(self, alts, last_rate):
         mon, feed, clock, alerts = make(["--no-routes"])
         feed.local.add("999999")
