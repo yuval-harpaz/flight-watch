@@ -464,11 +464,18 @@ def main():
     if a.restart:
         print(stop(notify=False), "/", start(notify=False))
         return
-    srv = http.server.ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
     url = f"http://localhost:{a.port}/"
-    print(f"flight-watch control on {url} (Ctrl+C stops this page, not the monitor)")
+    try:
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
+    except OSError:  # (the page already runs - another terminal - or the port is taken)
+        print(f"flight-watch control already running on {url} (or port {a.port} is taken: --port)")
+        if not a.no_open:
+            webbrowser.open(url)
+        return
     if not a.no_open:
-        webbrowser.open(url)
+        webbrowser.open(url)  # (the browser's start-up messages land in this terminal: the link is printed after them)
+        time.sleep(1)
+    print(f"flight-watch control on {url} (Ctrl+C stops this page, not the monitor)", flush=True)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
