@@ -2150,8 +2150,10 @@ class Monitor:
 
         self.last_ok, self.last_count = server_now, len(local)
         self.share_callsigns(server_now)
+        # (one that has flown its callsign's leg is kept as long: KL462 TLV -> OTP landed at Bucharest, was dropped
+        # 30 min later, then found again on its way on to Amsterdam as KL462 bound for OTP - a DIVERSION, 27 Oct 2026)
         self.tracks = {h: t for h, t in self.tracks.items()
-                       if server_now - t.last_msg < (3 * 3600 if t.followed else 1800)}
+                       if server_now - t.last_msg < (3 * 3600 if t.followed or t.flown_cs else 1800)}
         b = self.http.budget(PROVIDERS[a.provider]["base"].split("/")[2])
         self.stats = {"local": len(local), "followed": sum(t.followed for t in self.tracks.values()),
                       "hot": sum(t.followed and self.hot(t) for t in self.tracks.values()),

@@ -2459,6 +2459,28 @@ class FarEndTests(unittest.TestCase):
             local=False, **ident)
         self.assertNotIn("DIVERSION", kinds(alerts, "503cc0"))
 
+    def test_flown_leg_outlasts_silence_on_the_ground(self):
+        """KL462 TLV -> OTP landed at Bucharest, unheard there for over 30 min (its track dropped, the flown leg with
+        it), then found again flying on to Amsterdam as KL462: "bound for LROP on the ground 966 nm from it" (27 Oct)."""
+        mon, feed, clock, alerts = self.setup([board_row("LY", "5417", "D", local_time(Clock(), 0), "TBS")])
+        ident = dict(flight="ELY5417", r="LY-LOC", t="B738")
+        tlv = (32.0114, 34.8867)
+        fly(mon, feed, clock, "503cc0", [dict(lat=tlv[0], lon=tlv[1], alt_baro="ground", gs=5, track=270)] * 3,
+            **ident)
+        fly(mon, feed, clock, "503cc0", path(*tlv, [10] * 6, [1500 + 800 * i for i in range(6)], gs=180), **ident)
+        clock.t += 3 * 3600
+        fly(mon, feed, clock, "503cc0", [dict(lat=41.6692, lon=44.9547, alt_baro="ground", gs=12, track=120)] * 4,
+            local=False, **ident)
+        feed.local.discard("503cc0")
+        del feed.aircraft["503cc0"]
+        for _ in range(45):
+            step(mon, clock, 60)
+        fly(mon, feed, clock, "503cc0", path(41.61, 41.68, [270] * 6, [3000 - 400 * i for i in range(6)], gs=150),
+            local=False, **ident)
+        fly(mon, feed, clock, "503cc0", [dict(lat=41.6103, lon=41.5997, alt_baro="ground", gs=12, track=120)] * 4,
+            local=False, **ident)
+        self.assertNotIn("DIVERSION", kinds(alerts, "503cc0"))
+
     def test_no_follow_up_after_a_landing_alert(self):
         """LY353 TLV -> MUC landed at Athens (21 Oct 2026): DIVERSION, then a follow-up 2 min later saying the same."""
         mon, feed, clock, alerts = self.setup([board_row("LY", "5417", "D", local_time(Clock(), 0), "TBS")])

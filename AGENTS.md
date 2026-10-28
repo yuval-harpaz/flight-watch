@@ -245,7 +245,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   still as ELY353, and HYS236 TLV -> OTP unheard 3.7 h, back on its way to TLV - both "TLV departure heading
   back"). `Monitor.end_leg`: a departure landing away from TLV, or an arrival at it, has flown that callsign
   (`Track.flown_cs`): neither the board row nor the route data's direction applies to it again until the
-  callsign changes.
+  callsign changes. Such a track is kept 3 h after it was last heard, as a followed one (others: 30 min; 28 Oct 2026
+  nightly review): KL462 TLV -> OTP landed at Bucharest, unfollowed and unheard on the ground, was dropped with its
+  flown leg and found again by the board's callsign on its way on to Amsterdam - DIVERSION "bound for LROP" at EHAM.
   The far end comes from the board's airport first (`Monitor.other_end`, IATA -> ICAO by `StandingData.airport_by_iata`), the
   route data only where it agrees: ELY5417 TLV -> TBS, listed LLBG-LCLK, landed at Tbilisi as "bound for LCLK" (19 Oct 2026).
   An arrival coming down at its own origin is its previous flight, not a DIVERSION, when it was first heard > 60 nm from it, never
