@@ -25,7 +25,9 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(__file__))
 import capture_incident as cap  # noqa: E402
 
-BOX = (24.0, 38.0, 26.0, 46.0)  # lat/lon box: Eastern Mediterranean, Levant, Sinai, N. Saudi
+# lat/lon box: Eastern Mediterranean, Levant, Sinai, Saudi Arabia, the Gulf (to 58 E since 28 Oct 2026: EY9702 and ETD7QB,
+# TLV -> AUH, turning onto Abu Dhabi's arrival 70 nm out at FL290 were course reversals)
+BOX = (22.0, 38.0, 26.0, 58.0)
 
 
 def bearing(lat1, lon1, lat2, lon2) -> float:

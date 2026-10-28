@@ -381,7 +381,7 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   reported within ~35 nm of a regional airport below FL250 (all 10 replay false alarms were
   departure/arrival routings at Beirut, Amman, Damascus, TLV) nor at learned route corners
   (`turn_zones.json`: cells where >= 4 aircraft turned onto that heading, e.g. detours around
-  closed airspace) - unless the flight is already hot. Otherwise a reversal is reported only once
+  closed airspace; relearned 28 Oct 2026 from 26-27 Oct, >= 8 aircraft in the two days, the box widened to the Gulf: 5 of 9 reversals of 27 Oct were arrival routing - A3926 and T7STAR 60-75 nm NW of TLV, EY9702 x2 and ETD7QB onto Abu Dhabi's arrival at FL290. Called routine within 150 nm of TLV: 42% of place x heading (40% before; >= 4 in two days: 63%, too loose)) - unless the flight is already hot. Otherwise a reversal is reported only once
   the new track has held `--turn-confirm` (120 s): 4 of the 5 overnight alerts on 6 Oct 2026 were an
   S-turn (6H254, 148 -> 76 -> 175 deg, vectoring) and holding / delay orbits of three TLV arrivals at
   02:01-02:06 (BBG251 flew one 360). Dropped: turning back near the old course (also compared with
