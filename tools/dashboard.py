@@ -9,7 +9,8 @@ monitor started from the page inherits them. It runs `./monitor.sh` in its own s
 page or stopping this server leaves it running; "stop" sends it SIGTERM (as Ctrl+C, a clean exit). Both
 tell the Telegram channel (TELEGRAM_BOT_TOKEN, and TELEGRAM_CHANNEL_ID or with SENDTO=chat TELEGRAM_CHAT_ID), so
 subscribers know when alerts stop and resume - only when it stays stopped longer than QUIET_S (10 s): a stop and a start
-straight after (a restart for a code change) tell nobody. Tabs show the monitor's printout and its log.
+straight after (a restart for a code change) tell nobody, and "running again" only follows a "stopped" (the pending
+stop is kept in tmp_dashboard_down.json, so it outlives a restart of this page). Tabs show the monitor's printout and its log.
 Maps are made by `tools/plot_alert.py --map` and open in the browser by themselves. Only this machine can
 reach the page (127.0.0.1), and requests from other sites' pages are refused. Standard library only.
 """
@@ -179,17 +180,51 @@ def telegram(text: str) -> str:
 
 
 QUIET_S = 10  # stopped this long before the channel hears of it (the owner: no messages for a quick restart)
-DOWN = {"timer": None, "told": False}  # a stop's pending notice, and whether the channel was told of the stop
+# A stop from this page, kept in a file so it outlives the page (Ctrl+C on it within QUIET_S of a stop lost the
+# notice, and the next page's start said "running again" with no "stopped" before it, 28 Oct 2026):
+# {"since": epoch, "told": bool}; "running again" only follows a "stopped" the channel was told.
+DOWN_FILE = os.path.join(ROOT, "tmp_dashboard_down.json")
+DOWN = {"timer": None}  # the stop's pending notice in this page
 DOWN_LOCK = threading.Lock()
+
+
+def down_state() -> dict | None:
+    try:
+        with open(DOWN_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def set_down(state: dict | None) -> None:
+    if state is None:
+        try:
+            os.remove(DOWN_FILE)
+        except OSError:
+            pass
+        return
+    with open(DOWN_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f)
+
+
+def arm_down(delay: float) -> None:
+    """Tell the channel of the stop in `delay` s if it is still stopped then (call with DOWN_LOCK held)."""
+    if DOWN["timer"]:
+        DOWN["timer"].cancel()
+    DOWN["timer"] = threading.Timer(max(0.0, delay), tell_down)
+    DOWN["timer"].daemon = True
+    DOWN["timer"].start()
 
 
 def tell_down() -> None:
     with DOWN_LOCK:
-        if DOWN["timer"] is None or monitor_proc():
+        state = down_state()
+        if DOWN["timer"] is None or monitor_proc() or not state or state.get("told"):
             return
         DOWN["timer"] = None
-        DOWN["told"] = "Telegram told" == telegram("🔴 flight-watch is stopped for maintenance: no alerts until it is "
-                                                     "running again (a message will say so).")
+        state["told"] = "Telegram told" == telegram("🔴 flight-watch is stopped for maintenance: no alerts until it "
+                                                      "is running again (a message will say so).")
+        set_down(state)
 
 
 def start(notify: bool = True) -> str:
@@ -199,8 +234,11 @@ def start(notify: bool = True) -> str:
         pending, DOWN["timer"] = DOWN["timer"], None
         if pending:
             pending.cancel()
-        told, DOWN["told"] = DOWN["told"], False
-    notify = notify and (told or not pending)
+        state = down_state()
+        set_down(None)
+    told = bool(state and state.get("told"))
+    pending = bool(state) and not told
+    notify = told  # (also after a quiet stop - the nightly's: the channel was told it stopped)
     console = open(CONSOLE, "ab")
     console.write(f"--- started {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n".encode())
     console.flush()
@@ -226,11 +264,8 @@ def stop(notify: bool = True) -> str:
             if not notify:
                 return "stopped"
             with DOWN_LOCK:
-                if DOWN["timer"]:
-                    DOWN["timer"].cancel()
-                DOWN["timer"] = threading.Timer(QUIET_S, tell_down)
-                DOWN["timer"].daemon = True
-                DOWN["timer"].start()
+                set_down({"since": time.time(), "told": False})
+                arm_down(QUIET_S)
             return f"stopped; Telegram is told if it is still stopped in {QUIET_S} s"
     return "still stopping"
 
@@ -472,6 +507,10 @@ def main():
         if not a.no_open:
             webbrowser.open(url)
         return
+    state = down_state()
+    if state and not state.get("told") and not monitor_proc():  # a stop this page's last run had not told yet
+        with DOWN_LOCK:
+            arm_down(state.get("since", 0) + QUIET_S - time.time())
     if not a.no_open:
         webbrowser.open(url)  # (the browser's start-up messages land in this terminal: the link is printed after them)
         time.sleep(1)
