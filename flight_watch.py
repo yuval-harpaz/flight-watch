@@ -259,6 +259,12 @@ ISRAELI_CODES = {c for c, v in REGION_AIRPORTS.items() if v[2]} | {"LLBG", "LLHA
 # callsign of its sister 4X-ABF for 55 s and of another for 100 s (12 Oct 2026, see new_callsign)
 CALLSIGN_HOLD = 120
 SMALL_MAX_KT = 600   # faster over the ground than a bizjet / light aircraft flies: a bad speed (check_sharp_turn)
+# Business jets by type (their wake category may be A3, "large"): faster than this over the ground is a bad speed for the
+# bank too. 679 (military GLF5) "343 -> 305 deg in 28 s at 599 kt (~37 deg bank)" at FL370 15 nm W of TLV, 28 Oct 2026;
+# a GLF5 cruises at ~510 kt TAS (the owner's choice, 29 Oct 2026: by type, not size)
+BIZJET_TYPES = re.compile(r"GLF[2-6]|GA[5-8]C|GLEX|GL[5-8]T|CL[36]0|CL35|H25[ABC]|HA4T|FA[5-8]X|F900|F2TH|FA50|"
+                          r"C25[ABCM]|C5[0-6][0-9X]|C680|C68A|C700|C750|LJ[2-7][0-9]|E5[05]P|G150|G280|GALX|ASTR|PRM1")
+BIZJET_MAX_KT = 560
 # A SHARP_TURN waits this long (s, data time) for a report back on its old course where it would have been without
 # the turn - a velocity / position glitch (settle_turn); sent when a trusted report after it is not, or nothing is
 # heard for TURN_HOLD_MAX_S
@@ -3153,9 +3159,10 @@ class Monitor:
         """Turn tighter than airliners fly (implied bank angle), anywhere - also near airports."""
         a, s = self.args, t.last
         if (s.on_ground or s.track is None or not s.gs or s.gs < 150 or (s.alt or 0) < 1500
-                or s.gs > (a.max_gap_speed if t.large or t.military else SMALL_MAX_KT)):
+                or s.gs > (BIZJET_MAX_KT if BIZJET_TYPES.fullmatch(t.actype or "")
+                           else a.max_gap_speed if t.large or t.military else SMALL_MAX_KT)):
             return  # (faster than any airliner flies: a bad speed - THY6219 "843 kt" at 8,700 ft, 14 Oct 2026;
-            #          HEZ652, a Hawker 800 "at 728 kt" at FL190 in GPS jamming, 22 Oct 2026)
+            #          HEZ652, a Hawker 800 "at 728 kt" at FL190 in GPS jamming, 22 Oct 2026; 679, a GLF5 "at 599 kt")
         if self.trusted_gs(t) is None or t.turn_held:
             return  # a speed its positions do not back (the check the climb / descent angle uses); one waiting
         old = t.sample_ago(25)
@@ -3558,6 +3565,15 @@ class Monitor:
             if apt:  # THY6264 "LTBA-WSSS" was Istanbul - Amman that night (14 Oct 2026)
                 self.note(t, "route", f"leaves its listed route ({self.routes[t.callsign][1]}) descending toward "
                           f"{apt} - taken as landing there, the route data is not always right", every=1800)
+                return
+            if (self.classify(t)[0] == "OVR"
+                    and haversine_nm(s.lat, s.lon, olat, olon) > haversine_nm(old.lat, old.lon, olat, olon) + 3
+                    and min(heading_diff(x.track, bearing(x.lat, x.lon, olat, olon)) for x in window) > 90):
+                # an over-flight flying away from both ends: the route is not this flight's. RJA6501 (E290, OJAQ-LOWL,
+                # learned "bound for OJAQ") flew SE into Saudi Arabia at FL350, 29 Oct 2026 - a charter on a stale route.
+                # A turn back heads for the origin (FZ1073), and our own flights are never OVR.
+                self.note(t, "route", f"flies away from both ends of its listed route ({self.routes[t.callsign][1]}) - "
+                          f"another flight on that callsign, not alerted", every=1800)
                 return
             self.alert(t, "OFF_COURSE", f"bound for {dst} (route {self.routes[t.callsign][1]}) but heading "
                        f"{s.track:.0f} deg, {devs[-1]:.0f} deg away from it for {s.t - old.t:.0f}s, "

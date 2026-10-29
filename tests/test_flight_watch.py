@@ -1893,6 +1893,16 @@ class RouteOffCourse(unittest.TestCase):
             fly(mon, feed, clock, "896121", path(31.0, 39.0, self.TRACKS, alts), flight="UAE121", r="A6-EUA")
             self.assertEqual("OFF_COURSE" in kinds(alerts), expected, kinds(alerts))
 
+    def test_over_flight_away_from_both_ends_is_another_flight(self):
+        """RJA6501 (OJAQ-LOWL, learned "bound for OJAQ") flew SE into Saudi Arabia, away from both ends (29 Oct 2026)."""
+        tracks = [300] * 30 + [(300 + 10 * i) % 360 for i in range(1, 10)] + [40] * 30
+        for ours, expected in ((False, False), (True, True)):
+            mon, feed, clock, alerts = with_routes()
+            if ours:  # the same flight, were the route ours: alerted as before
+                mon.classify = lambda t: ("VIA", None)
+            fly(mon, feed, clock, "896121", path(35.0, 48.5, tracks, [37000] * len(tracks)), flight="UAE121", r="A6-EUA")
+            self.assertEqual("OFF_COURSE" in kinds(alerts), expected, kinds(alerts))
+
     def test_no_alert_while_flying_the_route(self):
         mon, feed, clock, alerts = with_routes()
         fly(mon, feed, clock, "896121", path(33.0, 43.0, [315] * 60, [37000] * 60),
@@ -2866,6 +2876,15 @@ class LegEndAndLightAircraftTests(unittest.TestCase):
         fly(mon, feed, clock, "73934e", dive, **ident)
         self.assertEqual(kinds(alerts), ["POSITION_JUMP", "VERTICAL_RATE"])
         self.assertIn("light / private aircraft", alerts[1]["message"])
+
+    def test_speed_a_bizjet_type_cannot_fly_is_no_sharp_turn(self):
+        """679 (military GLF5, category A3) "343 -> 305 deg in 28 s at 599 kt (~37 deg bank)" at FL370, 28 Oct 2026;
+        here a sharper turn, alerted at a speed a GLF5 flies."""
+        for gs, expected in ((599, False), (480, True)):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            fly(mon, feed, clock, "738a4a", path(32.1, 34.5, [343] * 6 + [313, 283, 253] + [253] * 8, [37000] * 17, gs=gs),
+                flight="679", r="", t="GLF5", category="A3", dbFlags=1)
+            self.assertEqual("SHARP_TURN" in kinds(alerts), expected, (gs, kinds(alerts)))
 
     def test_a_jump_plane_keeps_its_ride_alert(self):
         """4XDAN: an alert before its first lift must not hold back the ride's one steep-descent alert."""
