@@ -37,7 +37,7 @@ Each alert goes through `Monitor.alert()` (cooldowns, hot flights) to `Notifier`
 and appended to `posts.jsonl`), and ntfy / Telegram when configured. `tests/replay.py` and
 `tools/` (incident capture, turn-zone learning, `plot_alert.py`
 3D replay of an alert, `squawk_cases.py`, `dashboard.py` - the owner's local control page, 24 Oct 2026: start / stop
-`monitor.sh` - Telegram told only when it stays stopped > 10 s, so a restart for a code change sends nothing (25 Oct 2026) -, a run's alerts by kind, a map of one; stdlib only, 127.0.0.1, other sites' requests refused; `nightly.sh` + `daily_digest.py` + `nightly_prompt.md` -
+`monitor.sh` - Telegram told only when it stays stopped > 10 s, so a restart for a code change sends nothing (25 Oct 2026), and "running again" only after a "stopped": the pending stop is kept in `tmp_dashboard_down.json`, as Ctrl+C on the page within the 10 s lost it and the next page's start said "running again" alone (28 Oct 2026) -, a run's alerts by kind, a map of one; stdlib only, 127.0.0.1, other sites' requests refused; `nightly.sh` + `daily_digest.py` + `nightly_prompt.md` -
 the 03:00 UTC restart and unattended review, fixes on a `nightly/<date>` branch, never pushed; each start logs its code -
 commit, `+changes` when `flight_watch.py` differs from it, the file's sha256 - so the review judges an alert by the code that raised it) are support code,
 not part of the monitor.
@@ -81,18 +81,20 @@ reads the aircraft's trace (`/data/traces` reaches back about a day; older: adsb
 takes the leg around `t` (`FB.flightAt`; the title adds the callsign the aircraft sent when it is not the board's, and the
 ICAO hex, so our map and ADS-B Exchange's can be compared; an aircraft off the board takes its ends from the route data
 by that callsign) and shows it live (heard in the last 15 min, nothing after it) or as a
-drawn track with the alert's point; "our map / ADS-B Exchange / both" puts ADS-B Exchange's map in an iframe
-(it and adsb.lol send no X-Frame-Options; airplanes.live, adsb.fi and FR24 refuse), live or `FB.replayURL`:
+drawn track with the alert's point; the "ADS-B Exchange ↗" button opens ADS-B Exchange's map on its own page, live or `FB.replayURL`
+(until 29 Oct 2026 an "our map / ADS-B Exchange / both" switch put it in an iframe; ADS-B Exchange then put its data behind
+a Cloudflare check that needs a SameSite=Lax cookie, never kept in another site's frame: "Flight data could not be verified"):
 `showTrace` + `timestamp`, with `startTime` / `endTime` only at ends known to be real (ground, or < 200 kt),
 because adsb.lol's coverage is thinner than ADS-B Exchange's (ET-AWJ, 10 Oct 2026: 15 KB against 104 KB for the
 day; adsb.lol heard 2 min of the Amman departure, then nothing for 7 h, and `FB.legs` joins that gap). Without
-a trace: live for 20 min after the alert, then the replay. A replay shows one UTC day. With no track of ours to draw,
-ADS-B Exchange's replay is put in view (beside ours on a wide screen, alone on a phone; the viewer's remembered choice is
-kept): since 18 Oct 2026 adsb.lol answers its trace files with a browser check (403), also through the worker. So when adsb.lol
-gives no flight the page reads ADS-B Exchange's history file of that UTC day (today's too; and the day before for a leg over
+a trace: live for 20 min after the alert, then the replay. A replay shows one UTC day. Since 18 Oct 2026 adsb.lol answers its trace files with a browser check (403), also through the worker. So when adsb.lol
+gives no flight the page reads ADS-B Exchange's last ~24 h of the aircraft (`/data/traces/<xx>/trace_{full,recent}_<hex>.json`,
+relayed as `/adsbx/data/traces/...` by worker 0.8 and `serve.py`, with its Referer; `FB.traceADSBX`), else its history file of that UTC day (today's too; and the day before for a leg over
 midnight) through the relay's `/adsbx/globe_history/...` (`FB.traceDayADSBX`; worker 0.6, `tools/serve.py`): it answers 403
 without ADS-B Exchange's own Referer and sends no CORS header. The owner chose this (19 Oct 2026) knowing ADS-B Exchange sells
-its data and may block it; credited on the page when used.
+its data and may block it; credited on the page when used. **Since 29 Oct 2026 the history files answer 403 "Historical data
+requires a verified session"** (its Cloudflare check; not to be worked around): an alert older than ~24 h has no track
+of ours, only the ADS-B Exchange ↗ replay.
 
 **Flight pages** (`docs/flights.html`, `docs/flight_map.html`, shared `docs/flightboard.js`;
 local helper `tools/serve.py`): the board table and a live map of one flight, processed in the
@@ -439,6 +441,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   at the time halfway; 27 Oct 2026, the owner's choice): 4 of 4 SHARP_TURNs on Telegram on 26 Oct were routine turns, LY316
   (B789, FL146) "7 -> 116 deg in 28 s (~48 deg)" and VPCMV (GLEX) out of Amman "39 deg", 23-30 deg in ADS-B Exchange's traces.
   Squawk replay: AZG5512's two SHARP_TURNs (35, 38 deg) in its hold before diverting are gone; its other alerts stay.
+  A business-jet type (`BIZJET_TYPES`: GLF*, GLEX, CL*, H25B, FA*X ...; their wake category may be A3) faster than
+  `BIZJET_MAX_KT` (560) over the ground has a bad speed too (29 Oct 2026, the owner's choice - by type, not size): 679, a
+  military GLF5 (cruise ~510 kt TAS), "343 -> 305 deg in 28 s at 599 kt (~37 deg bank)" at FL370, no report back on its
+  old course for the 40 s hold below to catch.
   A SHARP_TURN makes no flight hot (see Hot flights).
   A turning aircraft draws an arc; a velocity / position glitch zig-zags back. So a SHARP_TURN waits `TURN_HOLD_S` (40 s)
   for a report - trusted or not - back on its old course (30 deg) where it would have been without the turn (1.5 nm, or
@@ -463,6 +469,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   with it, "TLV arrival ... 151 deg away from TLV" (20 Oct 2026; AIZ807 26 min later). Then, as AIZ807, it went
   silent at 12,900 ft 37 nm from Ramon (LOST_CONTACT): a departure silent while descending below 15,000 ft within
   50 nm of its destination is logged as probably landing there.
+  Nor for an over-flight (classified `OVR`: no board row, a route not through our airport) flying away from both ends
+  of its route (> 90 deg from the origin too, opening): the route is another flight's. RJA6501 (E290, OJAQ-LOWL, learned
+  "bound for OJAQ") flew SE into Saudi Arabia at FL350, OFF_COURSE on Telegram (29 Oct 2026; the owner's choice). A turn
+  back heads for the origin (FZ1073) and still alerts.
   Neither within `--off-course-min-dist` of the far end (route data: an arrival's origin, a departure's
   destination): climbing out "away from" the destination and approach turns "back" (squawk replay: TO4755 out of
   Barcelona, AA2045 on approach to SFO "heading back to PHL, 2175 nm out").

@@ -12,6 +12,11 @@
  *                                        aircraft, today's too). Its history files answer 403 without ADS-B Exchange's
  *                                        own Referer and send no CORS header. Since 18 Oct 2026 adsb.lol refuses its
  *                                        trace files (a browser check), so the map's tracks come from here.
+ *   /adsbx/data/traces/<xx>/trace_{full,recent}_<hex>.json
+ *                                     -> https://globe.adsbexchange.com/data/traces/... (30 s; its last ~24 h of one
+ *                                        aircraft). Since 29 Oct 2026 its history files answer 403 "Historical data
+ *                                        requires a verified session" (a Cloudflare check); these still answer with its
+ *                                        Referer.
  *   /hexof/<cs>[,<cs>...]             -> which aircraft (hex) flew each callsign in the last 36 h
  *   /alerts                           -> the monitor's alerts of the last 24 h (the kinds Telegram gets) and the time
  *                                        of its last /learn, for the flight board's "show warnings" (hidden by default)
@@ -46,12 +51,14 @@ const ROUTES = [  // [path pattern, upstream host, fresh seconds, prefix left ou
   [/^\/globe_history\/\d{4}\/\d\d\/\d\d\/traces\/[0-9a-f]{2}\/trace_full_~?[0-9a-f]{6}\.json$/, "https://adsb.lol", 3600],
   [/^\/adsbx\/globe_history\/\d{4}\/\d\d\/\d\d\/traces\/[0-9a-f]{2}\/trace_full_~?[0-9a-f]{6}\.json$/,
    "https://globe.adsbexchange.com", 600, "/adsbx", {"Referer": "https://globe.adsbexchange.com/"}],
+  [/^\/adsbx\/data\/traces\/[0-9a-f]{2}\/trace_(full|recent)_~?[0-9a-f]{6}\.json$/,
+   "https://globe.adsbexchange.com", 30, "/adsbx", {"Referer": "https://globe.adsbexchange.com/"}],
 ];
 const STALE_S = 120;              // serve an answer this old when upstream fails
 const HOME = [32.0114, 34.8867];  // TLV
 const KEEP_S = 36 * 3600;         // callsign map: forget entries older than this
 const ALERTS_KEEP_S = 24 * 3600; // board alerts: forget older ones
-const VERSION = "0.7";            // shown at / and /status, to check which code is deployed
+const VERSION = "0.8";            // shown at / and /status, to check which code is deployed
 const UA = {"User-Agent": "flight-watch-pages-relay/" + VERSION};
 
 function cors(origin) {

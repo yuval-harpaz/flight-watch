@@ -286,6 +286,24 @@ FB.traceDayADSBX = async function (hex, day, raw) {
   if (raw) raw.push(d);
   return (d.trace || []).map(p => FB.tracePoint(d, p));
 };
+/** ADS-B Exchange's last ~24 h of an aircraft (its /data/traces files), through the relay with its own Referer. Since
+ *  29 Oct 2026 its history files above answer 403 ("Historical data requires a verified session"); these still answer.
+ *  Throws when neither file can be read. */
+FB.traceADSBX = async function (hex, raw) {
+  if (!FB.local() && !FB.RELAY) throw new Error("ADS-B Exchange trace: no relay");
+  const out = [];
+  let err = null;
+  for (const kind of ["full", "recent"]) {
+    try {
+      const d = await FB.getJSON(FB.traceBase() + "/adsbx/data/traces/" + hex.slice(-2) + "/trace_" + kind + "_" + hex + ".json");
+      for (const p of d.trace || []) out.push(FB.tracePoint(d, p));
+      if (raw) raw.push(d);
+    } catch (e) { err = e; }
+  }
+  if (!out.length && err) throw err;
+  out.sort((a, b) => a.t - b.t);
+  return out.filter((p, i) => !i || p.t > out[i - 1].t);
+};
 /** The flight an alert at time `t` belongs to: the leg around t (at most 30 min away from it), or null.
  *  tookOff / landed: that end of the leg is a real one (on the ground next to it, or under 200 kt, i.e.
  *  near a runway) and not just where coverage starts or stops. live: nothing came after it and it was

@@ -356,14 +356,17 @@ class CorsWorker(unittest.TestCase):
             const out = [];
             for (const path of ["/adsbx/globe_history/2026/10/19/traces/46/trace_full_739546.json",
                                 "/adsbx/globe_history/2026/10/19/traces/46/trace_full_739546.json",  // cached
+                                "/adsbx/data/traces/71/trace_full_738071.json",  // its last ~24 h (29 Oct 2026)
                                 "/adsbx/globe_history/2026/10/19/acas/acas.csv.gz",   // not relayed
                                 "/adsbx/v2/hex/739546"])                              // nor this
               out.push((await req(path, P)).slice(0, 2));
             return {out, seen};""")
         pages = "https://yuval-harpaz.github.io"
-        self.assertEqual(got["out"], [[200, pages], [200, pages], [404, pages], [404, pages]])
+        self.assertEqual(got["out"], [[200, pages], [200, pages], [200, pages], [404, pages], [404, pages]])
         self.assertEqual(got["seen"], [["https://globe.adsbexchange.com/globe_history/2026/10/19/traces/46/"
-                                        "trace_full_739546.json", "https://globe.adsbexchange.com/"]])
+                                        "trace_full_739546.json", "https://globe.adsbexchange.com/"],
+                                       ["https://globe.adsbexchange.com/data/traces/71/trace_full_738071.json",
+                                        "https://globe.adsbexchange.com/"]])
 
     def test_cached_answer_and_a_recent_one_when_adsb_lol_says_429(self):
         got = self.run_worker("""
@@ -455,7 +458,7 @@ class CorsWorker(unittest.TestCase):
         self.assertAlmostEqual(got["later"]["updated"], 1791400000, delta=1)
         self.assertEqual(got["hexof"]["ELY5064"]["hex"], "738062")       # the callsign map as before
         self.assertEqual(got["status"]["alerts"], 2)
-        self.assertEqual(got["status"]["version"], "0.7")
+        self.assertEqual(got["status"]["version"], "0.8")
 
 
 class ShareCallsignsScript(unittest.TestCase):
@@ -551,6 +554,9 @@ class LocalHelper(unittest.TestCase):
         self.get("/adsbx/globe_history/2026/10/19/traces/46/trace_full_739546.json")
         self.assertEqual(self.up.calls[-1],
                          "https://globe.adsbexchange.com/globe_history/2026/10/19/traces/46/trace_full_739546.json")
+        self.assertEqual(self.up.headers, {"Referer": "https://globe.adsbexchange.com/"})
+        self.get("/adsbx/data/traces/71/trace_recent_738071.json")
+        self.assertEqual(self.up.calls[-1], "https://globe.adsbexchange.com/data/traces/71/trace_recent_738071.json")
         self.assertEqual(self.up.headers, {"Referer": "https://globe.adsbexchange.com/"})
 
     def test_429_cools_down_instead_of_hammering(self):

@@ -9,6 +9,8 @@ read it in the browser. Served from here the pages ask this server instead (same
   /globe_history/.. -> https://adsb.lol/globe_history/... (its positions on a past day)
   /adsbx/globe_history/.. -> https://globe.adsbexchange.com/globe_history/... (a day of one aircraft from
                        ADS-B Exchange's history, with its own Referer: adsb.lol refuses its traces since 18 Oct 2026)
+  /adsbx/data/traces/.. -> https://globe.adsbexchange.com/data/traces/... (its last ~24 h of one aircraft; the
+                       history files want a verified session since 29 Oct 2026)
   /src/<file>       -> this checkout's Python files that flight_map.html's "analyse track" runs in the
                        browser (Pyodide; on GitHub Pages it reads them from raw.githubusercontent.com)
   anything else     -> the files in docs/ (flights.html, flight_map.html, ...)
@@ -39,7 +41,8 @@ DOCS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "docs")
 UPSTREAM = {"/v2/": ("https://api.adsb.lol", 5),          # prefix -> (host, cache seconds)
             "/data/traces/": ("https://adsb.lol", 30),
             "/globe_history/": ("https://adsb.lol", 3600),   # one aircraft on a past day
-            "/adsbx/globe_history/": ("https://globe.adsbexchange.com", 600)}  # (path without /adsbx)
+            "/adsbx/globe_history/": ("https://globe.adsbexchange.com", 600),
+            "/adsbx/data/traces/": ("https://globe.adsbexchange.com", 30)}  # (path without /adsbx)
 ADSBX_HEADERS = {"Referer": "https://globe.adsbexchange.com/"}  # its history files answer 403 without it
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 SOURCES = {"flight_watch.py", "tests/replay.py", "tools/capture_incident.py", "tools/track_segments.py",

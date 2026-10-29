@@ -4,7 +4,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://unpkg.com/deck.gl@9.1.14/dist.min.js"></script>
 <script src="https://unpkg.com/@loaders.gl/terrain@4.2.1/dist/dist.min.js"></script>
-<script src="flightboard.js?v=bd95c33c"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
+<script src="flightboard.js?v=f64f6e87"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
 <style>
 html,body{margin:0;height:100%;font-family:sans-serif;color:#222;background:#fff}
 body{display:flex;flex-direction:column}
@@ -13,10 +13,6 @@ body{display:flex;flex-direction:column}
 #title{font-weight:bold;font-size:15px}
 #main{position:relative;flex:1;min-height:0}
 #map{position:absolute;inset:0}
-#ext{position:absolute;top:0;right:0;width:50%;height:100%;border:0;display:none;background:#eee}
-#main.v-both #map,#main.v-both .credits{right:50%} #main.v-both #ext{display:block;border-left:2px solid #999;box-sizing:border-box}
-#main.v-ext #ext{display:block;width:100%} #main.v-ext #map,#main.v-ext #infobox,#main.v-ext #inforeopen,#main.v-ext .credits{display:none}
-#views button.on{background:#1f6fb2;color:#fff;border-color:#1f6fb2}
 #infobox{position:absolute;top:8px;left:8px;z-index:2;background:rgba(255,255,255,.93);border:1px solid #ccc;border-radius:6px;
       font-size:13px;max-width:330px;line-height:1.45;max-height:calc(100% - 40px);display:flex;flex-direction:column}
 #info{padding:2px 10px 8px;overflow:auto;-webkit-overflow-scrolling:touch}
@@ -26,7 +22,7 @@ body{display:flex;flex-direction:column}
 .boxbar button:hover{background:#eee}
 #infobox.collapsed #info{display:none} #infobox.closed{display:none}
 #inforeopen{position:absolute;top:8px;left:8px;z-index:2;display:none;background:rgba(255,255,255,.93);border:1px solid #ccc;font-size:14px}
-#infobox.closed + #inforeopen{display:block} #main.v-ext #infobox.closed + #inforeopen{display:none}
+#infobox.closed + #inforeopen{display:block}
 #more{display:none}
 #info table{border-collapse:collapse} #info td{padding:0 6px 0 0;vertical-align:top} #info td:first-child{color:#666}
 .warn{color:#a01a12;font-weight:bold} .note{color:#666;font-size:12px}
@@ -43,19 +39,14 @@ body{display:flex;flex-direction:column}
   .credits{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;padding-right:22px}
   .credits::after{content:"▴";position:absolute;right:6px;bottom:2px}
   .credits.open{white-space:normal;max-height:40%;overflow:auto} .credits.open::after{content:"▾"}}
-@media (max-width:800px){  /* narrow screen: "both" = our map above, ADS-B Exchange below */
-  #main.v-both #map{right:0;bottom:50%} #main.v-both .credits{right:0;bottom:50%}
-  #main.v-both #ext{top:50%;width:100%;height:50%;border-left:0;border-top:2px solid #999}}
 </style></head><body>
 <div id="top">
   <a class="btn" href="flights.html">← flight list</a>
   <span id="title">TLV flight map</span>
   <button id="next" title="the arriving flight closest to landing that is not this one">next arrival ▸</button>
   <button id="refresh" title="ask for the latest data now (the live feed is sometimes busy)">↻ refresh</button>
-  <span id="views" style="display:none" title="the flight of the alert: on our map, on ADS-B Exchange (live while it flies, its replay afterwards), or both">
-    <button data-v="ours">our map</button><button data-v="ext">ADS-B Exchange</button><button data-v="both">both</button></span>
   <span class="note opt">elsewhere:</span>
-  <a id="adsbx" class="btn opt" target="_blank" rel="noopener" style="display:none" title="this aircraft live on ADS-B Exchange">ADS-B Exchange ↗</a>
+  <a id="adsbx" class="btn opt" target="_blank" rel="noopener" style="display:none" title="this aircraft on ADS-B Exchange: live, or the replay of the alert's flight (its own page: since 29 Oct 2026 it shows nothing inside ours)">ADS-B Exchange ↗</a>
   <a id="fr24" class="btn opt" target="_blank" rel="noopener" style="display:none" title="this flight on Flightradar24">FR24 ↗</a>
   <button id="more" title="more options">⋯</button>
   <label class="opt">times <select id="zone"><option value="Asia/Jerusalem">Israel</option><option value="UTC">UTC</option>
@@ -74,7 +65,7 @@ body{display:flex;flex-direction:column}
     <span style="color:#6e6e6e">━</span> no positions &gt; 2 min</span>
   <span id="status" class="note"></span>
 </div>
-<div id="main"><div id="map"></div><iframe id="ext" title="the flight on ADS-B Exchange"></iframe><div id="infobox"><div class="boxbar"><span class="boxtitle" id="infotitle">details</span>
+<div id="main"><div id="map"></div><div id="infobox"><div class="boxbar"><span class="boxtitle" id="infotitle">details</span>
   <button id="infofold" title="collapse / expand" aria-label="collapse or expand the details">▾</button>
   <button id="infoclose" title="close (ⓘ brings it back)" aria-label="close the details">×</button></div>
   <div id="info">loading…</div></div><button id="inforeopen" title="show the details" aria-label="show the details">ⓘ</button>
@@ -302,16 +293,9 @@ async function busyTrack(f, hex) {
 }
 
 // ---------------------------------------------------------------- the flight of an alert (?hex=..&t=..)
-/** Our map beside / instead of ADS-B Exchange's (an iframe, loaded only once it is shown). */
-function setView(v, remember = true) {
-  $("main").className = "v-" + v;
-  for (const b of $("views").children) b.className = b.dataset.v === v ? "on" : "";
-  if (v !== "ours" && alertOf && alertOf.ext && $("ext").dataset.url !== alertOf.ext) {
-    $("ext").dataset.url = alertOf.ext;
-    $("ext").src = alertOf.ext + "&hideSideBar";  // its aircraft list would fill the half screen
-  }
-  if (remember) try { localStorage.setItem("view", v); } catch (e) { /* private window: not remembered */ }
-}
+// ADS-B Exchange's map used to be shown beside ours (an iframe, "our map / ADS-B Exchange / both"). Since 29 Oct 2026
+// it puts its data behind a Cloudflare check that needs a SameSite=Lax cookie, never kept inside another site's frame:
+// "Flight data could not be verified". It opens on its own page (the "ADS-B Exchange ↗" button: alertOf.ext).
 
 /** The flight the alert was about, whenever the link is opened: still flying = live (as any ?hex=
  *  link, ADS-B Exchange live beside it); ended = that flight's track from the trace files and its
@@ -330,11 +314,14 @@ async function alertView() {
       pts = (await FB.traceDay(hex, day(t), raw)).concat(pts).sort((a, b) => a.t - b.t);
     flight = FB.flightAt(pts, t, now);
   } catch (e) { failed = true; note(e); }
-  if (!flight) {  // adsb.lol refused (403 since 18 Oct 2026) or had nothing: ADS-B Exchange's history of that day
+  if (!flight) {  // adsb.lol refused (403 since 18 Oct 2026) or had nothing: ADS-B Exchange's last ~24 h, else its
+                  // history of that day (403 since 29 Oct 2026: it wants a verified session)
     const got = [], days = t % 86400 < 6 * 3600 ? [day(t - 86400), day(t)] : [day(t)];  // (a leg over midnight)
     let pts = [];
-    for (const d of days)
-      try { pts = pts.concat(await FB.traceDayADSBX(hex, d, got)); } catch (e) { note(e); }
+    if (now - t < 86400) try { pts = await FB.traceADSBX(hex, got); } catch (e) { note(e); }
+    if (!pts.length || t < pts[0].t)
+      for (const d of days)
+        try { pts = pts.concat(await FB.traceDayADSBX(hex, d, got)); } catch (e) { note(e); }
     flight = pts.length ? FB.flightAt(pts.sort((a, b) => a.t - b.t), t, now) : null;
     if (flight) {
       got.errors = raw.errors;
@@ -348,14 +335,6 @@ async function alertView() {
   const pt = flight && flight.leg.reduce((a, p) => Math.abs(p.t - t) < Math.abs(a.t - t) ? p : a);
   const cs = flight ? FB.callsignAt(flight.leg, t) : "";  // what the aircraft sent (ENT368 on the board's ENT238)
   Object.assign(alertOf, {flight, live, pt, ext: live ? "https://globe.adsbexchange.com/?icao=" + hex : FB.replayURL(hex, t, flight)});
-  $("views").style.display = "";
-  let v = null;
-  try { v = localStorage.getItem("view"); } catch (e) { /* private window */ }
-  if (!flight && !live && v !== "both")
-    // nothing of ours to draw (since 18 Oct 2026 adsb.lol refuses its trace files to programs): ADS-B Exchange's
-    // replay, without changing the viewer's remembered choice
-    setView(innerWidth >= 900 ? "both" : "ext", false);
-  else setView(/^(ours|ext|both)$/.test(v || "") ? v : innerWidth >= 900 ? "both" : "ours");
   if (live) return show(f, null, false, false, hex);
   const when = x => FB.fmt(x, ZONE, "dhm");
   fitted = false;
@@ -464,7 +443,7 @@ function traceProblem(errors) {
     const why = (/HTTP (\d+)$/.exec(down[0]) || [])[1];
     // 18 Oct 2026: adsb.lol began answering its trace files with a browser check ("Verification") - 403
     if (why === "403") return "adsb.lol refuses its trace files to programs (HTTP 403, a browser check), " +
-                              "so this flight's trace can't be loaded here. ADS-B Exchange's replay still shows it.";
+                              "so this flight's trace can't be loaded here, nor ADS-B Exchange's after a day. ADS-B Exchange's replay ↗ still shows it.";
     return `adsb.lol is not answering right now (${why ? "HTTP " + why : "no connection"}), so its trace of this flight ` +
            "can't be loaded. Try again later: ↻ refresh, then \"analyse track\".";
   }
@@ -774,7 +753,6 @@ $("analyzebtn").onclick = () => {
 };
 $("next").onclick = () => { if (cur) skipped.add(cur.f.id); pick(); };
 $("refresh").onclick = () => { if (alertOf) alertView(); else if (cur) show(cur.f, null, cur.auto, false, cur.hexMode ? cur.hex : undefined, 1); };
-for (const b of $("views").children) b.onclick = () => setView(b.dataset.v);
 setInterval(() => cur && render(), 5000);  // "last seen" keeps counting between polls
 (async () => {
   try {
