@@ -249,7 +249,7 @@ JUMP_PLANES = {
 # emitter categories of large aircraft (A3 large, A4 B757-class, A5 heavy) and airliner type codes:
 # such an aircraft flying a jump run is not skydiving (slow flight near the stall at height)
 LARGE_CATEGORIES = {"A3", "A4", "A5"}
-LARGE_TYPES = re.compile(r"A[0-9]{3}|A[23][0-9]N|B7[0-9]{2}|B[37][0-9]M|BCS[13]|E1[79]0|E[0-9]{2}[05LS]|"
+LARGE_TYPES = re.compile(r"A[0-9]{2}[0-9K]|A[23][0-9]N|B7[0-9][0-9A-Z]|B[37][0-9X]M|BCS[13]|E1[79]0|E[0-9]{2}[05LS]|"
                          r"E2[0-9]{2}|CRJ[0-9X]|AT[47][0-9]|DH8[A-D]|MD[0-9]{2}")
 # Rough outline of Israeli-controlled airspace over land (incl. West Bank, Golan), lat/lon.
 # Israeli airlines (ICAO): El Al, Israir, Arkia, CAL Cargo, Sun d'Or, Challenge Airlines IL, Air Haifa
