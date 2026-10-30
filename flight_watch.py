@@ -3583,6 +3583,11 @@ class Monitor:
         """ICAO of the route's destination when the flight now points at it (--toward-dest-tol): a
         route's turn, not a reversal. Not after the flight was seen flying the route backwards."""
         ends, s = self.route_ends(t), t.last
+        if len(ends) < 2 and t.sched and t.sched.direction == "DEP":
+            # the board's destination when the route data has none for the callsign: LY91 TLV -> NRT flew as
+            # ELY091 (listed as ELY91) and its turn onto Narita's arrival, 58 nm N at FL155, went out (29 Oct 2026)
+            far = self.other_end(t, "DEP")
+            ends = [far] * 2 if far else []
         if len(ends) < 2 or t.route_dir < 0:
             return None
         icao, lat, lon = ends[-1]

@@ -2486,6 +2486,23 @@ class FarEndTests(unittest.TestCase):
             local=False, **ident)
         self.assertNotIn("DIVERSION", kinds(alerts, "503cc0"))
 
+    def test_turn_onto_the_board_destination_without_route_data(self):
+        """LY91 TLV -> NRT flew as ELY091 (route data: ELY91) and turned 82 -> 188 deg onto Narita's arrival 58 nm N of
+        it at FL155: a COURSE_CHANGE on Telegram (29 Oct 2026). Here the route data's LLBG-LCLK is off the corridor."""
+        for final, expect in ((185, False), (300, True)):
+            mon, feed, clock, alerts = self.setup([board_row("LY", "5417", "D", local_time(Clock(), 0), "TBS")])
+            ident = dict(flight="ELY5417", r="LY-LOC", t="B738")
+            tlv = (32.0114, 34.8867)
+            fly(mon, feed, clock, "503cc0", [dict(lat=tlv[0], lon=tlv[1], alt_baro="ground", gs=5, track=270)] * 3,
+                **ident)
+            fly(mon, feed, clock, "503cc0", path(*tlv, [10] * 6, [1500 + 800 * i for i in range(6)], gs=180), **ident)
+            clock.t += 3 * 3600
+            step = (final - 80) / 12
+            tracks = [80] * 6 + [80 + step * i for i in range(1, 13)] + [final] * 16
+            fly(mon, feed, clock, "503cc0", path(42.6, 44.7, tracks, [17000 - 50 * i for i in range(len(tracks))],
+                                                 gs=300), local=False, **ident)
+            self.assertEqual("COURSE_CHANGE" in kinds(alerts, "503cc0"), expect, final)
+
     def test_flown_leg_outlasts_silence_on_the_ground(self):
         """KL462 TLV -> OTP landed at Bucharest, unheard there for over 30 min (its track dropped, the flown leg with
         it), then found again flying on to Amsterdam as KL462: "bound for LROP on the ground 966 nm from it" (27 Oct)."""
