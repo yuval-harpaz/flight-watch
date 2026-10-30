@@ -2296,6 +2296,21 @@ class Run18OctTests(unittest.TestCase):
             got[heading] = "EARLY_DESCENT" in kinds(alerts)
         self.assertEqual(got, {180: False, 270: True})
 
+    def test_reversal_descending_near_any_airfield_without_route(self):
+        """RJ872 (E290, no board row nor route) turned 14 -> 246 deg at FL168 descending, 26 nm E of Sabiha Gokcen
+        (29 Oct 2026): a COURSE_CHANGE on Telegram. Level, the same turn still alerts."""
+        got = {}
+        for rate in (-1000, 0):
+            mon, feed, clock, alerts = make([])
+            mon.standing.fields = [(33.10, 33.45, "LTFJ")]  # (a local checkout's list; moved into our circle)
+            mon.standing.all_fields = lambda: mon.standing.fields
+            tracks = [14] * 8 + [14 + 29 * i for i in range(1, 9)] + [246] * 16
+            fly(mon, feed, clock, "740123", path(32.90, 33.90, tracks,
+                                                 [17000 + rate * i // 6 for i in range(len(tracks))], gs=300),
+                flight="RJA872", r="JY-RED", t="E290")
+            got[rate] = "COURSE_CHANGE" in kinds(alerts, "740123")
+        self.assertEqual(got, {-1000: False, 0: True})
+
     def test_circuits_near_amman_with_no_route_are_not_holding(self):
         """RJA017 (A321 JY-AYV): took off from Amman and circled east of it at 4,300 ft 2 h later."""
         mon, feed, clock, alerts = make(["--no-routes"])

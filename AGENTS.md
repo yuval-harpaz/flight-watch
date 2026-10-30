@@ -395,7 +395,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   Cost: a real reversal on a flight that has not alerted yet is reported ~2 min later.
   Nor below FL250 within 35 nm of the flight's own origin / destination far away (`own_airport_near`: board, route data;
   19 Oct 2026: ELY552 out of Sofia, ELY386 / ISR362 out of Rome, ELY318 out of Heathrow, SWR5MP into Zurich, WMT3PH into Milan),
-  nor within 35 nm of where it took off in this leg (`Track.takeoff_pos`; ISR178 out of Budapest, above).
+  nor within 35 nm of where it took off in this leg (`Track.takeoff_pos`; ISR178 out of Budapest, above),
+  nor, for a flight with no board row nor route, descending (<= -500 ft/min) within 40 nm of any airport of the
+  standing data (`airfield_near`; 30 Oct 2026, the owner's choice: RJ872, E290 `DEP?`, onto Sabiha Gokcen's arrival at
+  FL168 26 nm out; cost: a real reversal descending near any airport on such a flight is only logged).
   `routine_turn_place` judges these when the turn starts; when it is reported, 2 min later, the destination is judged
   again (ETD238, OMAA-VOBL, began its approach turn at Bangalore just over 35 nm out and was reported at 17 nm, 22 Oct
   2026) - not the origin: AA1009 (ORD -> LAX, 6 Oct 2026) turning back to Chicago ended its turn within 35 nm of it,

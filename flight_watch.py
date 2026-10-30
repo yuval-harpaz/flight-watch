@@ -2772,6 +2772,12 @@ class Monitor:
             if t.takeoff_pos and haversine_nm(s.lat, s.lon, *t.takeoff_pos) <= near:
                 return "its take-off"  # where it took off, whatever its callsign says: ISR178 (6H178 TIV -> TLV)
                 #                         climbing out of Budapest to Tivat, ISR174 out of Rome (22 Oct 2026)
+            if ((s.vrate or 0) <= -500 and not t.sched
+                    and not (t.callsign and self.routes.get(t.callsign, (0, None))[1]) and self.standing):
+                field = self.standing.airfield_near(s.lat, s.lon)
+                if field and field[1] <= near:
+                    return field[0]  # nothing names its ends: any airport while descending. RJ872 (E290, no route)
+                    #                  onto Sabiha Gokcen's arrival 26 nm out at FL168 (29 Oct 2026)
         if self.zones.expected(s.lat, s.lon, s.track):
             return "a route corner"  # seen on many flights
         return None
