@@ -347,8 +347,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   of a military aircraft after its first alert is only logged (and in its follow-up).
   **Light / private aircraft** the same (22 Oct 2026, the owner's wish; `Monitor.light`, `Track.quiet_why` "light"):
   not military, not an airliner type (`LARGE_TYPES`; not the wake category: A3 covers big bizjets too, and BDK12 /
-  BDK04, 738685 with no type in the feed, sends A3 - the rule never applied to it: 19 Telegram messages on 28 Oct 2026),
-  not on the board, no route data - whatever the callsign looks like (BDK12, an Israeli
+  BDK04, 738685 with no type in the feed, sends A3 - the rule never applied to it: 19 Telegram messages on 28 Oct 2026;
+  the type pattern takes letters too - B77W, B77L, B78X, A35K, B3XM: UAE46, a B77W with no route yet, was "light /
+  private" in its GPS_SPOOFING, 28 Oct 2026 nightly review), not on the board, no route data - whatever the callsign looks like (BDK12, an Israeli
   survey jet with no type in the feed, sent 18 Telegram messages in 3 h of survey lines on 22 Oct; HEZ652, Hawker
   4X-CZF, 4 in GPS jamming: their airline-style callsigns escaped the pattern-flying rule). Two differences: a fall at
   `--vrate` or faster is still alerted, and the one alert is one Telegram gets - a `--telegram-skip` kind (lost
@@ -407,6 +408,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   `--toward-dest-tol`; MEA312 Beirut - Amman, 16 Oct 2026: east past Damascus, then 186 deg with Amman at 193).
   Not after the flight was seen flying its route backwards (`route_dir` -1); a route stored the wrong way round
   and not yet learned would hide a turn back to the origin.
+  A board departure with no usable route data points at the board's destination (`other_end`; 30 Oct 2026 nightly
+  review): LY91 TLV -> NRT flew as ELY091 (route data: ELY91) and its turn onto Narita's arrival, 82 -> 188 deg 58 nm
+  N of it at FL155, went out on Telegram.
 - **SKYDIVE_PATTERN**: a jump run (>= 2 reports <= 80 kt at >= 6,000 ft over >= 15 s, positions
   agreeing) followed within 5 min by a descent of >= 3,000 ft/min and >= 1,000 ft. 4XDAN (P750) over
   the Dead Sea, 10 Oct 2026: a lift every ~40 min (climb to ~12,000 ft, ~50 kt while jumpers exit,
