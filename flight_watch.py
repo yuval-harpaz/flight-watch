@@ -168,7 +168,6 @@ WOBBLE_TURNS, WOBBLE_FT, WOBBLE_S, WOBBLE_MAX_ALT, WOBBLE_RATE = 3, 150, 180, 25
 # 7 min after take-off at ~2,000 ft/min, neither steep nor fast; the first descent of the other 184
 # large-aircraft take-offs in the fixtures came later (a 400 ft step by an E75L at 9.6 min).
 EARLY_DROP, EARLY_MIN = 1000, 10
-EARLY_FIELD_NM = 30  # no EARLY_DESCENT for a flight with no route descending toward an airfield this near (field_ahead)
 # A track heard again after MISSED_LANDING_S having moved less than MISSED_LANDING_KT on average landed
 # in between: 18 Oct 2026, ELY353 (TLV -> MUC) unheard 100 min, then 70 nm on climbing out of Munich, and
 # HYS236 (TLV -> OTP) unheard 3.7 h, then 145 nm on, back toward TLV: both "TLV departure heading back".
@@ -185,6 +184,8 @@ STATE_FIELDS = ("callsign", "reg", "actype", "category", "military", "last_msg",
                 "flown_cs", "feed", "left_home", "rose_home", "orig_first", "orig_max", "orig_left", "came_from", "sent",
                 "stop_wait")
 TG_RETRY_S = 3  # a Telegram message that failed to connect is sent once more after this
+LEG_OVER_S = 1800  # a board departure heard far away this long after it should have landed: another leg (leg_over)
+OWN_TURN_NM = 50  # below FL250 a reversal this near the flight's own far origin / destination is routing (routine_turn_place)
 AWAY_CLIMB_NM = 300  # our departure first heard climbing (below FL250) farther than this: another leg on its callsign
 TAKEOFF_POS_NM = 40  # on the ground, then airborne this near after a gap of any length: took off there (takeoff_pos)
 STATE_MAX_AGE_S = 3 * 3600  # aircraft heard longer ago are not kept
@@ -874,7 +875,7 @@ class Track:
     amm_dep: float = 0.0     # data time it was last on the ground at Amman / first heard climbing out of it
     mil_quiet: float = 0.0   # military / light: data time of its last alert or suppressed one (alert())
     mil_held: list = field(default_factory=list)  # military / light: (kind, data time) of the alerts it did not get
-    quiet_why: str = ""      # "military" or "light": why it gets one alert, then quiet (alert())
+    quiet_why: str = ""      # "military": why it gets one alert, then quiet (alert())
     amm_near: float = 0.0    # data time since which it has stayed within AMM_LOCAL_NM of Amman
     takeoff: float = 0.0     # data time of its take-off (left the ground, or first heard climbing low)
     stop_wait: tuple | None = None  # (data time it is late, ICAO, lat, lon, landed): an arrival on the ground on its way early
@@ -2199,8 +2200,8 @@ class Monitor:
     def light(self, t: Track, route: str | None = None) -> bool:
         """Light / private aircraft: not military (their own rule), not large, not on the board, no route data -
         bizjets, survey and training flights, air taxis, whatever their callsign looks like (BDK12 and HEZ652 have
-        airline-style ones). Jump planes keep their skydiving rule: one alert for their first dive (SKYDIVE_QUIET_S),
-        which an earlier alert of this rule must not use up. Large by an airliner's type only, not the wake category: A3
+        airline-style ones). Their alerts are only logged, but for an emergency and a fast fall (alert()). Jump planes
+        keep their skydiving rule: one alert for their first dive (SKYDIVE_QUIET_S). Large by an airliner's type only, not the wake category: A3
         covers big bizjets (G550, Global) too, and BDK12 / BDK04 (738685, survey lines west of Israel at FL350-440, no
         type in the feed) sent A3 - 16 Telegram messages on 22 Oct 2026 and 19 on 28 Oct, the rule never applied."""
         return not (t.military or LARGE_TYPES.fullmatch(t.actype or "") or t.sched or route or t.actype in JUMP_PLANES
@@ -2310,16 +2311,17 @@ class Monitor:
         if ((s.on_ground or (s.alt or 0) < 3000) and d < 8
                 or len(t.samples) <= 2 and d < 30 and (s.alt or 0) < 10000 and (s.vrate or 0) > 300):
             t.left_home = True  # (or first heard climbing out: RYR6VV at 5,600 ft 6 nm from Nador)
-        elif (len(t.samples) <= 2 and not t.left_home and not s.on_ground and d > AWAY_CLIMB_NM
-              and (s.alt or 0) < 25000 and (s.vrate or 0) > 300 and self.classify(t)[0] == "DEP"):
+        elif (len(t.samples) <= 2 and not t.left_home and d > AWAY_CLIMB_NM and self.classify(t)[0] == "DEP"
+              and (not s.on_ground and (s.alt or 0) < 25000 and (s.vrate or 0) > 300 or self.leg_over(t, s))):
             # first heard climbing far from our airport: it took off there, another leg on our departure's callsign.
             # W46404 (9H-WZR, board TLV -> MXP) first heard after a restart climbing out near Rome at FL197, flying on
             # to Romania: two TURNING_BACK "1,223 nm out and closing" (26 Oct 2026). (At cruise it may be ours: the
             # squawk replay's departures are often first heard far out at cruise, SWA512 362 nm from Honolulu)
+            how = "after its board leg should have landed" if self.leg_over(t, s) else "climbing"
             t.flown_cs, t.sched = t.callsign, None
             t.takeoff_pos = t.takeoff_pos or (s.lat, s.lon)
-            log.info("%s first heard climbing at %s ft %.0f nm from %s: another leg on our departure's callsign",
-                     t.label(), s.alt, d, self.args.airport)
+            log.info("%s first heard %s at %s ft %.0f nm from %s: another leg on our departure's callsign",
+                     t.label(), how, s.alt, d, self.args.airport)
         amm = haversine_nm(s.lat, s.lon, *REGION_AIRPORTS["AMM"][:2])
         if (s.on_ground and amm < 5) or (len(t.samples) <= 2 and amm < 15 and (s.alt or 0) < 8000
                                          and (s.vrate or 0) > 300):
@@ -2601,6 +2603,12 @@ class Monitor:
         c_angle = path_angle(computed, gs) if gs else 0.0
         if abs(computed) < 0.5 * a.vrate and abs(c_angle) < 0.5 * limit:
             return  # reported rate not backed by actual altitude change -> likely a glitch
+        if 0 < s.vrate < a.vrate and angle is not None and abs(c_angle) < limit:
+            # a climb judged by its altitude history: VJT495 (CL35) "+5,312 ft/min, +18.7 deg" at 1,725 ft out of TLV,
+            # history +2,574 ft/min (~9 deg), 30 Oct 2026. Descents keep the half-backed rule (dives come fast)
+            log.debug("%s climb %+d ft/min (%+.1f deg), history %+.0f ft/min (%+.1f deg): not steep enough",
+                      t.label(), s.vrate, angle, computed, c_angle)
+            return
         direction = "DESCENT" if s.vrate < 0 else "CLIMB"
         extra = f" (history: {computed:+.0f} ft/min)" if computed is not None else ""
         ang = f", {angle:+.1f} deg" if angle is not None else ""
@@ -2645,31 +2653,29 @@ class Monitor:
         drop = t.climb_peak - s.alt
         t.climb_peak = max(t.climb_peak, min(s.alt, p.alt))
         if drop >= EARLY_DROP and s.alt <= p.alt and airline_like(t) and t.large and not t.military:
-            field = self.field_ahead(t, s, EARLY_FIELD_NM)
-            if field:
+            why = self.not_our_route(t, s)
+            if why:
                 self.note(t, "early", f"{drop} ft below its climb's peak {(s.t - t.takeoff) / 60:.0f} min after "
-                          f"take-off, with no route and {field} ahead: a short hop landing there, not alerted")
+                          f"take-off, {why}: not alerted")
                 return
             self.alert(t, "EARLY_DESCENT", f"descending {s.vrate if s.vrate is not None else '?'} ft/min, "
                        f"{drop} ft below the {t.climb_peak} ft it climbed to, {(s.t - t.takeoff) / 60:.0f} min "
                        "after take-off - departures do not turn down this early (AS1282)")
 
-    def field_ahead(self, t: Track, s: Sample, nm: float) -> str | None:
-        """For a flight with no board row nor route: an airfield (the region's, a local standing-data checkout's)
-        within `nm` and --toward-dest-tol of its track, not the one it took off from (a turn back stays alerted).
-        AYT253 (Ayeet E145, 25 Oct 2026) climbed to 11,050 ft and descended into Ramon AB, 24 nm ahead:
-        EARLY_DESCENT + LOST_CONTACT on Telegram."""
-        if t.sched or s.track is None or (t.callsign and self.routes.get(t.callsign, (0, None))[1]):
+    def not_our_route(self, t: Track, s: Sample) -> str | None:
+        """Why an early descent says nothing (else None): a flight off the board needs a route and to be nearer its
+        destination than its origin is - a flight the data does not describe may be a short hop, a test or a training
+        flight. AYT253 (Ayeet E145, no route, 25 Oct 2026) descended into Ramon AB 9 min after take-off; 6H999 (A332,
+        not on the board, route data ISR999 LLBG-LCLK) flew out over the Dead Sea at 9,900 ft and back to TLV
+        (30 Oct 2026). Both EARLY_DESCENT on Telegram."""
+        if t.sched:
             return None
-        fields = [(lat, lon, code) for code, (lat, lon, _) in REGION_AIRPORTS.items()]
-        fields += self.standing.all_fields() if self.standing else []
-        for lat, lon, code in fields:
-            if abs(lat - s.lat) > 1 or abs(lon - s.lon) > 1.5:
-                continue
-            d = haversine_nm(s.lat, s.lon, lat, lon)
-            if (2 < d <= nm and heading_diff(s.track, bearing(s.lat, s.lon, lat, lon)) <= self.args.toward_dest_tol
-                    and not (t.takeoff_pos and haversine_nm(*t.takeoff_pos, lat, lon) <= LANDING_AIRPORT_NM)):
-                return code
+        ends = self.route_ends(t)
+        if len(ends) < 2:
+            return "not on the board, no route"
+        org, dest = ends if t.route_dir >= 0 else ends[::-1]
+        if haversine_nm(s.lat, s.lon, dest[1], dest[2]) >= haversine_nm(org[1], org[2], dest[1], dest[2]):
+            return f"not on the board, no nearer {dest[0]} (its route's destination) than {org[0]} is"
         return None
 
     def trusted_gs(self, t: Track) -> float | None:
@@ -2760,15 +2766,17 @@ class Monitor:
             ends = self.route_ends(t)
             dest = (self.other_end(t, "DEP") if self.classify(t)[0] == "DEP" else None) or (
                 ends[-1] if len(ends) == 2 and t.route_dir >= 0 else None)
-            return dest[0] if dest and haversine_nm(s.lat, s.lon, dest[1], dest[2]) <= near else None
+            reach = near if dest and dest[0] == a.icao else OWN_TURN_NM
+            return dest[0] if dest and haversine_nm(s.lat, s.lon, dest[1], dest[2]) <= reach else None
         if s.alt < 25000:
             apt, ad = nearest_airport(s.lat, s.lon)
             if ad <= near:
                 return apt  # departure / arrival routing
-            own = self.own_airport_near(t, s, near)
+            own = self.own_airport_near(t, s, OWN_TURN_NM)
             if own:
                 return own  # the same at its own airport far away: 19 Oct 2026, ELY552 out of Sofia, ELY386 /
-                #             ISR362 out of Rome, ELY318 out of Heathrow, SWR5MP into Zurich, WMT3PH into Milan
+                #             ISR362 out of Rome, ELY318 out of Heathrow, SWR5MP into Zurich, WMT3PH into Milan;
+                #             THY6DW onto Istanbul's arrival 35.4 nm out (30 Oct 2026: 35 nm then)
             if t.takeoff_pos and haversine_nm(s.lat, s.lon, *t.takeoff_pos) <= near:
                 return "its take-off"  # where it took off, whatever its callsign says: ISR178 (6H178 TIV -> TLV)
                 #                         climbing out of Budapest to Tivat, ISR174 out of Rome (22 Oct 2026)
@@ -3073,7 +3081,7 @@ class Monitor:
                 # follow-up 2 min later said the same, and that message's map already showed the whole flight)
                 th["done"] = True
                 continue
-            if t.military or t.quiet_why == "light":  # (one alert, then quiet: how it ended, not how it goes on)
+            if t.military:  # (one alert, then quiet: how it ended, not how it goes on)
                 if not landed and now - s.t < self.args.lost_after_remote:
                     continue
             elif not (th.get("n", 1) >= 2 or any(k in FOLLOWUP_KINDS for k, _ in sent)):
@@ -3481,10 +3489,22 @@ class Monitor:
         via = haversine_nm(org[1], org[2], stop[1], stop[2]) + haversine_nm(stop[1], stop[2], *home)
         return stop[0] if straight and via <= TAG_DETOUR * straight else None
 
+    def leg_over(self, t: Track, s: Sample) -> bool:
+        """A board departure whose leg should have landed by `s` (its board time, the flight to the board's destination
+        at STOP_KT, LEG_OVER_S more): heard now far away, it flies another leg on the callsign. W46404 (9H-WBY, TLV ->
+        MXP due 19:18 IST, ~3 h) was first found at 22:55 near Rome, then climbing out heading NE: TURNING_BACK
+        "1,209 nm out and closing" (30 Oct 2026). Earlier, a diversion that landed unseen (OS82 at Sofia, 18 Oct) still
+        counts as ours."""
+        if not (t.sched and t.sched.direction == "DEP" and t.sched.ts):
+            return False
+        far = self.other_end(t, "DEP")
+        return bool(far) and s.t > t.sched.ts + haversine_nm(self.args.lat, self.args.lon, far[1], far[2]) / STOP_KT * 3600 + LEG_OVER_S
+
     def own_airport_near(self, t: Track, s: Sample, nm: float) -> str | None:
-        """Its own origin or destination (board, route data) within `nm`, far from our airport too."""
+        """Its own origin or destination (board, route data) within `nm`, not our airport (the region's airports have
+        their own radius there)."""
         ends = [e for e in (self.other_end(t, "ARR"), self.other_end(t, "DEP")) if e] + self.route_ends(t)
-        return next((e[0] for e in ends if haversine_nm(s.lat, s.lon, e[1], e[2]) <= nm), None)
+        return next((e[0] for e in ends if e[0] != self.args.icao and haversine_nm(s.lat, s.lon, e[1], e[2]) <= nm), None)
 
     def check_destination(self, t: Track, kind: str, d: float) -> None:
         """Long before landing: an arrival flying away from the airport, or a departure flying back.
@@ -4148,29 +4168,28 @@ class Monitor:
             msg += (f" - probably a skydiving ride; no further alerts on it until {SKYDIVE_QUIET_S / 3600:.0f} h "
                     "after its last lift, except an emergency squawk")
         traffic, route = self.classify(t)
-        quiet = "military" if t.military else "light" if self.light(t, route) else ""
-        if quiet and kind != "EMERGENCY" and not (k and k.get("quiet")) and not (quiet == "light" and falling):
+        if (not t.military and kind not in ("EMERGENCY", "MEDICAL_FLIGHT") and not falling and not (k and k.get("quiet"))
+                and self.light(t, route)):
+            # light / private aircraft (Monitor.light): only logged, but for an emergency and a fall at --vrate or
+            # faster (31 Oct 2026, the owner: "let's not show small and off board flights"). Their one alert was
+            # mostly survey lines (BDK04) or a bizjet's initial climb (VJT495 "+18.7 deg" at 1,725 ft, 30 Oct 2026)
+            log.info("%s %s - light / private aircraft with no known route, not alerted: %s", t.label(), kind, msg)
+            return False
+        if t.military and kind != "EMERGENCY" and not (k and k.get("quiet")):
             # military aircraft manoeuvre, patrol and orbit as their job: one alert (a check that the monitor
             # sees them), then only an emergency squawk for MILITARY_QUIET_S after the last suppressed one, and a
             # Telegram follow-up when it lands or goes silent (telegram_followups). 18 Oct 2026, Jordan: CHLE1B
             # (PC21) 15 alerts in 31 min of aerobatics; 7436ac (AT8T) 17, its position jumping 28 nm back and
             # forth. 20 Oct 2026: IAM4188 (Italian Air Force AT76, "large") 7 alerts patrolling west of Israel.
-            # Light / private aircraft too (Monitor.light), also a fall at --vrate or faster; their one alert is
-            # one Telegram gets (the --telegram-skip kinds pass without starting the quiet). 21-22 Oct 2026: BDK12
-            # (survey lines west of Israel) 18 Telegram messages in 3 h, HEZ652 (a Hawker in GPS jamming) 4.
             if t.mil_quiet and now - t.mil_quiet <= MILITARY_QUIET_S and kind != "MEDICAL_FLIGHT":
                 t.mil_quiet = now
                 if not any(k == key and now - x < cooldown for k, x in t.mil_held):  # (counted as alerts would be)
                     t.mil_held.append((key, now))
-                log.info("%s %s - %s aircraft, alerted already: not alerted: %s", t.label(), kind, quiet, msg)
+                log.info("%s %s - military aircraft, alerted already: not alerted: %s", t.label(), kind, msg)
                 return False
-            if quiet == "military" or kind not in self.notifier.tg_skip:
-                t.mil_quiet, t.mil_held, t.quiet_why = now, [], quiet
-                what = ("military aircraft" if quiet == "military" else "light / private aircraft with no known "
-                        "route")
-                msg += (f" - {what}: no further alerts on it until {MILITARY_QUIET_S / 3600:.0f} h after its last "
-                        f"one, except an emergency squawk{'' if quiet == 'military' else ' or a fast fall'}; an "
-                        "update when it lands or goes silent")
+            t.mil_quiet, t.mil_held, t.quiet_why = now, [], "military"
+            msg += (f" - military aircraft: no further alerts on it until {MILITARY_QUIET_S / 3600:.0f} h after its "
+                    "last one, except an emergency squawk; an update when it lands or goes silent")
         if a.airport_traffic_only and traffic not in AIRPORT_TRAFFIC:
             return False
         if kind in TURN_KINDS and not (t.large or t.sched or route) and any(

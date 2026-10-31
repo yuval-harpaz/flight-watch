@@ -94,7 +94,8 @@ midnight) through the relay's `/adsbx/globe_history/...` (`FB.traceDayADSBX`; wo
 without ADS-B Exchange's own Referer and sends no CORS header. The owner chose this (19 Oct 2026) knowing ADS-B Exchange sells
 its data and may block it; credited on the page when used. **Since 29 Oct 2026 the history files answer 403 "Historical data
 requires a verified session"** (its Cloudflare check; not to be worked around): an alert older than ~24 h has no track
-of ours, only the ADS-B Exchange ↗ replay.
+of ours, only the ADS-B Exchange ↗ replay. Its heatmaps too (31 Oct 2026), so `tools/learn_turn_zones.py` cannot relearn
+`turn_zones.json` from new days.
 
 **Flight pages** (`docs/flights.html`, `docs/flight_map.html`, shared `docs/flightboard.js`;
 local helper `tools/serve.py`): the board table and a live map of one flight, processed in the
@@ -272,6 +273,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   "1,223 nm out and closing". Requiring every departure to be seen leaving (as DIVERSION does off the board) was tried
   first: 12 squawk-replay turn-backs lost their TURNING_BACK, departures first heard far out at cruise (SWA512 362 nm from
   Honolulu at FL360) - ADS-B Exchange's coverage, as a TLV departure after our polls were refused.
+  So is one first heard that far out in any state once its board leg should have landed (`leg_over`: board time + the
+  flight to the board's destination at `STOP_KT` + `LEG_OVER_S` 30 min; 31 Oct 2026, the owner's choice): W46404 again
+  (9H-WBY), found by the board's callsign near Rome at 22:55 IST, due out of TLV for MXP at 19:18, not climbing at first,
+  then TURNING_BACK "1,209 nm out". Earlier it is ours (a diversion that landed unseen: OS82 at Sofia).
   A landing within `DIVERTED_NM` of a stop listed in the route data (`planned_stop`: an airport between the ends,
   when the route's far end agrees with the board) is logged, not a DIVERSION: KLM461 AMS -> TLV is EHAM-LCLK-LLBG
   and "went silent ... probably landing at LCA" (20 Oct 2026). 113 routes through TLV list stops (crowd-sourced,
@@ -328,6 +333,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   normal climbs read as 40-60 deg and also "confirmed" glitched rates: 10 alerts, 0 now. Climb and descent have separate cooldowns, and a reading ≥1.5× the
   last alerted severity bypasses the cooldown. Without this, a small wobble suppressed the
   real 14,000 ft dive in the FZ1073 test.
+  A climb under `--vrate` alerts only when the history's angle reaches the limit too (31 Oct 2026, the owner's choice):
+  VJT495 (CL35) "+18.7 deg" at 1,725 ft out of TLV, history +2,574 ft/min (~9 deg). Descents keep the half-backed rule
+  (a dive comes fast). Squawk replay: 10 initial-climb alerts at 12-15 deg gone (history ~7 deg), and 3 departure-routing
+  COURSE_CHANGEs that went out only because those made the flight hot.
   An MLAT report's speed is the receivers' estimate: the military GLF5 "684", 12 Oct 2026, descending
   5,115 ft/min at ~455 kt (6.4 deg) was given 257 kt on one poll and alerted at 11.1 deg. For MLAT reports
   `trusted_gs` takes the last speed the aircraft itself reported (<= 5 min), else the speed between its
@@ -345,17 +354,16 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   pattern" among them - such types no longer count as jump planes), 7436ac (AT8T) 17 with its position jumping
   28 nm back and forth; 20 Oct: IAM4188 (Italian Air Force AT76, patrolling west of Israel) 7. Cost: a real accident
   of a military aircraft after its first alert is only logged (and in its follow-up).
-  **Light / private aircraft** the same (22 Oct 2026, the owner's wish; `Monitor.light`, `Track.quiet_why` "light"):
+  **Light / private aircraft** are only logged (31 Oct 2026, the owner: "let's not show small and off board flights";
+  from 22 Oct they had the military rule's one alert, mostly survey lines and bizjet climbs; `Monitor.light`):
   not military, not an airliner type (`LARGE_TYPES`; not the wake category: A3 covers big bizjets too, and BDK12 /
   BDK04, 738685 with no type in the feed, sends A3 - the rule never applied to it: 19 Telegram messages on 28 Oct 2026;
   the type pattern takes letters too - B77W, B77L, B78X, A35K, B3XM: UAE46, a B77W with no route yet, was "light /
   private" in its GPS_SPOOFING, 28 Oct 2026 nightly review), not on the board, no route data - whatever the callsign looks like (BDK12, an Israeli
   survey jet with no type in the feed, sent 18 Telegram messages in 3 h of survey lines on 22 Oct; HEZ652, Hawker
-  4X-CZF, 4 in GPS jamming: their airline-style callsigns escaped the pattern-flying rule). Two differences: a fall at
-  `--vrate` or faster is still alerted, and the one alert is one Telegram gets - a `--telegram-skip` kind (lost
-  contact, position jump) passes as usual without starting the quiet. Jump planes (`JUMP_PLANES` types, or a lift
-  seen) keep their own rule: the owner wants the weekend skydiving's one steep-descent alert, which an earlier alert
-  must not use up. In the run of 21-22 Oct: 29 of 61 Telegram messages from six such aircraft, ~6 now plus follow-ups.
+  4X-CZF, 4 in GPS jamming: their airline-style callsigns escaped the pattern-flying rule). Still alerted: an emergency
+  squawk / status, a medical flight and a fall at `--vrate` or faster. Jump planes (`JUMP_PLANES` types, or a lift seen)
+  keep their own rule: the owner wants the weekend skydiving's one steep-descent alert.
 - **ALTITUDE_WOBBLE / EARLY_DESCENT** (16 Oct 2026, from the incident fixtures; airline callsign and large
   aircraft only). Wobble: the altitude reverses 3+ times (each leg >= 150 ft, `reversals`) within 3 min below
   FL250, with the aircraft's own vertical rate both >= +500 and <= -500 (a lone bad altitude is 2 reversals with a
@@ -368,8 +376,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   below 2,000 ft; 18 Oct 2026: on the ground before hours of refused polls and descending into its destination
   after them was "1-8 min after take-off", 11 EARLY_DESCENTs). AS1282 01:14:24, 13 min before
   RETURNED; of 184 large-aircraft take-offs the nearest was a 400 ft step by an E75L at 9.6 min.
-  Not for a flight with no board row nor route descending toward an airfield `EARLY_FIELD_NM` (30) ahead, not its own
-  (`field_ahead`; a turn back still alerts): AYT253 (Ayeet E145) into Ramon AB, 24 nm ahead (26 Oct 2026).
+  Only for a board flight, or one with route data nearer its destination than its origin is (`not_our_route`; 31 Oct 2026,
+  the owner's choice): AYT253 (Ayeet E145, no route) into Ramon AB (26 Oct 2026); 6H999 (A332, off the board, ISR999
+  listed LLBG-LCLK) out over the Dead Sea and back to TLV, probably a test flight (30 Oct).
 - **EMERGENCY**: alerts on squawk *transition* into 7500/7600/7700, not every cooldown. The ADS-B emergency status
   "lifeguard" (a medical / priority flight) is its own kind, **MEDICAL_FLIGHT** (⚕️, priority 3; the owner wants it, not
   as an emergency), once a flight; it passes a light / military aircraft's quiet. Every other status (nordo, minfuel,
@@ -394,8 +403,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   (circling). Circling is never a reversal, also when hot. OFF_COURSE / TURNING_BACK wait while a
   turn is pending and skip circling (the outbound half of an orbit flies away from TLV), unless hot.
   Cost: a real reversal on a flight that has not alerted yet is reported ~2 min later.
-  Nor below FL250 within 35 nm of the flight's own origin / destination far away (`own_airport_near`: board, route data;
-  19 Oct 2026: ELY552 out of Sofia, ELY386 / ISR362 out of Rome, ELY318 out of Heathrow, SWR5MP into Zurich, WMT3PH into Milan),
+  Nor below FL250 within `OWN_TURN_NM` (50) of the flight's own origin / destination far away (`own_airport_near`: board,
+  route data; 19 Oct 2026: ELY552 out of Sofia, ELY386 / ISR362 out of Rome, ELY318 out of Heathrow, SWR5MP into Zurich,
+  WMT3PH into Milan; 35 nm until 31 Oct 2026: THY6DW onto Istanbul's arrival 35.4 nm out. Not our airport: the region's
+  radius stays. Squawk replay: AA1009's turn back to Chicago is now routine when watched from elsewhere, still alerted from ORD),
   nor within 35 nm of where it took off in this leg (`Track.takeoff_pos`; ISR178 out of Budapest, above),
   nor, for a flight with no board row nor route, descending (<= -500 ft/min) within 40 nm of any airport of the
   standing data (`airfield_near`; 30 Oct 2026, the owner's choice: RJ872, E290 `DEP?`, onto Sabiha Gokcen's arrival at
