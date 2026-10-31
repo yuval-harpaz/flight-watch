@@ -338,6 +338,8 @@ PAGE = r"""<!doctype html>
 header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:12px 16px;background:var(--card);border-bottom:1px solid var(--line)}
 h1{font-size:17px;margin:0 12px 0 0}button,select,input{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:5px 10px}
 button{cursor:pointer}button.primary{background:var(--accent);border-color:var(--accent);color:#fff}button:disabled{opacity:.5;cursor:default}
+#power{width:6.5em;text-align:left}#power.go{background:var(--ok);border-color:var(--ok);color:#fff}#power.halt{color:var(--bad);border-color:var(--bad)}
+#st{flex:1 1 16em;min-width:0}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;background:var(--bad)}.dot.on{background:var(--ok)}
 main{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:14px;padding:14px 16px}
 @media (max-width:800px){main{grid-template-columns:1fr}}
@@ -354,10 +356,10 @@ table{border-collapse:collapse;width:100%}td{padding:3px 6px;vertical-align:top;
 </style></head><body>
 <header>
   <h1>flight-watch</h1>
-  <span id="st"><span class="dot"></span>…</span>
-  <button id="start" class="primary">Start monitor</button><button id="stop">Stop monitor</button>
+  <button id="power" disabled>…</button>
   <button onclick="window.open('https://yuval-harpaz.github.io/flight-watch/flights.html?alerts=true')">Flights board</button>
   <select id="links"><option value="">Useful links…</option></select>
+  <span id="st"><span class="dot"></span>…</span>
 </header>
 <main>
   <section>
@@ -399,12 +401,16 @@ for (const b of document.querySelectorAll(".tabs button")) b.onclick = () => {
   refresh();
 };
 
+let RUNNING = false;
 async function refresh() {
   const s = await api("/api/status");
   $("st").innerHTML = s.running
     ? `<span class="dot on"></span>running since ${il(s.started * 1000)} (pid ${s.pid}, Telegram: ${esc(s.telegram_to)})`
     : `<span class="dot"></span>stopped`;
-  $("start").disabled = s.running; $("stop").disabled = !s.running;
+  RUNNING = s.running;
+  const b = $("power");  // one button in one place: the status text comes after it, so its length moves nothing
+  b.textContent = s.running ? "■ Stop" : "▶ Start"; b.className = s.running ? "halt" : "go";
+  b.title = s.running ? "Stop the monitor" : "Start the monitor"; b.disabled = false;
   const box = $("log"), end = box.scrollTop + box.clientHeight >= box.scrollHeight - 4;
   box.textContent = (TAB === "log" && s.running ? s.log : s.console).join("\n") || "(nothing yet)";
   if (end) box.scrollTop = box.scrollHeight;
@@ -478,10 +484,10 @@ $("mk").onclick = async () => {
   if (r.error) alert(r.error);
   refresh();
 };
-$("start").onclick = async () => { $("start").disabled = true; $("note").textContent = (await api("/api/start", {})).result; refresh(); };
-$("stop").onclick = async () => {
-  if (!confirm("Stop the monitor? The Telegram channel will be told.")) return;
-  $("stop").disabled = true; $("note").textContent = (await api("/api/stop", {})).result; refresh();
+$("power").onclick = async () => {
+  if (RUNNING && !confirm("Stop the monitor? The Telegram channel will be told.")) return;
+  $("power").disabled = true;
+  $("note").textContent = (await api(RUNNING ? "/api/stop" : "/api/start", {})).result; refresh();
 };
 $("run").onchange = loadAlerts; $("tgonly").onchange = draw; $("find").oninput = draw;
 refresh(); setInterval(refresh, 10000);
