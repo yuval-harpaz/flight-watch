@@ -3616,6 +3616,10 @@ class Monitor:
             # ELY091 (listed as ELY91) and its turn onto Narita's arrival, 58 nm N at FL155, went out (29 Oct 2026)
             far = self.other_end(t, "DEP")
             ends = [far] * 2 if far else []
+        elif len(ends) < 2 and t.sched and t.sched.direction == "ARR":
+            # our own airport for a board arrival with no route data: IZ690 HAN -> TLV out of Hanoi, 30 -> 316 deg at
+            # FL180, 60 nm out with TLV at 296 (1 Nov 2026)
+            ends = [(self.args.icao, self.args.lat, self.args.lon)] * 2
         if len(ends) < 2 or t.route_dir < 0:
             return None
         icao, lat, lon = ends[-1]
