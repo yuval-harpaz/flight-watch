@@ -31,6 +31,10 @@ other aircraft today - lower it as tuning improves, never raise it casually.
   aircraft around Miami: a passenger tried the exit door and the cockpit, diverted to Miami. Nothing
   in ADS-B tells (no squawk, a 40 min gap over the Bahamas, Miami lies within ~30 deg of Chicago's
   direction): no alert, recorded as a limit.
+- N722BD (Learjet 60, Austin -> North Eleuthera), 1 Nov 2026, ADS-B Exchange's trace_full (live, ~24 h back),
+  the aircraft alone: dive from 35,450 ft at 17:48:17 UTC, last report 17:49:32. The barometric altitude stayed
+  8,750 ft from 17:49:23 while the GPS altitude fell to 325 ft: the last 12 rows carry the GPS altitude (the
+  fixture's `altitude_note`). The reported rate is capped at -32,640 ft/min, ADS-B's limit.
 - AA77 and UA93, 11 Sep 2001, from 911maps.kmz (11-septembre.com) with tools/import_911.py: the flight
   recorder path (1 point a second, with altitude), timed by FAA / NEADS radar returns, as if the
   transponder had stayed on (it was switched off: AA77 08:55, UA93 09:40 EDT). Watched from Dulles and
@@ -192,6 +196,16 @@ class QX2059Replay(Incident, unittest.TestCase):
     def test_turned_back_toward_portland(self):
         self.first("COURSE_CHANGE", "01:06:00", "01:12:00")
         self.first("OFF_COURSE", "01:07:00", "01:13:00", "KSFO")
+
+
+class N722BDReplay(Incident, unittest.TestCase):
+    FIXTURE, DATE = "n722bd_2026-11-01.json.gz", "2026-11-01"
+
+    def test_dive(self):
+        self.first("VERTICAL_RATE", "17:48:30", "17:48:50", "DESCENT")
+
+    def test_lost_contact_falling(self):
+        self.first("LOST_CONTACT", "17:49:00", "17:51:00", "falling")
 
 
 class F93345Replay(Incident, unittest.TestCase):

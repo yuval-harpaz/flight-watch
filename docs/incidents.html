@@ -219,7 +219,32 @@ a.soc{white-space:nowrap}
 <p class="lesson">ההתרעה הראשונה יצאה 29 שניות אחרי תחילת הצלילה, כשעה לפני הנחיתה המתוכננת בנתב"ג. לוח הטיסות הראה
 רק עיכוב.</p>
 
-<div class="credits">מפות: Esri (המקורות מפורטים בכל מפה). נתוני טיסה: ADS-B Exchange (FZ1073, UA2005, AS1282, Horizon 2059, FR4978),
+<h2>N722BD: נפילה מ-35,000 רגל בפלורידה</h2>
+<p class="when">אוסטין, טקסס ← צפון אלאותרה, איי בהאמה, ‏1 בנובמבר 2026, מטוס מנהלים <span class="ltr">Learjet 60, N722BD</span></p>
+<p>המטוס ירד לגובה 35,000 רגל מעל דרום פלורידה. הצוות דיווח בקשר על קרח ועל טורבולנציה, ולפי הדיווחים ביקש לטפס ל-37,000 רגל.
+אחר כך הכריז על מצב חירום, והמטוס התרסק בסמוך לגרינאקרס, פלורידה. כל תשעת האנשים שהיו על המטוס נהרגו.
+הסיבה עדיין לא ידועה: ה-NTSB חוקר, והפרטים כאן הם דיווחים מהימים הראשונים
+(<a href="https://en.wikipedia.org/wiki/2026_Greenacres_Learjet_60_crash">ויקיפדיה</a>,
+<a href="https://aerocorner.com/news/n722bd-learjet-60-greenacres-florida-crash/">AeroCorner</a>).</p>
+<figure><iframe loading="lazy" src="n722bd_map.html?embed=1&amp;zone=UTC&amp;x=3&amp;view=26.68,-80.14,9.8,50,0,6000"></iframe>
+<figcaption>הטיסה נמשכה כשעתיים, והנפילה פחות מדקה וחצי. <a href="n722bd_map.html?zone=UTC&amp;x=3&amp;view=26.68,-80.14,9.8,50,0,6000">המפה המלאה</a></figcaption></figure>
+<p class="src">מקור הנתונים: ADS-B Exchange: <a href="https://globe.adsbexchange.com/?icao=a9ab17&amp;showTrace=2026-11-01">N722BD, ‏1.11.2026</a>. ראו גם את <a href="https://www.flightradar24.com/blog/flight-tracking-news/major-incident/learjet-60-crashes-near-west-palm-beach-florida/">הבלוג של Flightradar24</a></p>
+<table>
+<tr><td>17:48:17</td><td>(בנתונים) תחילת הירידה, מיד אחרי טיפוס קצר ל-35,450 רגל</td></tr>
+<tr><td>17:48:33</td><td>סימן ראשון: הבדיקה הייתה יכולה להתריע</td></tr>
+<tr><td>17:48:42</td><td><span class="k">VERTICAL_RATE</span>: ירידה של 20,900 רגל לדקה, זווית 22°, ב-30,175 רגל</td></tr>
+<tr><td>17:48:52</td><td><span class="k">COURSE_CHANGE</span>: פנייה מ-50° ל-123°</td></tr>
+<tr><td>17:49:03</td><td><span class="k">VERTICAL_RATE</span>: ירידה של 31,600 רגל לדקה, זווית 34°, ב-22,650 רגל</td></tr>
+<tr><td>17:49:12</td><td><span class="k">SHARP_TURN</span>: פנייה בהטיה של כ-40°</td></tr>
+<tr><td>17:49:32</td><td><span class="k">LOST_CONTACT</span>: הדיווח האחרון, 325 רגל לפי GPS, בנפילה</td></tr>
+</table>
+<p class="lesson">ההתרעה הראשונה יצאה כ-50 שניות לפני הדיווח האחרון. בשלב האחרון הנתונים עצמם מטעים: הגובה הברומטרי
+נעצר על 8,750 רגל ונשאר שם, בעוד גובה ה-GPS ממשיך לרדת עד 325 רגל, וזה הגובה שמצויר במפה ב-10 השניות האחרונות. קצב הירידה
+המדווח נעצר על 32,640 רגל לדקה, המקסימום ששדה הקצב ב-ADS-B יכול להעביר, ואילו לפי גובה ה-GPS הוא הגיע לכ-55,000. בשחזור
+הזה המערכת מכירה את מסלול הטיסה; בלי מסלול, כמו שקורה במטוס פרטי, ועם הגובה הברומטרי, יצאו רק שתי התרעות
+<span class="k">VERTICAL_RATE</span>.</p>
+
+<div class="credits">מפות: Esri (המקורות מפורטים בכל מפה). נתוני טיסה: ADS-B Exchange (N722BD, FZ1073, UA2005, AS1282, Horizon 2059, FR4978),
 Flightradar24 (MU5735, ET302, JT610), 911maps.kmz של
 <a href="http://www.11-septembre.com">11-septembre.com</a>, דרך <a href="https://www.reddit.com/r/911archive/comments/1n2hhti/comment/nb6h94n/">r/911archive</a> (AA77, UA93: מסלול רשם הטיסה של ה-NTSB ומכ"מי FAA / NEADS). מסלולים: Virtual Radar Server standing data. קוד:
 <a class="soc" href="https://github.com/yuval-harpaz/flight-watch"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path fill="#24292f" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span class="ltr">github.com/yuval-harpaz/flight-watch</span></a> · התרעות:
