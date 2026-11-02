@@ -2828,6 +2828,26 @@ class FarEndTests(unittest.TestCase):
             got[case] = (first, "DIVERSION" in kinds(alerts, "48418c"))
         self.assertEqual(got, {"flies on": (False, False), "stays": (False, True), "due soon": (True, True)})
 
+    def test_a_new_callsign_at_the_stop_ends_its_deadline(self):
+        """IB1873 MAD -> TLV on the ground at Athens became IBS18AB there and left: DIVERSION "too late to land by its
+        scheduled ?" at the old row's deadline, then its departure turn as a COURSE_CHANGE (2 Nov 2026)."""
+        mon, feed, clock, alerts = self.setup([board_row("KL", "463", "A", local_time(Clock(), 4), "AMS")])
+        feed.files.update(self.KLM_FILES)
+        feed.files["routes/schema-01/K/KLM-all.csv"] = ("Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                                       "KLM463,KLM,463,KLM,EHAM-LLBG\n")
+        for icao in ("EHAM", "LROP"):
+            mon.standing.airport(icao)
+        self.land_at_otp(mon, feed, clock, "48418c", dict(flight="KLM463", r="PH-BXR", t="B739"))
+        t = mon.tracks["48418c"]
+        self.assertTrue(t.stop_wait)
+        ground = dict(lat=44.5711, lon=26.0850, alt_baro="ground", gs=5, track=90)
+        fly(mon, feed, clock, "48418c", [ground] * 20, local=False, flight="KLM18AB", r="PH-BXR", t="B739")
+        self.assertEqual(t.callsign, "KLM18AB")
+        self.assertIsNone(t.stop_wait)
+        clock.t += 3 * 3600
+        fly(mon, feed, clock, "48418c", [ground] * 2, local=False, flight="KLM18AB", r="PH-BXR", t="B739")
+        self.assertNotIn("DIVERSION", kinds(alerts, "48418c"))
+
     def test_board_origin_before_the_routes_leg_is_a_stop(self):
         """BZ131 BGY -> TLV (board), BBG131 LIRF-LLBG: a tag flight via Rome, two DIVERSIONs on landing there."""
         got = {}

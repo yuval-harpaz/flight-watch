@@ -294,6 +294,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   (`early_stop`: the distance at `STOP_KT` 420 + `STOP_TURN_S` 20 min) is logged and still followed; a DIVERSION only if still
   there when that is too late (`Track.stop_wait`, `check_stops`): IB1873 MAD -> TLV on the ground at Athens 01:41, at TLV 04:16,
   due 04:30. Cost: a real diversion to an airport on the way is alerted late (up to its board time less the flight on).
+  A new callsign during the wait ends it (`new_callsign`; 2 Nov 2026 nightly review): IB1873 became IBS18AB on the ground at
+  Athens, a new leg with no board row, and the old row's deadline still gave DIVERSION "too late to land by its scheduled ?", then
+  its departure turn (hot) and a follow-up. Cost: a real diversion that takes a new callsign there is not alerted.
   A landing elsewhere must be believable (13 Oct 2026; all 4 DIVERSIONs of the run of 11-12 Oct were
   arrivals on approach to TLV with spoofed GPS - ETD3QF, AIZ282, ISR972, ELY5462): "on the ground" within
   `LANDING_AIRPORT_NM` (5) of an airport of the local `standing-data/` checkout (`StandingData.airfield_near`;

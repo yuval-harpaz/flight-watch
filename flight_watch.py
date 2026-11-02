@@ -2249,6 +2249,8 @@ class Monitor:
             t.max_alt, t.orig_first, t.orig_max, t.orig_left = 0, -1.0, 0.0, False
             t.came_from = bool(t.last) and not t.last.on_ground  # (its previous flight, under another callsign)
             t.takeoff_pos = t.takeoff_pos if t.last and not t.last.on_ground else None
+            t.stop_wait = None  # a stop's deadline is the old callsign's board row: IB1873 at Athens became IBS18AB
+            #                     there, then "too late to land by its scheduled ?" 6 min later (2 Nov 2026)
             if t.last and t.last.on_ground:  # (a change in the air is the same flight: LOT6ME -> LOT6212)
                 self.unfollow(t, f"is {new} on the ground")
         t.callsign, t.cs_pending = new, None
