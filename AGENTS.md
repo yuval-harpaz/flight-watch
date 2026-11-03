@@ -364,29 +364,17 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   there (4 of the 15 VERTICAL_RATE alerts on disk: GLF5 x2, C295, P750).
   A military aircraft on an MLAT position is judged by `--vrate` only (no angle; 25 Oct 2026, the owner's choice): USAF
   tankers (K35R x2, KC-46) descending into TLV at -3,800 to -4,900 ft/min were "-15 to -20 deg", 3 Telegram messages.
-  A military aircraft (large too, since 20 Oct 2026) gets one alert of any kind, then only EMERGENCY until
-  `MILITARY_QUIET_S` (2 h) after the last alert it would have had (`Track.mil_quiet`; those are kept in
-  `Track.mil_held`, once per cooldown), and a Telegram follow-up as a reply when it lands or has been silent
-  `--lost-after-remote` (`telegram_followups`): how it ended, the alert sent, the ones held back (counted) and the
-  map with all of them. The owner: "one alert when issues start, and one more when the flight has landed /
-  disappeared". 18 Oct 2026, Jordan: CHLE1B (PC21) 15 alerts in 31 min of aerobatics (14 on Telegram, "skydiving
-  pattern" among them - such types no longer count as jump planes), 7436ac (AT8T) 17 with its position jumping
-  28 nm back and forth; 20 Oct: IAM4188 (Italian Air Force AT76, patrolling west of Israel) 7. Cost: a real accident
-  of a military aircraft after its first alert is only logged (and in its follow-up).
-  No SHARP_TURN on a military aircraft, and no follow-up when it adds nothing - one message, not an emergency / diversion /
-  return, nothing held back but turns (3 Nov 2026, the owner's choice; 14 of 18 Telegram messages on 2 Nov were this rule's
-  alert + follow-up: Jordanian PC21 / AT8T trainers near ADJ at 36-44 deg, HMR11 / 12 / 13 in one formation within 64 s). A lost
-  contact held back still gets its update. Cost: the first sign of an accident that shows only as a steep turn is only logged.
-  **Light / private aircraft** are only logged (31 Oct 2026, the owner: "let's not show small and off board flights";
-  from 22 Oct they had the military rule's one alert, mostly survey lines and bizjet climbs; `Monitor.light`):
-  not military, not an airliner type (`LARGE_TYPES`; not the wake category: A3 covers big bizjets too, and BDK12 /
-  BDK04, 738685 with no type in the feed, sends A3 - the rule never applied to it: 19 Telegram messages on 28 Oct 2026;
-  the type pattern takes letters too - B77W, B77L, B78X, A35K, B3XM: UAE46, a B77W with no route yet, was "light /
-  private" in its GPS_SPOOFING, 28 Oct 2026 nightly review), not on the board, no route data - whatever the callsign looks like (BDK12, an Israeli
-  survey jet with no type in the feed, sent 18 Telegram messages in 3 h of survey lines on 22 Oct; HEZ652, Hawker
-  4X-CZF, 4 in GPS jamming: their airline-style callsigns escaped the pattern-flying rule). Still alerted: an emergency
-  squawk / status, a medical flight and a fall at `--vrate` or faster. Jump planes (`JUMP_PLANES` types, or a lift seen)
-  keep their own rule: the owner wants the weekend skydiving's one steep-descent alert.
+- **What is sent, by class of flight** (`PUBLISH`, `Monitor.flight_class`, read in `Monitor.alert`; 3 Nov 2026, the owner: no private
+  or military flights "unless for some extreme circumstances"). Every check still runs on every flight; what is not sent is only
+  logged. `military` (large too) and `private` (`Monitor.light`: not military, not an airliner type - `LARGE_TYPES`, not the wake
+  category: A3 covers big bizjets, and BDK12 / BDK04 send it with no type in the feed - not on the board, no route data, whatever
+  the callsign looks like; jump planes too) get only `EXTREME`: EMERGENCY, MEDICAL_FLIGHT, and FALL = a descent at `--vrate` or
+  faster, or contact lost during one (`plunging`). One VERTICAL_RATE fall in `QUIET_FALL_S` (2 h) a flight, past the usual
+  escalation: Jordanian PC21 trainers fall at -16,000 to -18,800 ft/min in aerobatics (CHLE1B, CHLE1D). Follow-ups as for any flight
+  (FOLLOWUP_KINDS, or 2+ messages). Replaced: a military aircraft's one alert then quiet with an update (18 - 20 Oct, no SHARP_TURN from
+  3 Nov), the jump plane's one check-in dive (16 Oct; 4XDAN still sent 4 dives with follow-ups on 31 Oct, cause not looked for, gone
+  with it), and the survey-line rule (14 Oct; no such flight left to reach it). Cost: an accident on such a flight that shows only as
+  a turn, a normal descent or a TOWARD_ISRAEL, with no squawk, is only logged, and the alerts no longer show that the monitor sees them.
 - **ALTITUDE_WOBBLE / EARLY_DESCENT** (16 Oct 2026, from the incident fixtures; airline callsign and large
   aircraft only). Wobble: the altitude reverses 3+ times (each leg >= 150 ft, `reversals`) within 3 min below
   FL250, with the aircraft's own vertical rate both >= +500 and <= -500 (a lone bad altitude is 2 reversals with a
@@ -452,19 +440,11 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
 - **SKYDIVE_PATTERN**: a jump run (>= 2 reports <= 80 kt at >= 6,000 ft over >= 15 s, positions
   agreeing) followed within 5 min by a descent of >= 3,000 ft/min and >= 1,000 ft. 4XDAN (P750) over
   the Dead Sea, 10 Oct 2026: a lift every ~40 min (climb to ~12,000 ft, ~50 kt while jumpers exit,
-  -5,600 ft/min at 150 kt, silent below ~7,000 ft), each giving VERTICAL_RATE + LOST_CONTACT. The owner
-  wanted those alerts kept: they carry `[skydiving pattern, <model>: ...; lift N]` and the record's
-  `skydive` for 30 min (model from `JUMP_PLANES`, else the type code). 16 Oct 2026, 4XDAN again: 13 alerts in 3
-  lifts, 6 on Telegram; the owner now wants one: a jump plane's first VERTICAL_RATE ("probably a skydiving ride",
-  a sanity check that the monitor sees it), then until `SKYDIVE_QUIET_S` (3 h) after its last lift only EMERGENCY
-  and a fall at `--vrate` or faster (VERTICAL_RATE, LOST_CONTACT "falling": a spin, not its -4,200 to -5,700 ft/min
-  dives). Cost: an accident at a normal rate or below coverage (it goes silent below ~7,000 ft) is only logged.
+  -5,600 ft/min at 150 kt, silent below ~7,000 ft), each giving VERTICAL_RATE + LOST_CONTACT. Only logged since 3 Nov 2026 (private, see above; an
+  extreme on one carries `[skydiving pattern, <model>: ...; lift N]` and the record's `skydive` for 30 min).
   A jump-plane type (`JUMP_PLANES`) may run in at up to 110 kt (`SKYDIVE_RUN_KT_JUMP_PLANE`; others 80): on 17 Oct
-  4XDAN ran in at 87-104 kt and its first lift went out as a plain steep descent + lost contact. Dives suppressed
-  in the quiet time extend it (later lifts whose run was not seen). The Telegram text says "Probably a skydiving
-  flight (sport parachuting ...)". A restart reads the rides already announced in `--jsonl` (`Monitor.past_rides`; monitor.sh:
-  today's file), so they stay quiet; the bot cannot read the channel's history, and the file is the record. An airline callsign or a large
-  aircraft (category A3-A5 or `LARGE_TYPES`) flying it is alerted at priority 5 (near-stall flight at
+  4XDAN ran in at 87-104 kt and its first lift went out as a plain steep descent + lost contact. A large
+  aircraft (category A3-A5 or `LARGE_TYPES`, or an airline callsign with a route) flying it is alerted at priority 5 (near-stall flight at
   height, then a dive); military transports drop paratroopers and are only described.
 - **HOLDING**: an airliner (airline callsign, not military) circling - >= 330 deg of turn one way
   in 12 min within 25 nm - for `--holding-minutes` (30), again after each further 30 min. Military
@@ -565,10 +545,7 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   Nor a DIVERSION for going silent low near another airport (28 Oct 2026 nightly review): IZ598 HKT -> TLV (D-AUSC,
   A343, positions only) went silent at 10,225 ft over Amman, 47 nm from TLV, "probably landing at ADJ", and landed at
   TLV 10 min later. Cost: a real diversion of a position-only arrival is only logged.
-- **Pattern flying**: a COURSE_CHANGE / SHARP_TURN on an aircraft with no route that is not large, within 2 h
-  of its last turn alert and with no other anomaly, is only logged. 14 Oct 2026: G-FPLD (CLB230, BE20) and
-  4X-CVH (BDK09, G280) flew survey lines west of Israel for hours: 15 of 17 turn alerts (now 3). SHARP_TURN
-  ignores speeds above `--max-gap-speed` (THY6219 "843 kt"). TOWARD_ISRAEL skips aircraft below 10,000 ft
+- **Speeds and places**: SHARP_TURN ignores speeds above `--max-gap-speed` (THY6219 "843 kt"). TOWARD_ISRAEL skips aircraft below 10,000 ft
   within 15 nm of a non-Israeli airport (DNA541 turning onto its approach at Damascus, route unknown).
 - **POSITION_JUMP**: implausible speed between consecutive positions **within 120 s**
   (`--max-speed` 1200 kt, loose because of position noise). After a longer gap the plane may

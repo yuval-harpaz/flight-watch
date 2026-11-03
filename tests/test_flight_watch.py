@@ -812,7 +812,15 @@ class MlatTests(unittest.TestCase):
         self.assertTrue(all(x.lon < 35 for x in t.samples), "only real positions in the track")
 
 
-class TrustedSpeedTests(unittest.TestCase):
+class AllPublished(unittest.TestCase):
+    """For tests of what a check detects, on flights whose alerts are otherwise only logged (fw.PUBLISH)."""
+    def setUp(self):
+        patcher = mock.patch.dict(fw.PUBLISH, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class TrustedSpeedTests(AllPublished):
     def test_spoofed_low_speed_does_not_make_a_climb_steep(self):
         """QTR94R, 6 Oct 2026: B789 at FL390 'at' 147 kt during spoofing, reporting +12,224 ft/min
         while climbing normally. The altitude history unmasks the rate as a glitch - but judged with
@@ -854,7 +862,7 @@ def trace_rows(t0, states, dt=10, squawk=None):
              {"squawk": squawk} if squawk and i == 0 else None, "adsb_icao"] for i, st in enumerate(states)]
 
 
-class RecentTraceTests(unittest.TestCase):
+class RecentTraceTests(AllPublished):
     """The feed's recent trace (TRACE_RECENT) fills what our polls missed: 4XDAN, 10 Oct 2026, dives at
     08:55 and 10:17 IDT went unalerted while the API refused half the polls (HTTP 429)."""
 
@@ -954,7 +962,7 @@ class RecentTraceTests(unittest.TestCase):
         self.assertFalse(alerts[0]["from_trace"])
 
 
-class SkydiveTests(unittest.TestCase):
+class SkydiveTests(AllPublished):
     def test_jump_plane_dive_is_described(self):
         mon, feed, clock, alerts = make(["--no-routes"])
         fly(mon, feed, clock, "739215", lift(), flight="4XDAN", r="4X-DAN", t="P750", category="A1")
@@ -962,53 +970,11 @@ class SkydiveTests(unittest.TestCase):
         self.assertIn("skydiving pattern, PAC 750XL: 55 kt at 11800 ft", alerts[0]["message"])
         self.assertEqual(alerts[0]["skydive"]["lift"], 1)
 
-    def test_rides_are_alerted_once_then_only_an_emergency(self):
-        """4XDAN, 16 Oct 2026: 3 lifts gave 13 alerts (dives, silences low, heard again)."""
-        mon, feed, clock, alerts = make(["--no-routes"])
-        ident = dict(flight="4XDAN", r="4X-DAN", t="P750", category="A1")
-        end = lift()[-1]
-        climb = path(end["lat"], end["lon"], [5] * 60, [8500 + 55 * i for i in range(60)], gs=100)
-        second = lift()
-        fly(mon, feed, clock, "739215", lift() + climb + second, **ident)
-        fly(mon, feed, clock, "739215", [{**second[-1], "squawk": "7700"}] * 2, **ident)
-        self.assertEqual(kinds(alerts), ["VERTICAL_RATE", "EMERGENCY"])
-        self.assertIn("probably a skydiving ride", alerts[0]["message"])
-        self.assertEqual(mon.tracks["739215"].skydive["lift"], 2)
-
-    def test_ride_announced_before_a_restart_is_not_announced_again(self):
-        ident = dict(flight="4XDAN", r="4X-DAN", t="P750", category="A1")
-        d = tempfile.mkdtemp()
-        f = os.path.join(d, "alerts.jsonl")
-        mon, feed, clock, alerts = make(["--no-routes", "--jsonl", f])
-        fly(mon, feed, clock, "739215", lift(), **ident)
-        self.assertEqual(kinds(alerts), ["VERTICAL_RATE"])
-        with open(f, "w", encoding="utf-8") as out:  # what Notifier.send appends (replaced in these tests)
-            out.write(json.dumps(alerts[0]) + "\n")
-        mon, feed, clock2, alerts = make(["--no-routes", "--jsonl", f])  # restarted 20 min later
-        clock2.t = clock.t + 1200
-        fly(mon, feed, clock2, "739215", lift(), **ident)
-        self.assertEqual(kinds(alerts), [])
-
     def test_faster_jump_run_of_a_jump_plane(self):
-        """4XDAN, 17 Oct 2026: a jump run at 87-104 kt, then -4,800 ft/min: a ride, said so on Telegram."""
+        """4XDAN, 17 Oct 2026: a jump run at 87-104 kt, then -4,800 ft/min: a lift."""
         mon, feed, clock, alerts = make(["--no-routes"])
         fly(mon, feed, clock, "739215", lift(gs_run=95), flight="4XDAN", r="4X-DAN", t="P750", category="A1")
-        self.assertEqual(kinds(alerts), ["VERTICAL_RATE"])
-        self.assertIn("probably a skydiving ride", alerts[0]["message"])
-        text = mon.notifier.announcer.compose(alerts[0], reply=False)
-        self.assertIn("Probably a skydiving flight (sport parachuting, PAC 750XL)", "".join(x.get("text", "") for x in text))
-
-    def test_a_fall_beyond_vrate_on_a_ride_is_alerted(self):
-        """A spin, not a jump-plane dive: -12,000 ft/min after the ride's first alert."""
-        mon, feed, clock, alerts = make(["--no-routes"])
-        ident = dict(flight="4XDAN", r="4X-DAN", t="P750", category="A1")
-        first = lift()
-        end = first[-1]
-        fall = path(end["lat"], end["lon"], [190] * 4, [end["alt_baro"] - 2000 * i for i in range(1, 5)], gs=150)
-        fall = [{**st, "baro_rate": -12000} for st in fall]
-        fly(mon, feed, clock, "739215", first + fall, **ident)
-        self.assertEqual(kinds(alerts), ["VERTICAL_RATE", "VERTICAL_RATE"])
-        self.assertIn("-12000", alerts[1]["message"])
+        self.assertEqual(mon.tracks["739215"].skydive["lift"], 1)
 
     def test_airliner_flying_it_is_priority_5(self):
         mon, feed, clock, alerts = make(["--no-routes"])
@@ -2462,8 +2428,9 @@ class Run18OctTests(unittest.TestCase):
             r="JY-AYV", t="A321")
         self.assertNotIn("HOLDING", kinds(alerts))
 
-    def test_military_trainer_alerts_once(self):
-        """CHLE1B (PC21, Jordan): 15 alerts in 31 min of aerobatics."""
+    def test_military_trainer_sends_one_fall_at_most(self):
+        """CHLE1B (PC21, Jordan): 15 alerts in 31 min of aerobatics, falling up to -16,000 ft/min. Only logged, but for
+        one fall in QUIET_FALL_S."""
         mon, feed, clock, alerts = make(["--no-routes"])
         ident = dict(flight="CHLE1B", r="1178", t="PC21", dbFlags=1)
         for k in range(3):  # three dives 10 min apart (beyond the 5-min cooldown)
@@ -2472,7 +2439,6 @@ class Run18OctTests(unittest.TestCase):
             fly(mon, feed, clock, "743593", path(32.4, 36.2, [270] * 50, [12000 + 80 * i for i in range(50)], gs=250),
                 **ident)
         self.assertEqual(kinds(alerts), ["VERTICAL_RATE"])
-        self.assertIn("no further alerts on it", alerts[0]["message"])
 
     def test_routing_corners_added_by_hand(self):
         """The heatmaps that taught turn_zones.json are refused since 31 Oct 2026. Where each turn was reported / began."""
@@ -2491,57 +2457,55 @@ class Run18OctTests(unittest.TestCase):
         t = mon.tracks["743593"]
         self.assertFalse(mon.alert(t, "SHARP_TURN", "39 -> 120 deg in 20s at 250 kt (~44 deg bank)", severity=44))
         self.assertEqual(alerts, [])
-        self.assertFalse(t.mil_quiet)  # (no alert: the next kind is still its one)
 
-    def test_military_follow_up_only_when_it_adds_something(self):
-        """724 (2 Nov 2026): one course reversal, two more held back, then an update saying so. An alert of another
-        kind held back, or a lost contact, is worth one."""
-        got = {}
-        for name, held, sent in (("turns held", [("COURSE_CHANGE", 1)], [("COURSE_CHANGE", 0)]),
-                                 ("nothing held", [], [("VERTICAL_RATE:DESCENT", 0)]),
-                                 ("dive held", [("VERTICAL_RATE:DESCENT", 1)], [("COURSE_CHANGE", 0)]),
-                                 ("emergency", [], [("DIVERSION", 0)])):
-            mon, feed, clock, alerts = make(["--no-routes"])
-            ups = []
-            mon.notifier.follow_up = lambda h, when, seg, ups=ups: ups.append(seg)
-            ident = dict(flight="724", t="C295", dbFlags=1)
-            fly(mon, feed, clock, "738700", path(32.4, 35.0, [90] * 3, [9000] * 3, gs=200), **ident)
-            t, now = mon.tracks["738700"], clock()
-            t.sent = [(k, now - 600 + x) for k, x in sent]
-            t.mil_held = [(k, now - 600 + x) for k, x in held]
-            th = mon.notifier.tg_threads["738700"] = {"id": 3, "t": now - 600, "last": now - 600, "n": 1}
-            mon.telegram_followups(t.last.t + mon.args.lost_after_remote + 1)
-            got[name] = (len(ups), th["done"])
-        self.assertEqual(got, {"turns held": (0, True), "nothing held": (0, True), "dive held": (1, True),
-                               "emergency": (1, True)})
-
-    def test_large_military_alerts_once_and_follows_up_when_it_goes_silent(self):
+    def test_large_military_is_only_logged_with_no_follow_up(self):
         """IAM4188 (Italian Air Force AT76) patrolling west of Israel: 7 alerts in 70 min (20 Oct 2026)."""
         mon, feed, clock, alerts = make(["--no-routes"])
         ups = []
         mon.notifier.follow_up = lambda h, when, seg: ups.append(seg)
-        feed.local = {f"99999{i}" for i in range(6)}  # (one of two aircraft going silent: a feed glitch)
-        for i in range(6):
-            feed.aircraft[f"99999{i}"] = airborne(32.5 + 0.1 * i, 34.5, 10000, flight=f"LOC{i}")
         ident = dict(flight="IAM4188", r="MM62298", t="AT76", dbFlags=1)
         lap = [85] * 30 + [266] * 30  # (out and back on the same line: a reversal each way, 10 min a lap)
         fly(mon, feed, clock, "33fdd0", path(32.6, 33.2, lap * 4, [15000] * 240, gs=250), **ident)
-        at = fw.datetime.fromisoformat(alerts[0]["time"].replace("Z", "+00:00")).timestamp()
-        mon.notifier.tg_threads["33fdd0"] = {"id": 3, "t": at, "last": at, "n": 1}
-        self.assertEqual(kinds(alerts), ["COURSE_CHANGE"])
-        self.assertEqual(ups, [])
-        feed.local.discard("33fdd0")
-        del feed.aircraft["33fdd0"]
-        for _ in range(80):
-            step(mon, clock)
-        self.assertEqual(kinds(alerts), ["COURSE_CHANGE"])
-        self.assertEqual(len(ups), 1)
-        text = "".join(x.get("text") or x["link"] for x in ups[0])
-        self.assertIn("last heard", text)
-        self.assertIn("not alerted (military", text)
-        self.assertIn("Alerts: course reversal ", text)
-        self.assertRegex(text, r"then not alerted \(military, [0-9:]+-[0-9:]+\): course reversal x[2-9]")
+        self.assertEqual((alerts, ups), ([], []))
 
+    def test_extreme_circumstances_of_a_military_or_private_flight_are_sent(self):
+        """The publish table: only the extremes, on each class; everything on an airliner."""
+        idents = {"military": dict(flight="724", t="C295", dbFlags=1), "private": dict(flight="BDK12", t="GLF5"),
+                  "airliner": dict(flight="TST001", t="A320")}
+        for cls, ident in idents.items():
+            mon, feed, clock, alerts = make(["--no-routes"])
+            fly(mon, feed, clock, "738700", path(32.4, 35.0, [90] * 3, [9000] * 3, gs=200), **ident)
+            t = mon.tracks["738700"]
+            self.assertEqual(mon.flight_class(t), cls)
+            quiet = cls != "airliner"
+            for kind, msg, key, sev, sent in (("COURSE_CHANGE", "x", None, 0, not quiet), ("DIVERSION", "x", None, 0, not quiet),
+                                              ("VERTICAL_RATE", "DESCENT -5000", "VERTICAL_RATE:DESCENT", 5000, not quiet),
+                                              ("VERTICAL_RATE", "DESCENT -9000", "VERTICAL_RATE:DESCENT", 9000, True),
+                                              ("LOST_CONTACT", "silent, last heard falling", None, 0, True),
+                                              ("EMERGENCY", "7700", "EMERGENCY:7700", 0, True),
+                                              ("MEDICAL_FLIGHT", "x", None, 0, True)):
+                self.assertEqual(mon.alert(t, kind, msg, key=key, severity=sev), sent, (cls, kind, sev))
+
+    def test_second_fall_of_a_quiet_flight_waits(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "738700", path(32.4, 35.0, [90] * 3, [9000] * 3, gs=200), flight="724", t="C295", dbFlags=1)
+        t, key = mon.tracks["738700"], "VERTICAL_RATE:DESCENT"
+        self.assertTrue(mon.alert(t, "VERTICAL_RATE", "a", key=key, severity=9000))
+        self.assertFalse(mon.alert(t, "VERTICAL_RATE", "b", key=key, severity=18000))  # (no escalation past it)
+        last = t.alerted[key]
+        t.alerted[key] = (last[0] - fw.QUIET_FALL_S - 1, last[1])
+        self.assertTrue(mon.alert(t, "VERTICAL_RATE", "c", key=key, severity=9000))
+
+    def test_emergency_of_a_military_flight_gets_its_follow_up(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        ups = []
+        mon.notifier.follow_up = lambda h, when, seg: ups.append(seg)
+        fly(mon, feed, clock, "738700", path(32.4, 35.0, [90] * 3, [9000] * 3, gs=200), flight="724", t="C295", dbFlags=1)
+        t, now = mon.tracks["738700"], clock()
+        t.sent.append(("EMERGENCY", now - 600))
+        mon.notifier.tg_threads["738700"] = {"id": 3, "t": now - 600, "last": now - fw.TG_FOLLOWUP_S - 1, "n": 1}
+        mon.telegram_followups(now)
+        self.assertEqual(len(ups), 1)
 
 class SecondFeedTests(unittest.TestCase):
     """--fallback-provider (adsb.fi): the local circle when adsb.lol does not answer (18 Oct 2026: ~110 of
@@ -3152,17 +3116,22 @@ class LegEndAndLightAircraftTests(unittest.TestCase):
                 flight="679", r="", t="GLF5", category="A3", dbFlags=1)
             self.assertEqual("SHARP_TURN" in raised, expected, (gs, raised))
 
-    def test_a_jump_plane_keeps_its_ride_alert(self):
-        """4XDAN: an alert before its first lift must not hold back the ride's one steep-descent alert."""
+    def test_a_jump_plane_is_private(self):
+        """4XDAN: its lifts only logged (the owner dropped the check-in alert, 3 Nov 2026; 10 Telegram messages on 30-31
+        Oct), a spin or an emergency sent."""
         mon, feed, clock, alerts = make(["--no-routes"])
         ident = dict(flight="4XDAN", r="4X-DAN", t="P750", category="A1")
-        fly(mon, feed, clock, "739215", [dict(airborne(31.5, 35.4, 9000, gs=120), squawk="7600")] * 2, **ident)
-        fly(mon, feed, clock, "739215", [dict(airborne(31.5, 35.4, 9000, gs=120), squawk="1200")] * 2, **ident)
-        clock.t += 600
-        fly(mon, feed, clock, "739215", lift(), **ident)
-        self.assertEqual(kinds(alerts), ["EMERGENCY", "VERTICAL_RATE"])
-        self.assertIn("probably a skydiving ride", alerts[1]["message"])
-        self.assertFalse(mon.light(mon.tracks["739215"]))
+        first = lift()
+        end = first[-1]
+        fly(mon, feed, clock, "739215", first, **ident)
+        self.assertEqual(alerts, [])
+        self.assertEqual(mon.tracks["739215"].skydive["lift"], 1)
+        fall = path(end["lat"], end["lon"], [190] * 4, [end["alt_baro"] - 2000 * i for i in range(1, 5)], gs=150)
+        fly(mon, feed, clock, "739215", [{**st, "baro_rate": -12000} for st in fall], **ident)
+        self.assertEqual(kinds(alerts), ["VERTICAL_RATE"])
+        self.assertIn("-12000", alerts[0]["message"])
+        fly(mon, feed, clock, "739215", [{**fall[-1], "squawk": "7700"}] * 2, **ident)
+        self.assertEqual(kinds(alerts), ["VERTICAL_RATE", "EMERGENCY"])
 
     def test_impossible_speed_of_a_bizjet_is_no_sharp_turn(self):
         """HEZ652 (4X-CZF, Hawker 800) "134 -> 50 deg in 30 s at 728 kt (~62 deg bank)" at FL190 in GPS jamming."""

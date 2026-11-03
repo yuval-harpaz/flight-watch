@@ -32,7 +32,7 @@ turning back, diversions, and flights not bound for Israel turning toward it.
 | `EARLY_DESCENT` | an airliner descending 1,000 ft below the height it climbed to within 10 min of take-off (AS1282) | 5 |
 | `SHARP_TURN` | turn tighter than ~35 deg of bank (airliners stay below ~25-30), anywhere, also near airports; only with a ground speed the positions back (and under 600 kt for a light aircraft) | 4 |
 | `COURSE_CHANGE` | >= 70 deg in 2 min above 12000 ft, new track held 2 min - not S-turns, holding patterns / orbits, routine turns near airports (also its own origin / destination far away and where it took off) or learned route corners, nor a turn onto the route's destination; an aircraft with no route that is not an airliner gets one turn alert per 2 h (survey / patrol lines) | 4 |
-| `SKYDIVE_PATTERN` | an airliner or large aircraft flying a jump run (slow at height) then diving; a jump plane's first dive is alerted ("probably a skydiving ride"), then nothing on it but an emergency squawk or a fall beyond `--vrate` until 3 h after its last lift | 5 |
+| `SKYDIVE_PATTERN` | an airliner or large aircraft flying a jump run (slow at height) then diving; a jump plane doing it is only logged | 5 |
 | `HOLDING` | an airliner circling over 30 min (again every 30 min) instead of landing; military and non-airline traffic not reported | 4 |
 | `GPS_SPOOFING` | aircraft reported motionless in the air (impossible for a fixed-wing plane unless falling fast) at the same point: one alert per episode (`spoof-YYYYMMDDTHHMMZ`) and one when it ends; the position-based alerts it causes are logged under that label instead | 3 |
 | `MASS_SILENCE` | 3+ aircraft silent within 2 min of each other (reception, jamming, the onset of spoofing): one alert (`silence-YYYYMMDDTHHMMZ`) instead of a `LOST_CONTACT` each. Every loss now waits `--lost-confirm` (60 s) for this; heard again meanwhile = nothing | 3 |
@@ -45,12 +45,9 @@ cycle wherever it is, and every further anomaly is reported. Two different anoma
 within that time are tagged `[also: ...]` and sent at priority 5. Following ends with the flight: a landing,
 or a new callsign on the ground (unless hot); its next leg is followed again only if it is TLV traffic.
 
-**One alert, then quiet.** Military aircraft, and light / private aircraft (not large, not on the board, no
-route data, whatever their callsign), get one alert, then only an emergency squawk until 2 h after their last
-anomaly, and one Telegram follow-up when they land or go silent listing what was held back. For light aircraft a
-fall faster than `--vrate` is still alerted, and the one alert must be one Telegram gets (an earlier lost contact or
-position jump does not use it up). Jump planes keep their own rule: one alert for the first skydiving dive, then
-quiet for 3 h after the last lift.
+**Military and private flights.** Military aircraft, and light / private aircraft (not an airliner type, not on the
+board, no route data, whatever their callsign; jump planes too), are checked like any flight but only logged, except an
+emergency squawk or status, a medical flight, and a fall at `--vrate` or faster (one in 2 h), or contact lost during one.
 
 Thresholds come from the FZ1073 replay (below): normal traffic never descended steeper than ~8 deg
 or climbed steeper than ~13 deg (bizjet near TLV), and its turns implied <= 25 deg of bank; FZ1073
