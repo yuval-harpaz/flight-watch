@@ -73,6 +73,7 @@ GROUPS = [
      {"LOST_CONTACT", "CONTACT_RESTORED", "MASS_SILENCE"}),
     # not an alert: an event of the incident kept in the fixture's meta (import_911.py)
     ("event", "transponder switched off", "#000000", "circle", "⊘", {"TRANSPONDER_OFF"}),
+    ("goaround", "aborted landing", "#1f77b4", "circle", "↺", {"ABORTED_LANDING"}),  # (tools/go_around_maps.py: not an alert)
     ("other", "other", "#17becf", "circle", "●", set()),
 ]
 GROUP_OF = {k: g[0] for g in GROUPS for k in g[5]}
@@ -1286,6 +1287,7 @@ def main(argv=None):
     p.add_argument("--fixture", help="plot a replay fixture offline (tests/data/*.json.gz): its alerts are the "
                                      "monitor's on a replay now, its positions those of the fixture")
     p.add_argument("--pick", type=int, help="alert number in the list (1 = newest)")
+    p.add_argument("--event", action="store_true", help="with --fixture: its first meta event, not an alert")
     p.add_argument("--filter", nargs="+", default=[], metavar="TEXT",
                    help="list only alerts whose row contains all these (any case): LY347, Zurich, RETURNED")
     p.add_argument("--minutes", type=float, help="plot this long before and after the alert, across "
@@ -1309,13 +1311,15 @@ def main(argv=None):
         fixture, alerts = replay_alerts(a.fixture)
         meta = fixture["meta"]
         alerts = [x for x in alerts if x["hex"] in fixture["aircraft"]]
-        if not alerts:
+        if not alerts and not meta.get("events"):
             sys.exit(f"no alerts on a replay of {a.fixture}")
         if not a.filter and a.pick is None:  # the incident aircraft's first alert (the list is newest first)
             a.pick = max((i for i, x in enumerate(alerts, 1) if x["hex"] in meta["focus"]), default=len(alerts))
         # incident events (meta "events": time, kind, message, lat, lon, alt) drawn as alerts; appended
         # after the pick, so they do not move the alert numbers
         alerts += [dict(e, hex=meta["focus"][0]) for e in meta.get("events", [])]
+        if a.event:  # centred on the fixture's event, not on an alert
+            a.pick = len(alerts) - len(meta.get("events", [])) + 1
         if "--airport" not in (argv if argv is not None else sys.argv[1:]):
             a.airport = meta["airport"]
         origin = tuple(meta["airport_coords"]) if "airport_coords" in meta else None
