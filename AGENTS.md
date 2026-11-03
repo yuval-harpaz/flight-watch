@@ -16,6 +16,7 @@ position jumps, diversions. Speed of warning matters more than completeness of d
   `alerts.jsonl` with **links to existing sites** (FR24, ADS-B Exchange, airplanes.live), and
   one announcement in `posts.jsonl`.
 - Report findings and proposals **before** large changes; deliver changes as pull requests.
+  The unattended nightly review is the exception (3 Nov 2026): it implements its recommendations and they are pushed, see below.
 - Never commit secrets (ntfy topic, Telegram token) or `alerts.jsonl` / `posts.jsonl`; they come from CLI
   args or environment variables.
 
@@ -38,7 +39,10 @@ and appended to `posts.jsonl`), and ntfy / Telegram when configured. `tests/repl
 `tools/` (incident capture, turn-zone learning, `plot_alert.py`
 3D replay of an alert, `squawk_cases.py`, `dashboard.py` - the owner's local control page, 24 Oct 2026: start / stop
 `monitor.sh` - Telegram told only when it stays stopped > 10 s, so a restart for a code change sends nothing (25 Oct 2026), and "running again" only after a "stopped": the pending stop is kept in `tmp_dashboard_down.json`, as Ctrl+C on the page within the 10 s lost it and the next page's start said "running again" alone (28 Oct 2026) -, a run's alerts by kind, a map of one; stdlib only, 127.0.0.1, other sites' requests refused; `nightly.sh` + `daily_digest.py` + `nightly_prompt.md` -
-the 03:00 UTC restart and unattended review, fixes on a `nightly/<date>` branch, never pushed; each start logs its code -
+the 03:00 UTC restart and unattended review, which ends by implementing its recommendations on a `nightly/<date>` branch; `nightly_publish.py` (not the review, which cannot push) then
+pushes them to main and restarts the monitor on them (the owner, 3 Nov 2026). Held back, with a message to the owner's private chat (`TELEGRAM_CHAT_ID`, never the channel), when the review writes `HOLD:` in `reviews/<date>.owner` (it
+suspects a new category of issue), or by the script's own checks: tests fail, the tests from before that night's commits fail on the new code, the squawk replay's kinds differ before / after, a commit touches
+a path it may not (this cycle's scripts, the worker, workflows, `monitor.sh`), the owner's unpushed commits on main. `NOTE:` lines (a fix reverted because it would lose an alert) are told too, the rest still goes out; each start logs its code -
 commit, `+changes` when `flight_watch.py` differs from it, the file's sha256 - so the review judges an alert by the code that raised it) are support code,
 not part of the monitor.
 `tools/squawk_cases.py` (17 Oct 2026): the owner wanted real emergencies to measure the checks against,
