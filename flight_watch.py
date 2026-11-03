@@ -259,7 +259,9 @@ AERO_FIND_S = 600          # look this long for the aircraft in the feeds, then 
 ISRAEL_IATA = {"TLV", "HFA", "ETM", "VDA", "SDV", "EIL"}
 # Telegram follow-up of a flight's messages (Monitor.telegram_followups): when it lands, else this long after its
 # last message - for a flight with several messages, or an emergency / diversion / return
-TG_FOLLOWUP_S = 45 * 60
+# A flight's update waits for its end: on the ground, silent this long (s; coverage gaps at cruise last 20-40 min), or
+# TG_FOLLOWUP_MAX_S after its last message (3 Nov 2026, the owner: no "flying at FL389" with a partial map).
+TG_FOLLOWUP_S, TG_FOLLOWUP_MAX_S = 45 * 60, 16 * 3600
 FOLLOWUP_KINDS = {"EMERGENCY", "DIVERSION", "RETURNED", "SKYDIVE_PATTERN", "ABORTED_LANDING"}
 # common jump aircraft (ICAO type -> model, for the alert text)
 JUMP_PLANES = {
@@ -1628,10 +1630,10 @@ class Notifier:
                     except (ValueError, KeyError):
                         continue
                     h = p.get("hex")
-                    if not h or not p.get("message_id") and p.get("kind") != "FOLLOW_UP":
+                    if not h or not p.get("message_id") and p.get("kind") not in ("FOLLOW_UP", "THREAD_END"):
                         continue
                     th = out.get(h)
-                    if p.get("kind") == "FOLLOW_UP":
+                    if p.get("kind") in ("FOLLOW_UP", "THREAD_END"):
                         if th:
                             th["done"] = True
                     elif th and p.get("reply_to") == th["id"]:
@@ -1640,10 +1642,15 @@ class Notifier:
                         out[h] = {"id": p["message_id"], "t": t, "last": t, "n": 1}
         except (OSError, TypeError):
             pass  # no file yet, or ''
+        for th in out.values():
+            if time.time() - th["last"] > TG_FOLLOWUP_MAX_S:
+                th["done"] = True
         return out
 
-    def follow_up(self, hexid: str, when: float, segments: list) -> None:
-        """The flight's follow-up, as a reply to its first Telegram message (Monitor.telegram_followups)."""
+    def follow_up(self, hexid: str, when: float, segments: list, image: dict | None = None, image_only: bool = False) -> None:
+        """The flight's follow-up, as a reply to its first Telegram message (Monitor.telegram_followups). With `image`
+        (tools/flight_image.py) a picture of the flight with this text as its caption, on a thread of its own: reading the
+        track and drawing it must not hold up the poll. `image_only`: nothing without the picture (the last message said it)."""
         thread = self.tg_threads.get(hexid)
         if not thread or thread.get("done"):
             return
@@ -1651,9 +1658,82 @@ class Notifier:
         text = "".join(s.get("text") or s["link"] for s in segments)
         log.info("[FOLLOW_UP] %s", text.replace("\n", " "))
         self.console(text.split("\n")[0])
+        if image and self.tg_token and self.tg_chat:
+            import threading
+            threading.Thread(target=self.follow_up_image, args=(hexid, when, segments, image, image_only, thread["id"]),
+                             name="flight-image", daemon=True).start()
+            return
         mid = self.telegram(segments, thread["id"]) if self.tg_token and self.tg_chat else None
         self.log_telegram(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when)), "FOLLOW_UP", 3, hexid, mid,
                           segments, thread["id"])
+
+    def close_thread(self, hexid: str, when: float) -> None:
+        """Nothing more to say on this thread, recorded: a restart must not reopen it (past_threads). UX1301 turned back and
+        landed at Madrid (DIVERSION, 3 Nov 2026), and the restart 6 h later sent its update from the next leg, in the air."""
+        thread = self.tg_threads.get(hexid)
+        if thread:
+            thread["done"] = True
+        self.log_telegram(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when)), "THREAD_END", 3, hexid, None, [],
+                          thread["id"] if thread else None)
+
+    def follow_up_image(self, hexid: str, when: float, segments: list, image: dict, image_only: bool, reply_to: int) -> None:
+        """On its own thread. The picture, with the text as its caption; no picture: the text alone."""
+        mid = None
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools"))
+            import flight_image
+            jpeg = flight_image.flight_jpeg(image["hex"], image["t"], image["alerts"], image["title"], image["sub"],
+                                            flight_image.http_get)
+            if jpeg:
+                mid = self.telegram_photo(jpeg, segments, reply_to)
+            else:
+                log.info("%s no picture: the flight is not in the feed's trace", hexid)
+        except Exception as e:  # a follow-up without its picture, whatever went wrong (never the token: not in these)
+            log.warning("%s no picture: %s", hexid, str(e).replace(self.tg_token or "\0", "<token>"))
+        if not mid and not image_only:
+            mid = self.telegram_direct("sendMessage", self.tg_body(segments, reply_to))
+        when_s = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(when))
+        if mid or not image_only:
+            self.log_telegram(when_s, "FOLLOW_UP", 3, hexid, mid, segments, reply_to)
+        else:
+            self.log_telegram(when_s, "THREAD_END", 3, hexid, None, [], reply_to)
+
+    def telegram_photo(self, jpeg: bytes, segments: list, reply_to: int) -> int | None:
+        """A picture with the text as its caption (Telegram's limit: 1,024 characters, else the text follows it)."""
+        body = self.tg_body(segments, reply_to)
+        text = body.pop("text")
+        body.pop("disable_web_page_preview", None)
+        short = len("".join(s.get("text") or s["link"] for s in segments)) <= 1024
+        if short:
+            body["caption"] = text
+        else:
+            body.pop("parse_mode", None)
+        body["reply_parameters"] = json.dumps(body["reply_parameters"])
+        mid = self.telegram_direct("sendPhoto", body, files={"photo": ("flight.jpg", jpeg, "image/jpeg")})
+        if mid and not short:
+            self.telegram_direct("sendMessage", self.tg_body(segments, reply_to))
+        return mid
+
+    def tg_body(self, segments: list, reply_to: int) -> dict:
+        return {"chat_id": self.tg_chat, "text": self.telegram_text(segments), "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+                "reply_parameters": {"message_id": reply_to, "allow_sending_without_reply": True}}
+
+    def telegram_direct(self, method: str, body: dict, files: dict | None = None) -> int | None:
+        """For the picture's thread: not through self.http, which the poll loop is using. Its message_id, or None."""
+        for attempt in (1, 2):
+            try:
+                r = requests.post(f"https://api.telegram.org/bot{self.tg_token}/{method}", timeout=60, files=files,
+                                  **({"data": body} if files else {"json": body}))
+                r.raise_for_status()
+                return int(r.json()["result"]["message_id"])
+            except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+                why = str(e).replace(self.tg_token, "<token>")
+                if attempt == 1 and isinstance(e, (requests.ConnectionError, requests.Timeout)):
+                    time.sleep(TG_RETRY_S)
+                    continue
+                log.error("notification failed (api.telegram.org): %s", why)
+                return None
 
     def send_post(self, c: dict) -> None:
         """An AeroSignals squawk post whose aircraft is not in our feeds (Monitor.aero_alerts): the log, the
@@ -3235,22 +3315,23 @@ class Monitor:
             t = self.tracks.get(hexid)
             if t is None or t.last is None:
                 if now - th["last"] > 2 * TG_FOLLOWUP_S:
-                    th["done"] = True  # forgotten (out of our feeds for hours): nothing to add
+                    n.close_thread(hexid, now)  # forgotten (out of our feeds for hours): nothing to add
                 continue
             s = t.last
             sent = [(k, x) for k, x in t.sent if x >= th["t"] - 60]
-            landed = s.on_ground and (s.gs is None or s.gs < 50) and s.t - th["last"] >= 120
-            if landed and sent and sent[-1][0] in ("DIVERSION", "RETURNED") and t.alerted.get(
-                    sent[-1][0], (0, 0))[0] == sent[-1][1] and self.landed_at(t, sent[-1][1]):
-                # its last message was the landing (LY353 TLV -> MUC on the ground at Athens, 21 Oct 2026: the
-                # follow-up 2 min later said the same, and that message's map already showed the whole flight)
-                th["done"] = True
+            landed = s.on_ground and (s.gs is None or s.gs < 50) and max(s.t, now) - th["last"] >= 120
+            # its last message was the landing (LY353 TLV -> MUC on the ground at Athens, 21 Oct 2026: the follow-up 2 min
+            # later said the same): no text, only the picture of the flight when there is one
+            closing = bool(landed and sent and sent[-1][0] in ("DIVERSION", "RETURNED") and t.alerted.get(
+                sent[-1][0], (0, 0))[0] == sent[-1][1] and self.landed_at(t, sent[-1][1]))
+            if closing and not self.args.telegram_images:
+                n.close_thread(hexid, s.t)
                 continue
-            if not (th.get("n", 1) >= 2 or any(k in FOLLOWUP_KINDS for k, _ in sent)):
+            if not closing and not (th.get("n", 1) >= 2 or any(k in FOLLOWUP_KINDS for k, _ in sent)):
                 if now - th["last"] > TG_FOLLOWUP_S:
                     th["done"] = True
                 continue
-            elif not landed and now - th["last"] < TG_FOLLOWUP_S:
+            if not (landed or now - s.t >= TG_FOLLOWUP_S or now - th["last"] >= TG_FOLLOWUP_MAX_S):
                 continue
             tz = ZoneInfo("Asia/Jerusalem")
             hm = lambda x: datetime.fromtimestamp(x, tz).strftime("%H:%M")  # noqa: E731
@@ -3276,7 +3357,15 @@ class Monitor:
                                               ("FR24", "fr24_flight"))):
                 if links.get(key):
                     segments += ([{"text": " \u00b7 "}] if i else []) + [{"link": label, "url": links[key]}]
-            n.follow_up(hexid, s.t, segments)
+            image = None
+            if self.args.telegram_images:
+                when = datetime.fromtimestamp(s.t, tz)
+                image = {"hex": hexid, "t": sent[-1][1] if sent else th["t"],
+                         "alerts": [(Announcer.NAMES.get(k.split(":")[0], k.lower()), x) for k, x in sent],
+                         "title": f"{ident}  {route}" if route else ident,
+                         "sub": " \u00b7 ".join(x for x in (self.airline_name(t), " ".join(y for y in (t.actype, t.reg) if y),
+                                                            f"{when.day} {when:%b %Y}", outcome) if x)}
+            n.follow_up(hexid, s.t, segments, image=image, image_only=closing)
             th["done"] = True
 
     @staticmethod
@@ -4521,6 +4610,8 @@ def parse_args(argv=None):
                         "flight also has an alert of another kind ('' sends everything)")
     g.add_argument("--telegram-to", choices=("chat", "channel"), default="chat",
                    help="chat: TELEGRAM_CHAT_ID (a chat with the bot); channel: TELEGRAM_CHANNEL_ID (the public channel)")
+    g.add_argument("--telegram-images", action="store_true",
+                   help="a picture of the flight with its update (tools/flight_image.py, needs Pillow; one trace request)")
     g.add_argument("--telegram-posts", default="posts_telegram.jsonl",
                    help="append each message sent to Telegram here ('' to disable)")
     g.add_argument("--bluesky-skip", default=os.getenv("BLUESKY_SKIP", "LOST_CONTACT,CONTACT_RESTORED,POSITION_JUMP,GPS_DEGRADED,MASS_SILENCE,TOWARD_ISRAEL"),

@@ -1,2 +1,3 @@
 requests>=2.31
+Pillow>=10  # only tools/flight_image.py (--telegram-images); without it updates go out as text
 tzdata; platform_system == 'Windows'

@@ -9,6 +9,9 @@ import tempfile
 import types
 import unittest
 from unittest import mock
+import importlib.util
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+import flight_image as fi  # noqa: E402
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -810,6 +813,47 @@ class MlatTests(unittest.TestCase):
         self.assertTrue(t.spoof)
         self.assertNotIn("POSITION_JUMP", kinds(alerts))
         self.assertTrue(all(x.lon < 35 for x in t.samples), "only real positions in the track")
+
+
+class FlightImageTests(unittest.TestCase):
+    """tools/flight_image.py: which flight, what is drawn. No network."""
+    @staticmethod
+    def rows():
+        air = [(1000.0 + 30 * i, 40.0, -3.0 + 0.05 * i, 30000) for i in range(100)]
+        next_leg = [(20000.0 + 30 * i, 40.0, 2.0 - 0.05 * i, 31000) for i in range(100)]
+        return air + [(4010.0, 40.0, 2.0, "ground")] + next_leg
+
+    def test_the_leg_of_the_alert_with_its_landing(self):
+        pts = fi.leg_at(self.rows(), 2000)
+        self.assertEqual((pts[0][0], pts[-1][0], pts[-1][3]), (1000.0, 4010.0, 0))
+        self.assertAlmostEqual(pts[0][3], 30000 * 0.3048)
+        self.assertEqual(fi.leg_at(self.rows(), 21000)[0][0], 20000.0)  # (the next leg is another flight)
+        self.assertEqual(fi.leg_at(self.rows(), 1e6), [])
+
+    def test_a_gap_spent_flying_stays_in_the_leg_a_stop_does_not(self):
+        fly_on = [(1000.0, 40.0, 0.0, 30000), (1030.0, 40.0, 0.1, 30000), (2000.0, 40.0, 1.8, 30000), (2030.0, 40.0, 1.9, 30000)]
+        self.assertEqual(len(fi.leg_at(fly_on, 1000)), 4)
+        stopped = fly_on[:2] + [(9000.0, 40.0, 0.2, 5000), (9030.0, 40.0, 0.3, 6000)]
+        self.assertEqual(len(fi.leg_at(stopped, 1000)), 2)
+
+    def test_full_and_recent_are_one_trace(self):
+        traces = {"full": {"timestamp": 1000, "trace": [[0, 40, 3, 30000], [30, None, None, 30000], [60, 40, 3.1, 30000]]},
+                  "recent": {"timestamp": 1050, "trace": [[10, 40, 3.1, 30000], [20, 40, 3.2, "ground"]]}}
+        rows = fi.read_trace("347605", lambda url: traces["full" if "trace_full_347605" in url else "recent"])
+        self.assertEqual([r[0] for r in rows], [1000, 1060, 1070])
+        self.assertEqual(rows[-1][3], "ground")
+
+    def test_alerts_together_are_one_label(self):
+        got = fi.group_alerts([("off course", 1793694720), ("course reversal", 1793694720), ("diversion", 1793697086)])
+        self.assertEqual(len(got), 2)
+        self.assertIn("off course", got[0][1])
+        self.assertIn("course reversal", got[0][1])
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "needs Pillow")
+    def test_it_draws_a_jpeg(self):
+        pts = fi.leg_at(self.rows(), 2000)
+        jpeg = fi.render(pts, [("diversion", 2000)], "UX1301  MAD \u2192 TLV", "sub")
+        self.assertEqual(jpeg[:2], b"\xff\xd8")
 
 
 class AllPublished(unittest.TestCase):
@@ -2462,7 +2506,7 @@ class Run18OctTests(unittest.TestCase):
         """IAM4188 (Italian Air Force AT76) patrolling west of Israel: 7 alerts in 70 min (20 Oct 2026)."""
         mon, feed, clock, alerts = make(["--no-routes"])
         ups = []
-        mon.notifier.follow_up = lambda h, when, seg: ups.append(seg)
+        mon.notifier.follow_up = lambda h, when, seg, **kw: ups.append(seg)
         ident = dict(flight="IAM4188", r="MM62298", t="AT76", dbFlags=1)
         lap = [85] * 30 + [266] * 30  # (out and back on the same line: a reversal each way, 10 min a lap)
         fly(mon, feed, clock, "33fdd0", path(32.6, 33.2, lap * 4, [15000] * 240, gs=250), **ident)
@@ -2499,12 +2543,12 @@ class Run18OctTests(unittest.TestCase):
     def test_emergency_of_a_military_flight_gets_its_follow_up(self):
         mon, feed, clock, alerts = make(["--no-routes"])
         ups = []
-        mon.notifier.follow_up = lambda h, when, seg: ups.append(seg)
+        mon.notifier.follow_up = lambda h, when, seg, **kw: ups.append(seg)
         fly(mon, feed, clock, "738700", path(32.4, 35.0, [90] * 3, [9000] * 3, gs=200), flight="724", t="C295", dbFlags=1)
         t, now = mon.tracks["738700"], clock()
         t.sent.append(("EMERGENCY", now - 600))
-        mon.notifier.tg_threads["738700"] = {"id": 3, "t": now - 600, "last": now - fw.TG_FOLLOWUP_S - 1, "n": 1}
-        mon.telegram_followups(now)
+        mon.notifier.tg_threads["738700"] = {"id": 3, "t": now - 600, "last": now - 600, "n": 1}
+        mon.telegram_followups(t.last.t + fw.TG_FOLLOWUP_S + 1)
         self.assertEqual(len(ups), 1)
 
 class SecondFeedTests(unittest.TestCase):
@@ -2693,7 +2737,7 @@ class FarEndTests(unittest.TestCase):
         """LY353 TLV -> MUC landed at Athens (21 Oct 2026): DIVERSION, then a follow-up 2 min later saying the same."""
         mon, feed, clock, alerts = self.setup([board_row("LY", "5417", "D", local_time(Clock(), 0), "TBS")])
         ups = []
-        mon.notifier.follow_up = lambda h, when, seg: ups.append(seg)
+        mon.notifier.follow_up = lambda h, when, seg, **kw: ups.append(seg)
         ident = dict(flight="ELY5417", r="4X-EKH", t="B738")
         tlv = (32.0114, 34.8867)
         fly(mon, feed, clock, "73806d", [dict(lat=tlv[0], lon=tlv[1], alt_baro="ground", gs=5, track=270)] * 3, **ident)
@@ -3325,6 +3369,42 @@ class TelegramThreadTests(unittest.TestCase):
             n = fw.Notifier(args, http, fw.Announcer(args, out=lambda text: None), console=lambda text: None)
         return n, http
 
+    def test_a_restart_does_not_reopen_a_closed_thread(self):
+        """UX1301, 3 Nov 2026: turned back, DIVERSION on landing at Madrid, no follow-up; the restart 6 h later sent the
+        follow-up on its next leg, in the air, with that leg's map. An open one survives, for as long as a flight lasts."""
+        for age, end, done in ((6 * 3600, True, True), (6 * 3600, False, False), (17 * 3600, False, True)):
+            f = os.path.join(tempfile.mkdtemp(), "posts_telegram.jsonl")
+            when = fw.time.strftime("%Y-%m-%dT%H:%M:%SZ", fw.time.gmtime(fw.time.time() - age))
+            with open(f, "w", encoding="utf-8") as out:
+                out.write(json.dumps({"time": when, "kind": "DIVERSION", "hex": "347605", "message_id": 437}) + "\n")
+                if end:
+                    out.write(json.dumps({"time": when, "kind": "THREAD_END", "hex": "347605", "sent": False}) + "\n")
+            th = self.notifier(f)[0].tg_threads["347605"]
+            self.assertEqual(bool(th.get("done")), done, (age, end))
+
+    def test_picture_with_the_text_as_its_caption(self):
+        n, http = self.notifier(os.path.join(tempfile.mkdtemp(), "posts_telegram.jsonl"))
+        n.tg_token, n.tg_chat = "t", "@c"
+        seg, image = [{"text": "Update"}], {"hex": "347605", "t": 1, "alerts": [], "title": "x", "sub": "y"}
+        calls = []
+
+        def post(url, **kw):
+            calls.append((url.rsplit("/", 1)[1], kw))
+            return mock.Mock(json=lambda: {"result": {"message_id": 9}})
+        import flight_image
+        for jpeg, only, expect in ((b"jpg", False, ["sendPhoto"]), (None, False, ["sendMessage"]), (None, True, [])):
+            calls.clear()
+            with mock.patch.object(fw.requests, "post", post), mock.patch.object(flight_image, "flight_jpeg", return_value=jpeg):
+                n.follow_up_image("347605", 0, seg, image, only, 437)
+            self.assertEqual([c[0] for c in calls], expect, (jpeg, only))
+        with mock.patch.object(fw.requests, "post", post), mock.patch.object(flight_image, "flight_jpeg", return_value=b"jpg"):
+            calls.clear()
+            n.follow_up_image("347605", 0, seg, image, False, 437)
+        self.assertEqual(calls[0][1]["data"]["caption"], "Update")
+        self.assertEqual(json.loads(calls[0][1]["data"]["reply_parameters"])["message_id"], 437)
+        self.assertIn("photo", calls[0][1]["files"])
+        self.assertEqual(http.calls, [])  # (never the poll loop's session)
+
     def test_later_messages_reply_to_the_first_and_a_restart_keeps_the_thread(self):
         saved = os.path.join(tempfile.mkdtemp(), "posts_telegram.jsonl")
         n, http = self.notifier(saved)
@@ -3341,24 +3421,73 @@ class TelegramThreadTests(unittest.TestCase):
         self.assertEqual(http.calls[2]["reply_parameters"]["message_id"], 1)
         self.assertTrue(self.notifier(saved)[0].tg_threads["8965d1"]["done"])
 
-    def test_follow_up_after_the_last_message_with_the_whole_flight(self):
+    def test_follow_up_waits_for_the_end_of_the_flight(self):
+        """No "flying at FL389" with a partial map (3 Nov 2026): on the ground, or silent TG_FOLLOWUP_S."""
         mon, feed, clock, alerts = make(["--viewer-url", "https://x/flight_map.html"])
         ups = []
-        mon.notifier.follow_up = lambda h, when, seg: ups.append((h, when, seg))
+        mon.notifier.follow_up = lambda h, when, seg, **kw: ups.append((h, when, seg, kw))
         fly(mon, feed, clock, "4d22a0", path(32.5, 33.0, [90] * 3, [30000] * 3, squawk="7700"), flight="AIZ992")
         self.assertEqual(kinds(alerts), ["EMERGENCY"])
         mon.notifier.tg_threads["4d22a0"] = {"id": 7, "t": clock(), "last": clock(), "n": 1}
-        fly(mon, feed, clock, "4d22a0", path(32.5, 33.2, [90] * 60, [30000] * 60, squawk="7700"), flight="AIZ992")
-        self.assertEqual(ups, [])  # 10 min: not yet
-        for _ in range(240):  # 40 min more
+        fly(mon, feed, clock, "4d22a0", path(32.5, 33.2, [90] * 360, [30000] * 360, squawk="7700"), flight="AIZ992")
+        self.assertEqual(ups, [])  # 1 h, still flying: not yet
+        feed.local.discard("4d22a0")
+        del feed.aircraft["4d22a0"]
+        for _ in range(300):  # silent 50 min
             step(mon, clock)
         self.assertEqual(len(ups), 1)
         text = "".join(s.get("text") or s["link"] for s in ups[0][2])
         self.assertIn("Update: ", text)
         self.assertIn("emergency", text)
-        self.assertIn("Map of the flight", text)
+        self.assertIn("last heard", text)
         url = next(s["url"] for s in ups[0][2] if s.get("link") == "Map of the flight")
         self.assertIn("a=EMERGENCY~", url)
+        self.assertIsNone(ups[0][3]["image"])
+
+    def test_a_flight_still_flying_gets_its_update_at_the_limit(self):
+        mon, feed, clock, alerts = make([])
+        ups = []
+        mon.notifier.follow_up = lambda h, when, seg, **kw: ups.append(seg)
+        fly(mon, feed, clock, "4d22a0", path(32.5, 33.0, [90] * 3, [30000] * 3, squawk="7700"), flight="AIZ992")
+        t, now = mon.tracks["4d22a0"], clock()
+        mon.notifier.tg_threads["4d22a0"] = {"id": 7, "t": now, "last": now, "n": 1}
+        mon.telegram_followups(t.last.t + 60)
+        self.assertEqual(ups, [])
+        mon.notifier.tg_threads["4d22a0"]["last"] = now - fw.TG_FOLLOWUP_MAX_S
+        mon.telegram_followups(t.last.t + 60)
+        self.assertEqual(len(ups), 1)
+        self.assertIn("flying at", "".join(x.get("text") or x["link"] for x in ups[0]))
+
+    def test_after_a_landing_alert_only_the_picture_and_a_record_without_one(self):
+        for argv, expect in (([], 0), (["--telegram-images"], 1)):
+            mon, feed, clock, alerts = make(["--no-routes", *argv])
+            ups, ends = [], []
+            mon.notifier.follow_up = lambda h, when, seg, **kw: ups.append(kw)
+            mon.notifier.close_thread = lambda h, when: ends.append(h)
+            fly(mon, feed, clock, "4d22a0", path(40.5, -3.5, [90] * 3, [0] * 3, gs=10), flight="AEA1301", on_ground=True)
+            t = mon.tracks["4d22a0"]
+            t.samples.append(fw.Sample(**{**fw.asdict(t.last), "on_ground": True, "gs": 10}))
+            at = t.last.t
+            t.sent.append(("DIVERSION", at))
+            t.alerted["DIVERSION"] = (at, 0)
+            mon.notifier.tg_threads["4d22a0"] = {"id": 7, "t": at - 600, "last": at, "n": 2}
+            mon.telegram_followups(at + 130)
+            self.assertEqual((len(ups), len(ends)), (expect, 1 - expect), argv)
+            if expect:
+                self.assertTrue(ups[0]["image_only"])
+
+    def test_picture_of_the_flight_is_asked_for_with_its_alerts(self):
+        mon, feed, clock, alerts = make(["--telegram-images", "--no-routes"])
+        ups = []
+        mon.notifier.follow_up = lambda h, when, seg, **kw: ups.append(kw)
+        fly(mon, feed, clock, "4d22a0", path(32.5, 33.0, [90] * 3, [30000] * 3, squawk="7700"), flight="AIZ992", r="4X-ABC", t="A320")
+        at = fw.datetime.fromisoformat(alerts[0]["time"].replace("Z", "+00:00")).timestamp()
+        mon.notifier.tg_threads["4d22a0"] = {"id": 7, "t": at, "last": at, "n": 1}
+        mon.telegram_followups(mon.tracks["4d22a0"].last.t + fw.TG_FOLLOWUP_S + 1)
+        image = ups[0]["image"]
+        self.assertEqual((image["hex"], image["t"], image["alerts"]), ("4d22a0", at, [("emergency", at)]))
+        self.assertIn("A320 4X-ABC", image["sub"])
+        self.assertFalse(ups[0]["image_only"])
 
     def test_aerosignals_then_our_feed_is_one_emergency(self):
         mon, feed, clock, alerts = make()

@@ -45,6 +45,9 @@ cycle wherever it is, and every further anomaly is reported. Two different anoma
 within that time are tagged `[also: ...]` and sent at priority 5. Following ends with the flight: a landing,
 or a new callsign on the ground (unless hot); its next leg is followed again only if it is TLV traffic.
 
+**A flight's update.** Alerts go out as they happen. One closing update, with a picture of the whole flight (`--telegram-images`,
+needs Pillow), goes out when it has ended: on the ground, or silent 45 min.
+
 **Military and private flights.** Military aircraft, and light / private aircraft (not an airliner type, not on the
 board, no route data, whatever their callsign; jump planes too), are checked like any flight but only logged, except an
 emergency squawk or status, a medical flight, and a fall at `--vrate` or faster (one in 2 h), or contact lost during one.
