@@ -2358,6 +2358,21 @@ class Run18OctTests(unittest.TestCase):
             got[step_ft] = "VERTICAL_RATE" in kinds(alerts)
         self.assertEqual(got, {450: False, 900: True})
 
+    def test_descent_into_its_destination_judged_by_its_altitude_history(self):
+        """RB516 DXB -> DAM "-4,288 ft/min, -10.9 deg" at 10,000 ft 12 nm from Damascus, history -2,831 ft/min (~7 deg),
+        31 Oct 2026. As steep as reported, or anywhere but its destination, it still alerts."""
+        got = {}
+        for name, step_ft, dest in (("approach", 470, (33.41, 36.52)), ("steep", 715, (33.41, 36.52)),
+                                    ("elsewhere", 470, (41.0, 28.8))):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            mon.routes["SYR516"] = (clock(), "OMDB-OSDI")
+            mon.route_ends = lambda t, dest=dest: [("OMDB", 25.25, 55.36), ("OSDI", *dest)]
+            states = path(33.48, 36.73, [250] * 10, [14000 - step_ft * i for i in range(10)], gs=219)
+            states = [{**st, "baro_rate": -4288} for st in states]
+            fly(mon, feed, clock, "778123", states, flight="SYR516", r="YK-AKA", t="A320")
+            got[name] = "VERTICAL_RATE" in kinds(alerts)
+        self.assertEqual(got, {"approach": False, "steep": True, "elsewhere": True})
+
     def test_board_departure_heard_far_away_after_its_leg_is_another_leg(self):
         """W46404 (9H-WBY, board TLV -> MXP due 19:18 IST) first found at 22:55 near Rome, then climbing out NE:
         TURNING_BACK "1,209 nm out and closing" (30 Oct 2026). Found there while its leg could still be on the way,

@@ -347,6 +347,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   VJT495 (CL35) "+18.7 deg" at 1,725 ft out of TLV, history +2,574 ft/min (~9 deg). Descents keep the half-backed rule
   (a dive comes fast). Squawk replay: 10 initial-climb alerts at 12-15 deg gone (history ~7 deg), and 3 departure-routing
   COURSE_CHANGEs that went out only because those made the flight hot.
+  So does a descent under `--vrate` within `APPROACH_NM` (20) of the flight's own destination below `APPROACH_ALT` (FL150)
+  (`approaching`; 3 Nov 2026, the owner's choice): RB516 DXB -> DAM "-10.9 deg" at 10,000 ft 12 nm out, history ~7 deg. Cost: a
+  sudden steep descent there, before the history shows it, is alerted only once it does. MFO692 (military BE20, no destination,
+  -10.1 deg at 1,425 ft, 1 Nov) is not covered.
   An MLAT report's speed is the receivers' estimate: the military GLF5 "684", 12 Oct 2026, descending
   5,115 ft/min at ~455 kt (6.4 deg) was given 257 kt on one poll and alerted at 11.1 deg. For MLAT reports
   `trusted_gs` takes the last speed the aircraft itself reported (<= 5 min), else the speed between its

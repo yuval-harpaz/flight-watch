@@ -196,6 +196,7 @@ STATUS_NAMES = {"general": "emergency", "lifeguard": "medical", "minfuel": "mini
                 "unlawful": "unlawful interference", "downed": "downed aircraft"}
 TAG_DETOUR = 1.25  # a board tag stop counts when on the way: origin -> stop -> TLV at most this x the straight line
 STOP_KT, STOP_TURN_S = 420, 1200  # an arrival's time from a stop on its way: block speed, and on the ground there
+APPROACH_NM, APPROACH_ALT = 20, 15000  # a descent here, into its own destination, is judged by its altitude history
 STOP_FRESH_S = 300  # "still at its stop" needs a report this recent (s): ground coverage is thin
 DIVERTED_NM = 30  # a departure on the ground this far from its destination landed elsewhere (check_landing)
 BLIND_S = 180  # no answered local poll for this long after an aircraft's last report: we did not see it go
@@ -2623,6 +2624,12 @@ class Monitor:
             log.debug("%s climb %+d ft/min (%+.1f deg), history %+.0f ft/min (%+.1f deg): not steep enough",
                       t.label(), s.vrate, angle, computed, c_angle)
             return
+        if (-a.vrate < s.vrate < 0 and angle is not None and abs(c_angle) < limit and s.alt < APPROACH_ALT
+                and self.approaching(t, s)):
+            # RB516 DXB -> DAM "-4,288 ft/min, -10.9 deg" at 10,000 ft 12 nm from Damascus, history -2,831 (~7 deg), 31 Oct 2026
+            log.info("%s descent %+d ft/min (%+.1f deg) into its destination, history %+.0f ft/min (%+.1f deg): not "
+                     "steep enough", t.label(), s.vrate, angle, computed, c_angle)
+            return
         direction = "DESCENT" if s.vrate < 0 else "CLIMB"
         extra = f" (history: {computed:+.0f} ft/min)" if computed is not None else ""
         ang = f", {angle:+.1f} deg" if angle is not None else ""
@@ -2636,6 +2643,14 @@ class Monitor:
             who += f" [MLAT position: speed {self.gs_from or 'unknown'}, the angle is less certain]"
         self.alert(t, "VERTICAL_RATE", f"{direction} {s.vrate:+d} ft/min{ang} at {s.alt} ft{near}{extra}{who}",
                    key=f"VERTICAL_RATE:{direction}", severity=abs(s.vrate))
+
+    def approaching(self, t: Track, s: Sample) -> bool:
+        """Within APPROACH_NM of its own destination: board, else the route data, flown the way it is listed."""
+        kind, ends = self.classify(t)[0], self.route_ends(t)
+        if kind == "ARR":
+            return self.dist(s) <= APPROACH_NM
+        dest = (self.other_end(t, "DEP") if kind == "DEP" else None) or (ends[-1] if len(ends) == 2 and t.route_dir >= 0 else None)
+        return bool(dest) and haversine_nm(s.lat, s.lon, dest[1], dest[2]) <= APPROACH_NM
 
     def check_wobble(self, t: Track) -> None:
         """An airliner's altitude going up and down again and again: a fight with the flight controls
