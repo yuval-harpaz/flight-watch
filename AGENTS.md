@@ -211,7 +211,7 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   the diversion only as a delay.
 
 ## Alert logic and why
-
+ **Since at most 3 Nov 2026 that table reaches back only to 14 Oct 2026** (~337,000 rows on 15 Oct, ~41,000 on 3 Nov), so `FB.fetchBoardAt` likely finds nothing older (not tested on the page). Each version since 10 Apr is listed by `/api/datasets/31c812a6-9b0c-4f32-8317-e5f268c28f60/versions` and read from `/api/versions/<id>/download/e83f763b-b7d7-479e-b172-ae981ddc6de5` (CSV, ~500 KB; 885 rows on 20 Jun, ~3,200 in September).
 - **LOST_CONTACT**: silent ≥ `--lost-after` (60 s) locally, `--lost-after-remote` (600 s)
   for followed flights outside the circle, where coverage has large gaps. Ignored below
   `--lost-min-alt`, near the airport (landing), and near the circle edge for unfollowed
@@ -402,6 +402,7 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   Only for a board flight, or one with route data nearer its destination than its origin is (`not_our_route`; 31 Oct 2026,
   the owner's choice): AYT253 (Ayeet E145, no route) into Ramon AB (26 Oct 2026); 6H999 (A332, off the board, ISR999
   listed LLBG-LCLK) out over the Dead Sea and back to TLV, probably a test flight (30 Oct).
+- **ABORTED_LANDING** (`check_aborted_landing`; 3 Nov 2026, the owner: a go-around only from very near the ground, "aborted landing" the term): down to `ABORT_AGL` (300) ft above an airfield's height within `ABORT_NM` (3), or a touch (<= 90 s, never below 60 kt), after losing 500 ft in the 150 s before, then 800 ft climbed within 300 s on three reports, no gap > 90 s. Height: pressure altitude + the aircraft's GPS-baro offset (`Track.geo_offset`, weather), less the local checkout's `AltitudeFeet` (`StandingData.elev`); without the checkout (replays, the map's Pyodide) only a touch can be judged, so the squawk replay does not exercise the airborne case: with heights supplied, 0 of 354 cases alerted. Telegram, with a follow-up on where it ended (`FOLLOWUP_KINDS`); not in `ANOMALIES`: no hot flight, its circuit's turns are normal. Military and flights with no board row nor route are only logged (practice). In `SPOOF_KINDS` (the field comes from the position). UAE9648 (Amsterdam, 1,286 ft, gear) is not one. TO3458 (TLV -> Larnaca in a storm, 1 Jan 2026, replay): 53 s after the low point, 17 min before OFF_COURSE. Cost: at a very low pressure with no GPS altitude, a go-around from low may read above the limit.
 - **EMERGENCY**: alerts on squawk *transition* into 7500/7600/7700, not every cooldown. The ADS-B emergency status
   "lifeguard" (a medical / priority flight) is its own kind, **MEDICAL_FLIGHT** (⚕️, priority 3; the owner wants it, not
   as an emergency), once a flight; it passes a light / military aircraft's quiet. Every other status (nordo, minfuel,
@@ -825,6 +826,8 @@ and fetching a cold start's ~60 files in one cycle held up the local poll for ov
   feed (`FB.blocked`, a fetch TypeError) into a quiet note with ADSBx / FR24 links. Past boards come from the
   over.org.il archive (nothing stored here); past tracks from adsb.lol's `/globe_history` files (see "The
   flight of an alert"; ADS-B Exchange's fuller history is not free to read from a page - its replay is embedded).
+
+- **Aborted landings: finding them** (3 Nov 2026, the owner's request; the alert: ABORTED_LANDING above). `tools/find_go_arounds.py` scans adsb.lol's daily archive, `tools/go_around_maps.py` draws one (`docs/ga_*_map.html`; results and other maps in `goarounds/`, git-ignored). 4 days scanned at the current limits (<= 300 ft, <= 3 nm), airliner types only: 673 (~170 a day), which still includes training; 2 at LLBG (ETD5SM, ELY834, kept in `docs/`, neither in the press). In `docs/incidents.html`: TO3458 (TVF98VR). AAY4413 (off the runway at Greenville, go-around from the grass) is not found: the feed hears nothing below 1,175 ft there for 2 min. No track, so no map: RAM968C (CN-COE, Valencia, 4 Nov 2023; adsb.lol's track, in both archive variants, ends over southern Spain) and Austrian at TLV (May 2018, Kan: before any archive we can read).
 
 ## Out of scope unless asked
 

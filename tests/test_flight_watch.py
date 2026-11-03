@@ -591,6 +591,59 @@ class ShareCallsigns(unittest.TestCase):
             self.assertGreater(sum(1 for m, p in feed.calls if "/point/" in p), 3)
 
 
+class AbortedLandingTests(unittest.TestCase):
+    """A go-around from very near the ground: ELY834 and ETD5SM at TLV (2026). The start is 4 nm E of the field, flying W."""
+
+    def run_it(self, low=150, ground=None, route="LHBP-LLBG", field=True, geo=None, **extra):
+        mon, feed, clock, alerts = with_routes()
+        if route:
+            mon.routes["WZZ123"] = (clock(), route)
+        if field:
+            mon.standing.fields = [(32.0114, 34.8867, "LLBG")]
+            mon.standing.elev = {"LLBG": 135}
+            mon.standing.all_fields = lambda: mon.standing.fields
+        ident = dict(flight="WZZ123", r="HA-LXA", t="A320", category="A3", **extra)
+        start = fw.destination(32.0114, 34.8867, 90, 4)
+        down = [low + 125 * (10 - i) for i in range(10)]
+        states = path(start[0], start[1], [270] * 10, down, gs=150)
+        if ground is not None:
+            states += [dict(lat=32.0114, lon=34.87, alt_baro="ground", gs=gs, track=270) for gs in ground]
+        states += path(32.0114, 34.86, [270] * 12, [(135 if ground is not None else low) + 300 * (i + 1) for i in range(12)],
+                       gs=160)
+        if geo is not None:
+            states = [{**st, "alt_geom": st["alt_baro"] + geo} for st in states]
+        fly(mon, feed, clock, "471234", states, **ident)
+        return mon, alerts
+
+    def test_from_very_near_the_ground_alerts_once_and_is_no_anomaly(self):
+        mon, alerts = self.run_it()
+        self.assertEqual(kinds(alerts).count("ABORTED_LANDING"), 1)
+        self.assertFalse(mon.hot(mon.tracks["471234"]))
+        self.assertTrue(mon.tracks["471234"].followed)
+
+    def test_higher_up_it_does_not(self):
+        """UAE9648 at Amsterdam came down to 1,286 ft above the field; 300 ft is the limit."""
+        self.assertNotIn("ABORTED_LANDING", kinds(self.run_it(low=500)[1]))
+
+    def test_a_touch_at_speed_alerts_a_stop_does_not(self):
+        self.assertIn("ABORTED_LANDING", kinds(self.run_it(low=300, ground=[120, 110, 120])[1]))
+        self.assertNotIn("ABORTED_LANDING", kinds(self.run_it(low=300, ground=[120, 50, 30, 50, 120])[1]))
+
+    def test_a_flight_nobody_scheduled_is_only_logged(self):
+        self.assertNotIn("ABORTED_LANDING", kinds(self.run_it(route=None)[1]))
+
+    def test_a_military_aircraft_is_only_logged(self):
+        self.assertNotIn("ABORTED_LANDING", kinds(self.run_it(dbFlags=1)[1]))
+
+    def test_without_the_fields_heights_only_a_touch_counts(self):
+        self.assertNotIn("ABORTED_LANDING", kinds(self.run_it(field=False)[1]))
+        self.assertIn("ABORTED_LANDING", kinds(self.run_it(low=300, ground=[120, 110, 120], field=False)[1]))
+
+    def test_gps_altitude_corrects_the_weather(self):
+        """Low pressure: 500 ft by the standard setting is 150 ft above the field by GPS."""
+        self.assertIn("ABORTED_LANDING", kinds(self.run_it(low=500, geo=-350)[1]))
+
+
 class HoldingTests(unittest.TestCase):
     def test_s_turn_is_not_a_course_change(self):
         """6H254, 6 Oct 2026: 148 -> 76 -> 175 deg at FL320 approaching TLV (vectoring)."""

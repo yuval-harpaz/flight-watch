@@ -138,7 +138,7 @@ LIGHT_CATEGORIES = {"A1", "A7", "B1", "B2", "B3", "B4", "B6"}
 PRIORITY = {"EMERGENCY": 5, "LOST_CONTACT": 5, "DIVERSION": 5, "TOWARD_ISRAEL": 5, "OFF_COURSE": 5,
             "RETURNED": 4, "TURNING_BACK": 4, "VERTICAL_RATE": 4, "SHARP_TURN": 4,
             "COURSE_CHANGE": 4, "HOLDING": 4, "POSITION_JUMP": 3, "GPS_SPOOFING": 3, "MASS_SILENCE": 3,
-            "GPS_DEGRADED": 3, "SKYDIVE_PATTERN": 5, "ALTITUDE_WOBBLE": 5, "EARLY_DESCENT": 5,
+            "GPS_DEGRADED": 3, "SKYDIVE_PATTERN": 5, "ALTITUDE_WOBBLE": 5, "EARLY_DESCENT": 5, "ABORTED_LANDING": 4,
             "CONTACT_RESTORED": 2, "MEDICAL_FLIGHT": 3}
 # kinds that describe abnormal flying; two different ones on one flight within --hot-minutes
 # are reported as a pattern (priority 5)
@@ -218,7 +218,22 @@ MILITARY_QUIET_S = 7200  # a military aircraft: one alert, then quiet (Monitor.a
 SPOOF_MAX_RATE = 6000
 # alerts that rest on GPS positions / velocities: logged under a spoofing episode, not alerted
 SPOOF_KINDS = {"POSITION_JUMP", "COURSE_CHANGE", "SHARP_TURN", "OFF_COURSE", "TURNING_BACK",
-               "TOWARD_ISRAEL", "LOST_CONTACT", "HOLDING", "SKYDIVE_PATTERN"}
+               "TOWARD_ISRAEL", "LOST_CONTACT", "HOLDING", "SKYDIVE_PATTERN", "ABORTED_LANDING"}
+# ABORTED_LANDING (Monitor.check_aborted_landing): a go-around from very near the ground. It comes down to
+# ABORT_AGL ft above an airfield's listed height (pressure altitude corrected by its GPS altitude when it has one), or
+# touches at speed, within ABORT_NM of the field, having lost ABORT_DESCENT ft in the ABORT_BEFORE_S before, then climbs
+# ABORT_CLIMB ft within ABORT_WINDOW_S without stopping. Not an anomaly: no hot flight, its circuit's turns are normal.
+ABORT_AGL = 300
+ABORT_FLOOR = -600       # far below the listed field: a level-off, not this field (CKS704 at 4,000 ft "at" LLJR)
+ABORT_NM = 3.0
+ABORT_DESCENT = 500
+ABORT_CLIMB = 800
+ABORT_BEFORE_S = 150
+ABORT_WINDOW_S = 300
+ABORT_MAX_GAP_S = 90     # a longer gap may hide a landing and a new take-off
+ABORT_TOUCH_S = 90       # longer on the ground, or slower than ABORT_TOUCH_KT, is a landing
+ABORT_TOUCH_KT = 60
+ABORT_MAX_ALT = 15000    # nothing to look at above this
 # Skydiving lift (Monitor.check_skydive): a jump run - slow (<= SKYDIVE_RUN_KT) at height for a
 # while - then a steep descent. 4XDAN (P750) over the Dead Sea, 10 Oct 2026: climb to ~12,000 ft
 # every 20-40 min, ~50 kt while jumpers exit, then -5,600 ft/min at 150 kt out of coverage.
@@ -244,7 +259,7 @@ ISRAEL_IATA = {"TLV", "HFA", "ETM", "VDA", "SDV", "EIL"}
 # Telegram follow-up of a flight's messages (Monitor.telegram_followups): when it lands, else this long after its
 # last message - for a flight with several messages, or an emergency / diversion / return
 TG_FOLLOWUP_S = 45 * 60
-FOLLOWUP_KINDS = {"EMERGENCY", "DIVERSION", "RETURNED", "SKYDIVE_PATTERN"}
+FOLLOWUP_KINDS = {"EMERGENCY", "DIVERSION", "RETURNED", "SKYDIVE_PATTERN", "ABORTED_LANDING"}
 # common jump aircraft (ICAO type -> model, for the alert text)
 JUMP_PLANES = {
     "P750": "PAC 750XL", "C208": "Cessna 208 Caravan", "PC6P": "Pilatus PC-6 Porter",
@@ -634,6 +649,7 @@ class StandingData:
         self.http, self.source, self.ttl, self.clock = http, source.rstrip("/"), ttl, clock
         self.files: dict[str, tuple[float, dict]] = {}
         self.fields: list | None = None  # every airport (lat, lon, ICAO), see all_fields
+        self.elev: dict = {}             # ICAO -> height ft, from the same files
         self.iata: dict = {}             # IATA -> the same tuple (airport_by_iata)
         self.preload = preload
         self.remote = self.source.startswith(("http://", "https://"))  # else a local checkout
@@ -755,6 +771,10 @@ class StandingData:
                                 self.fields.append((float(row[6]), float(row[7]), row[2] or row[0]))
                             except (ValueError, IndexError):
                                 continue
+                            try:
+                                self.elev[row[2] or row[0]] = float(row[8])
+                            except (ValueError, IndexError):
+                                pass
                             if row[3]:
                                 self.iata.setdefault(row[3], self.fields[-1])
                 except OSError:
@@ -889,6 +909,7 @@ class Track:
     turn_glitch: float = 0.0  # data time of the report that showed a held SHARP_TURN was a glitch (settle_turn)
     takeoff_pos: tuple | None = None  # (lat, lon) of its take-off in this leg: its departure routing (check_turn)
     climb_peak: int = 0      # highest altitude since take-off held on two reports in a row (EARLY_DESCENT)
+    abort_low: float = 0.0   # time of the last low point judged by check_aborted_landing
     flown_cs: str = ""       # a callsign whose flight to / from our airport it has completed (end_leg)
     feed: str = ""           # the provider of its newest report
     left_home: bool = False  # seen on the ground or low at our airport in this leg (a departure, not just by route)
@@ -1213,6 +1234,7 @@ class Announcer:
                  "HOLDING": ("⏳", "Holding unusually long"),
                  "ALTITUDE_WOBBLE": ("〰️", "Altitude going up and down"),
                  "EARLY_DESCENT": ("⬇️", "Descending soon after take-off"),
+                 "ABORTED_LANDING": ("↩️", "Aborted landing"),
                  "POSITION_JUMP": ("\U0001f6f0️", "Position jump (GPS spoofing?)"),
                  "GPS_SPOOFING": ("\U0001f6f0️", "GPS spoofing"),
                  "MASS_SILENCE": ("\U0001f4e1", "Many aircraft silent at once"),
@@ -1282,7 +1304,8 @@ class Announcer:
              "VERTICAL_RATE": "steep climb/descent", "SHARP_TURN": "sharp turn",
              "COURSE_CHANGE": "course reversal", "HOLDING": "long holding", "POSITION_JUMP": "position jump",
              "SKYDIVE_PATTERN": "skydiving pattern", "ALTITUDE_WOBBLE": "altitude up and down",
-             "EARLY_DESCENT": "early descent", "CONTACT_RESTORED": "contact restored",
+             "EARLY_DESCENT": "early descent", "ABORTED_LANDING": "aborted landing",
+             "CONTACT_RESTORED": "contact restored",
              "MEDICAL_FLIGHT": "medical flight"}
     DETAILS = {  # kind -> (pattern in the alert message, compact wording)
         "LOST_CONTACT": (r"silent (\d+)s.*?track (\S+) deg", "silent {0} s, last track {1}°"),
@@ -2371,6 +2394,7 @@ class Monitor:
         self.check_vrate(t)
         self.check_wobble(t)
         self.check_early_descent(t)
+        self.check_aborted_landing(t)
         self.check_turn(t)
         self.check_sharp_turn(t)
         self.check_holding(t)
@@ -2699,6 +2723,65 @@ class Monitor:
             self.alert(t, "EARLY_DESCENT", f"descending {s.vrate if s.vrate is not None else '?'} ft/min, "
                        f"{drop} ft below the {t.climb_peak} ft it climbed to, {(s.t - t.takeoff) / 60:.0f} min "
                        "after take-off - departures do not turn down this early (AS1282)")
+
+    def check_aborted_landing(self, t: Track) -> None:
+        """A flight that came down to the runway, or touched it, and climbed away without stopping (see ABORT_AGL).
+        Each low point is judged once. Military aircraft and flights neither on the board nor in the route data are
+        only logged: they practise this (a go-around from higher up is not looked at: UAE9648 at Amsterdam, 1,286 ft)."""
+        s = t.last
+        if s.on_ground or s.alt is None or s.alt > ABORT_MAX_ALT:
+            return
+        win = [x for x in t.samples if s.t - x.t <= ABORT_WINDOW_S + ABORT_BEFORE_S and (x.on_ground or x.alt is not None)]
+        recent = [i for i, x in enumerate(win) if s.t - x.t <= ABORT_WINDOW_S]
+        if len(recent) < 4:
+            return
+        ground = [i for i in recent if win[i].on_ground]
+        touch = bool(ground)
+        if touch:
+            first = last = ground[-1]
+            while first and win[first - 1].on_ground:
+                first -= 1
+        else:
+            first = last = min(recent, key=lambda i: (win[i].alt, -i))
+        low, after = win[last], win[last + 1:]
+        if low.t <= t.abort_low or len(after) < 3:
+            return
+        base = min(x.alt for x in after) if touch else low.alt
+        if s.alt - base < ABORT_CLIMB or any(x.alt < base + ABORT_CLIMB - 200 for x in after[-3:]):
+            return  # (three reports up there: one bad altitude is no climb)
+        before = [x for x in win[:first] if win[first].t - x.t <= ABORT_BEFORE_S]
+        if (not before or win[first].t - before[0].t < 45 or any(x.on_ground for x in before)
+                or max(x.alt for x in before) - (min(x.alt for x in before) if touch else low.alt) < ABORT_DESCENT):
+            return  # not coming down into it
+        path = before + win[first:]
+        if any(b.t - a.t > ABORT_MAX_GAP_S for a, b in zip(path, path[1:])):
+            return
+        t.abort_low = low.t
+        if touch:
+            if low.t - win[first].t > ABORT_TOUCH_S or any((x.gs or 0) < ABORT_TOUCH_KT for x in win[first:last + 1]):
+                return
+        elif before[-1].alt - low.alt > (low.t - before[-1].t) * 100 or after[0].alt - low.alt > (after[0].t - low.t) * 100:
+            return  # > 6,000 ft/min into or out of it: a bad altitude
+        field = self.standing.airfield_near(low.lat, low.lon) if self.standing else None
+        code, dist = field or nearest_airport(low.lat, low.lon)
+        if not code or dist > ABORT_NM:
+            return
+        if touch:
+            how = f"touched the ground at {code} at {win[last].gs:.0f} kt"
+        else:
+            elev = self.standing.elev.get(code) if field else None
+            if elev is None:
+                return  # the field's height is not known (no local checkout): only a touch can be judged
+            off = t.geo_offset if t.geo_offset is not None and abs(t.geo_offset) <= 1000 else 0
+            height = low.alt + off - elev
+            if not ABORT_FLOOR <= height <= ABORT_AGL:
+                return
+            how = f"came down to ~{max(height, 0):.0f} ft above {code}, {dist:.1f} nm from it,"
+        msg = f"{how} and climbed back to {s.alt} ft without landing - a go-around from very near the ground"
+        if t.military or not (t.sched or self.route_ends(t)):
+            self.note(t, "aborted", f"{msg}: {'military' if t.military else 'not on the board, no route'}, not alerted")
+            return
+        self.alert(t, "ABORTED_LANDING", msg)
 
     def not_our_route(self, t: Track, s: Sample) -> str | None:
         """Why an early descent says nothing (else None): a flight off the board needs a route and to be nearer its
