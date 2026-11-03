@@ -2399,6 +2399,16 @@ class Run18OctTests(unittest.TestCase):
         self.assertEqual(kinds(alerts), ["VERTICAL_RATE"])
         self.assertIn("no further alerts on it", alerts[0]["message"])
 
+    def test_routing_corners_added_by_hand(self):
+        """The heatmaps that taught turn_zones.json are refused since 31 Oct 2026. Where each turn was reported / began."""
+        zones = fw.TurnZones(os.path.join(os.path.dirname(fw.__file__), "turn_zones.json"))
+        for name, lat, lon, track in (("MSR720", 30.34, 36.20, 229), ("MSR720", 29.82, 35.51, 229), ("RJA503", 30.13, 35.93, 229),
+                                      ("MSC942", 30.62, 36.71, 232), ("AXY591R", 32.60, 32.66, 135), ("AXY591R", 32.9, 32.9, 143)):
+            self.assertTrue(zones.expected(lat, lon, track), name)
+        # another heading there is still a reversal: back north from the Amman corner, back west from the other
+        self.assertFalse(zones.expected(30.3, 36.2, 45))
+        self.assertFalse(zones.expected(32.6, 32.7, 300))
+
     def test_military_sharp_turn_is_only_logged(self):
         """HMR11 / 12 / 13 (PC21, Jordan), 36-44 deg in one formation, and each a follow-up: 2 Nov 2026."""
         mon, feed, clock, alerts = make(["--no-routes"])

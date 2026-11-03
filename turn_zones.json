@@ -10,6 +10,20 @@
 "source": "ADS-B Exchange globe-history heatmaps",
 "zones": [
 {
+"lat": 30.25,
+"lon": 36.25,
+"out": 225,
+"n": 0,
+"by_hand": "S of Amman, onto Sinai: MSR720 2 Nov 2026, RJA503 + MSC942 11 Oct"
+},
+{
+"lat": 32.75,
+"lon": 32.75,
+"out": 140,
+"n": 0,
+"by_hand": "W of TLV, the corridor around Israel: AXY591R 31 Oct 2026"
+},
+{
 "lat": 25.25,
 "lon": 55.75,
 "out": 105,
