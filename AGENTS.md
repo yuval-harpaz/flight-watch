@@ -291,9 +291,12 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   LY318 from LHR / LY319 to CDG and LY382 / LY383 (MXP / FCO) are rotations, El Al flies in from both.
   A route that lists a stop stops anywhere on the way (`TAG_DETOUR`; 26 Oct 2026): KLM462 LLBG-LCLK-EHAM landed at Bucharest,
   KLM's stop since 24 Oct, a DIVERSION. An arrival on the ground on its way early enough to fly on and land by its board time
-  (`early_stop`: the distance at `STOP_KT` 420 + `STOP_TURN_S` 20 min) is logged and still followed; a DIVERSION only if still
-  there when that is too late (`Track.stop_wait`, `check_stops`): IB1873 MAD -> TLV on the ground at Athens 01:41, at TLV 04:16,
-  due 04:30. Cost: a real diversion to an airport on the way is alerted late (up to its board time less the flight on).
+  (`early_stop`: the distance at `STOP_KT` 420 + `STOP_TURN_S` 20 min) is logged and still followed; a DIVERSION only if heard
+  still there at its board time, on a report <= `STOP_FRESH_S` (5 min) old (`Track.stop_wait`, `check_stops`): IB1873 MAD -> TLV on
+  the ground at Athens 01:41, at TLV 04:16, due 04:30. Until 3 Nov 2026 the deadline was the board time less the flight on: IB1873 was
+  a DIVERSION on Telegram on 1, 2 and 3 Nov (the owner's choice; neither the board nor the route data names this stop, so it holds for
+  every early stop). Cost: a real diversion to an airport on the way is alerted up to its board time late, not at all when unheard
+  on the ground by then.
   A new callsign during the wait ends it (`new_callsign`; 2 Nov 2026 nightly review): IB1873 became IBS18AB on the ground at
   Athens, a new leg with no board row, and the old row's deadline still gave DIVERSION "too late to land by its scheduled ?", then
   its departure turn (hot) and a follow-up. Cost: a real diversion that takes a new callsign there is not alerted.

@@ -196,6 +196,7 @@ STATUS_NAMES = {"general": "emergency", "lifeguard": "medical", "minfuel": "mini
                 "unlawful": "unlawful interference", "downed": "downed aircraft"}
 TAG_DETOUR = 1.25  # a board tag stop counts when on the way: origin -> stop -> TLV at most this x the straight line
 STOP_KT, STOP_TURN_S = 420, 1200  # an arrival's time from a stop on its way: block speed, and on the ground there
+STOP_FRESH_S = 300  # "still at its stop" needs a report this recent (s): ground coverage is thin
 DIVERTED_NM = 30  # a departure on the ground this far from its destination landed elsewhere (check_landing)
 BLIND_S = 180  # no answered local poll for this long after an aircraft's last report: we did not see it go
 TAKEOFF_MAX_GAP_S, TAKEOFF_MAX_ALT = 180, 10000  # a take-off is seen: ground, then airborne within 3 min, low
@@ -878,7 +879,7 @@ class Track:
     quiet_why: str = ""      # "military": why it gets one alert, then quiet (alert())
     amm_near: float = 0.0    # data time since which it has stayed within AMM_LOCAL_NM of Amman
     takeoff: float = 0.0     # data time of its take-off (left the ground, or first heard climbing low)
-    stop_wait: tuple | None = None  # (data time it is late, ICAO, lat, lon, landed): an arrival on the ground on its way early
+    stop_wait: tuple | None = None  # (its board time, ICAO, lat, lon, landed): an arrival on the ground on its way early
     turn_held: tuple | None = None  # (report before, turn report, message, bank): a SHARP_TURN waiting (settle_turn)
     turn_glitch: float = 0.0  # data time of the report that showed a held SHARP_TURN was a glitch (settle_turn)
     takeoff_pos: tuple | None = None  # (lat, lon) of its take-off in this leg: its departure routing (check_turn)
@@ -3274,8 +3275,8 @@ class Monitor:
                            "possible GPS spoofing or bad data")
 
     def check_stops(self, now: float) -> None:
-        """An arrival waiting at a stop on its way (`early_stop`): airborne again = a stop; still on the ground
-        there when it can no longer land at our airport by its board time = a DIVERSION."""
+        """An arrival waiting at a stop on its way (`early_stop`): airborne again = a stop; heard on the ground there
+        at its board time = a DIVERSION. On a report older than STOP_FRESH_S it may have left unheard: only logged."""
         for t in self.tracks.values():
             if not t.stop_wait or not t.last:
                 continue
@@ -3285,11 +3286,14 @@ class Monitor:
                 log.info("%s airborne again after its stop at %s", t.label(), apt)
             elif now > late:
                 t.stop_wait = None
-                if haversine_nm(t.last.lat, t.last.lon, lat, lon) <= DIVERTED_NM:
+                if now - t.last.t > STOP_FRESH_S:
+                    log.info("%s at its board time last heard on the ground at %s %.0f min ago: not known to be still "
+                             "there, not alerted", t.label(), apt, (now - t.last.t) / 60)
+                elif haversine_nm(t.last.lat, t.last.lon, lat, lon) <= DIVERTED_NM:
                     t.followed = True
                     self.alert(t, "DIVERSION", f"{self.args.airport} arrival on the ground {self.dist(t.last):.0f} "
                                f"nm away at {apt} since {time.strftime('%H:%M', time.gmtime(landed))}"
-                               f"Z, too late to land by its scheduled {t.sched.when if t.sched else '?'}")
+                               f"Z, still there at its scheduled {t.sched.when if t.sched else 'time'}")
 
     def check_landing(self, t: Track, kind: str, d: float) -> None:
         s = t.last
@@ -3308,7 +3312,7 @@ class Monitor:
             stop = self.early_stop(t, s) if self.landing_place(t, d) is not None else None
             if stop:
                 log.info("%s on the ground at %s on its way, in time to land by %s: probably a stop - a "
-                         "DIVERSION if still there at %s", t.label(), stop, t.sched.when,
+                         "DIVERSION if heard still there at %s", t.label(), stop, t.sched.when,
                          time.strftime("%H:%M:%SZ", time.gmtime(t.stop_wait[0])))
                 return
             place = self.landing_place(t, d)
@@ -3465,14 +3469,14 @@ class Monitor:
     def early_stop(self, t: Track, s: Sample) -> str | None:
         """An arrival on the ground on its way, early enough to fly on and still land by its board time: a stop
         the board and route data do not name (IB1873 MAD -> TLV on the ground at Athens 01:41, landed at TLV 04:16,
-        due 04:30; 26 Oct 2026). Waits in `Track.stop_wait` until that is too late (check_stops)."""
+        due 04:30; 26 Oct 2026). Waits in `Track.stop_wait` until the board time itself (check_stops): the flight on at
+        STOP_KT + STOP_TURN_S was too tight a deadline, IB1873 at Athens on 1-3 Nov 2026 left after it and landed early."""
         far = self.other_end(t, "ARR")
         if not (far and t.sched and t.sched.direction == "ARR" and t.sched.ts and self.on_the_way(s, far)):
             return None
-        late = t.sched.ts - self.dist(s) / STOP_KT * 3600 - STOP_TURN_S
-        if s.t > late:
+        if s.t > t.sched.ts - self.dist(s) / STOP_KT * 3600 - STOP_TURN_S:
             return None
-        t.stop_wait = (late, self.field_name(s), s.lat, s.lon, s.t)
+        t.stop_wait = (t.sched.ts, self.field_name(s), s.lat, s.lon, s.t)
         return t.stop_wait[1]
 
     def board_stop(self, t: Track, s: Sample, kind: str) -> str | None:

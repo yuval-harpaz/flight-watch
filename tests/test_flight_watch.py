@@ -2806,7 +2806,7 @@ class FarEndTests(unittest.TestCase):
 
     def test_an_early_arrival_on_its_way_waits_for_its_board_time(self):
         """IB1873 MAD -> TLV on the ground at Athens 01:41, landed at TLV 04:16, due 04:30 (26 Oct 2026): a stop
-        neither the board nor the route data names. A DIVERSION only once it can no longer make its time."""
+        neither the board nor the route data names. A DIVERSION only if heard still there at its board time."""
         got = {}
         for case in ("flies on", "stays", "due soon"):
             due = 1 if case == "due soon" else 4  # Bucharest - TLV ~870 nm: ~2.4 h with the turn-round
@@ -2822,11 +2822,29 @@ class FarEndTests(unittest.TestCase):
             if case == "flies on":
                 fly(mon, feed, clock, "48418c", path(44.5711, 26.0850, [150] * 6, [1500 + 800 * i for i in range(6)],
                                                      gs=200), local=False, **ident)
-            clock.t += 3 * 3600
-            fly(mon, feed, clock, "48418c", [dict(lat=44.5711, lon=26.0850, alt_baro="ground", gs=0, track=90)] * 2
-                if case != "flies on" else path(40.0, 30.0, [150] * 3, [30000] * 3, gs=450), local=False, **ident)
+            for hours in (2, 2.5):  # (past the old deadline, board time less the flight on; then past the board time)
+                clock.t += hours * 3600
+                fly(mon, feed, clock, "48418c", [dict(lat=44.5711, lon=26.0850, alt_baro="ground", gs=0, track=90)] * 2
+                    if case != "flies on" else path(40.0, 30.0, [150] * 3, [30000] * 3, gs=450), local=False, **ident)
+                if hours == 2 and case == "stays":
+                    self.assertNotIn("DIVERSION", kinds(alerts, "48418c"))
             got[case] = (first, "DIVERSION" in kinds(alerts, "48418c"))
         self.assertEqual(got, {"flies on": (False, False), "stays": (False, True), "due soon": (True, True)})
+
+    def test_a_stop_is_not_called_a_diversion_on_an_old_report(self):
+        """IB1873 as IBS18AB: DIVERSION on a report 22 min old, while it had left unheard (3 Nov 2026)."""
+        mon, feed, clock, alerts = self.setup([board_row("KL", "463", "A", local_time(Clock(), 4), "AMS")])
+        feed.files.update(self.KLM_FILES)
+        feed.files["routes/schema-01/K/KLM-all.csv"] = ("Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                                       "KLM463,KLM,463,KLM,EHAM-LLBG\n")
+        for icao in ("EHAM", "LROP"):
+            mon.standing.airport(icao)
+        self.land_at_otp(mon, feed, clock, "48418c", dict(flight="KLM463", r="PH-BXR", t="B739"))
+        t = mon.tracks["48418c"]
+        self.assertTrue(t.stop_wait)
+        mon.check_stops(t.stop_wait[0] + 1)  # (its board time, 4 h after its last report)
+        self.assertIsNone(t.stop_wait)
+        self.assertNotIn("DIVERSION", kinds(alerts, "48418c"))
 
     def test_a_new_callsign_at_the_stop_ends_its_deadline(self):
         """IB1873 MAD -> TLV on the ground at Athens became IBS18AB there and left: DIVERSION "too late to land by its
