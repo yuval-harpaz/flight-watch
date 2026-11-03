@@ -2399,6 +2399,37 @@ class Run18OctTests(unittest.TestCase):
         self.assertEqual(kinds(alerts), ["VERTICAL_RATE"])
         self.assertIn("no further alerts on it", alerts[0]["message"])
 
+    def test_military_sharp_turn_is_only_logged(self):
+        """HMR11 / 12 / 13 (PC21, Jordan), 36-44 deg in one formation, and each a follow-up: 2 Nov 2026."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "743593", path(32.4, 36.0, [90] * 6, [12000] * 6, gs=250), flight="HMR11", t="PC21", dbFlags=1)
+        t = mon.tracks["743593"]
+        self.assertFalse(mon.alert(t, "SHARP_TURN", "39 -> 120 deg in 20s at 250 kt (~44 deg bank)", severity=44))
+        self.assertEqual(alerts, [])
+        self.assertFalse(t.mil_quiet)  # (no alert: the next kind is still its one)
+
+    def test_military_follow_up_only_when_it_adds_something(self):
+        """724 (2 Nov 2026): one course reversal, two more held back, then an update saying so. An alert of another
+        kind held back, or a lost contact, is worth one."""
+        got = {}
+        for name, held, sent in (("turns held", [("COURSE_CHANGE", 1)], [("COURSE_CHANGE", 0)]),
+                                 ("nothing held", [], [("VERTICAL_RATE:DESCENT", 0)]),
+                                 ("dive held", [("VERTICAL_RATE:DESCENT", 1)], [("COURSE_CHANGE", 0)]),
+                                 ("emergency", [], [("DIVERSION", 0)])):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            ups = []
+            mon.notifier.follow_up = lambda h, when, seg, ups=ups: ups.append(seg)
+            ident = dict(flight="724", t="C295", dbFlags=1)
+            fly(mon, feed, clock, "738700", path(32.4, 35.0, [90] * 3, [9000] * 3, gs=200), **ident)
+            t, now = mon.tracks["738700"], clock()
+            t.sent = [(k, now - 600 + x) for k, x in sent]
+            t.mil_held = [(k, now - 600 + x) for k, x in held]
+            th = mon.notifier.tg_threads["738700"] = {"id": 3, "t": now - 600, "last": now - 600, "n": 1}
+            mon.telegram_followups(t.last.t + mon.args.lost_after_remote + 1)
+            got[name] = (len(ups), th["done"])
+        self.assertEqual(got, {"turns held": (0, True), "nothing held": (0, True), "dive held": (1, True),
+                               "emergency": (1, True)})
+
     def test_large_military_alerts_once_and_follows_up_when_it_goes_silent(self):
         """IAM4188 (Italian Air Force AT76) patrolling west of Israel: 7 alerts in 70 min (20 Oct 2026)."""
         mon, feed, clock, alerts = make(["--no-routes"])
@@ -3027,12 +3058,14 @@ class LegEndAndLightAircraftTests(unittest.TestCase):
 
     def test_speed_a_bizjet_type_cannot_fly_is_no_sharp_turn(self):
         """679 (military GLF5, category A3) "343 -> 305 deg in 28 s at 599 kt (~37 deg bank)" at FL370, 28 Oct 2026;
-        here a sharper turn, alerted at a speed a GLF5 flies."""
+        here a sharper turn, raised at a speed a GLF5 flies (and only logged since 3 Nov 2026: it is military)."""
         for gs, expected in ((599, False), (480, True)):
             mon, feed, clock, alerts = make(["--no-routes"])
+            raised, alert = [], mon.alert
+            mon.alert = lambda t, kind, *a, **k: (raised.append(kind), alert(t, kind, *a, **k))[1]
             fly(mon, feed, clock, "738a4a", path(32.1, 34.5, [343] * 6 + [313, 283, 253] + [253] * 8, [37000] * 17, gs=gs),
                 flight="679", r="", t="GLF5", category="A3", dbFlags=1)
-            self.assertEqual("SHARP_TURN" in kinds(alerts), expected, (gs, kinds(alerts)))
+            self.assertEqual("SHARP_TURN" in raised, expected, (gs, raised))
 
     def test_a_jump_plane_keeps_its_ride_alert(self):
         """4XDAN: an alert before its first lift must not hold back the ride's one steep-descent alert."""

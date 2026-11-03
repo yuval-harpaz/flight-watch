@@ -3098,6 +3098,12 @@ class Monitor:
             if t.military:  # (one alert, then quiet: how it ended, not how it goes on)
                 if not landed and now - s.t < self.args.lost_after_remote:
                     continue
+                if (th.get("n", 1) < 2 and not any(k in FOLLOWUP_KINDS for k, _ in sent)
+                        and all(k.split(":")[0] in TURN_KINDS for k, _ in held)):
+                    # nothing to add: 7 of the 18 Telegram messages of 2 Nov 2026 were such follow-ups
+                    th["done"] = True
+                    log.info("%s no follow-up: nothing held back but turns", t.label())
+                    continue
             elif not (th.get("n", 1) >= 2 or any(k in FOLLOWUP_KINDS for k, _ in sent)):
                 if now - th["last"] > TG_FOLLOWUP_S:
                     th["done"] = True
@@ -4196,6 +4202,11 @@ class Monitor:
             # mostly survey lines (BDK04) or a bizjet's initial climb (VJT495 "+18.7 deg" at 1,725 ft, 30 Oct 2026)
             log.info("%s %s - light / private aircraft with no known route, not alerted: %s", t.label(), kind, msg)
             return False
+        if t.military and kind == "SHARP_TURN":
+            # a steep turn is what these fly: all 6 SHARP_TURNs of 2 Nov 2026 were military, 5 on Jordanian PC21 / AT8T
+            # trainers near ADJ at 36-44 deg (HMR11 / 12 / 13 in one formation within 64 s)
+            log.info("%s %s - military aircraft, not alerted: %s", t.label(), kind, msg)
+            return False
         if t.military and kind != "EMERGENCY" and not (k and k.get("quiet")):
             # military aircraft manoeuvre, patrol and orbit as their job: one alert (a check that the monitor
             # sees them), then only an emergency squawk for MILITARY_QUIET_S after the last suppressed one, and a
@@ -4210,7 +4221,7 @@ class Monitor:
                 return False
             t.mil_quiet, t.mil_held, t.quiet_why = now, [], "military"
             msg += (f" - military aircraft: no further alerts on it until {MILITARY_QUIET_S / 3600:.0f} h after its "
-                    "last one, except an emergency squawk; an update when it lands or goes silent")
+                    "last one, except an emergency squawk; an update if there is more to tell when it lands or goes silent")
         if a.airport_traffic_only and traffic not in AIRPORT_TRAFFIC:
             return False
         if kind in TURN_KINDS and not (t.large or t.sched or route) and any(

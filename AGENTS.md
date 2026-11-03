@@ -364,6 +364,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   pattern" among them - such types no longer count as jump planes), 7436ac (AT8T) 17 with its position jumping
   28 nm back and forth; 20 Oct: IAM4188 (Italian Air Force AT76, patrolling west of Israel) 7. Cost: a real accident
   of a military aircraft after its first alert is only logged (and in its follow-up).
+  No SHARP_TURN on a military aircraft, and no follow-up when it adds nothing - one message, not an emergency / diversion /
+  return, nothing held back but turns (3 Nov 2026, the owner's choice; 14 of 18 Telegram messages on 2 Nov were this rule's
+  alert + follow-up: Jordanian PC21 / AT8T trainers near ADJ at 36-44 deg, HMR11 / 12 / 13 in one formation within 64 s). A lost
+  contact held back still gets its update. Cost: the first sign of an accident that shows only as a steep turn is only logged.
   **Light / private aircraft** are only logged (31 Oct 2026, the owner: "let's not show small and off board flights";
   from 22 Oct they had the military rule's one alert, mostly survey lines and bizjet climbs; `Monitor.light`):
   not military, not an airliner type (`LARGE_TYPES`; not the wake category: A3 covers big bizjets too, and BDK12 /
