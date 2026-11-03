@@ -2249,6 +2249,8 @@ class Monitor:
             t.max_alt, t.orig_first, t.orig_max, t.orig_left = 0, -1.0, 0.0, False
             t.came_from = bool(t.last) and not t.last.on_ground  # (its previous flight, under another callsign)
             t.takeoff_pos = t.takeoff_pos if t.last and not t.last.on_ground else None
+            t.stop_wait = None  # a stop's deadline is the old callsign's board row: IB1873 at Athens became IBS18AB
+            #                     there, then "too late to land by its scheduled ?" 6 min later (2 Nov 2026)
             if t.last and t.last.on_ground:  # (a change in the air is the same flight: LOT6ME -> LOT6212)
                 self.unfollow(t, f"is {new} on the ground")
         t.callsign, t.cs_pending = new, None
@@ -3614,6 +3616,10 @@ class Monitor:
             # ELY091 (listed as ELY91) and its turn onto Narita's arrival, 58 nm N at FL155, went out (29 Oct 2026)
             far = self.other_end(t, "DEP")
             ends = [far] * 2 if far else []
+        elif len(ends) < 2 and t.sched and t.sched.direction == "ARR":
+            # our own airport for a board arrival with no route data: IZ690 HAN -> TLV out of Hanoi, 30 -> 316 deg at
+            # FL180, 60 nm out with TLV at 296 (1 Nov 2026)
+            ends = [(self.args.icao, self.args.lat, self.args.lon)] * 2
         if len(ends) < 2 or t.route_dir < 0:
             return None
         icao, lat, lon = ends[-1]

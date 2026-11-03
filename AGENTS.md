@@ -294,6 +294,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   (`early_stop`: the distance at `STOP_KT` 420 + `STOP_TURN_S` 20 min) is logged and still followed; a DIVERSION only if still
   there when that is too late (`Track.stop_wait`, `check_stops`): IB1873 MAD -> TLV on the ground at Athens 01:41, at TLV 04:16,
   due 04:30. Cost: a real diversion to an airport on the way is alerted late (up to its board time less the flight on).
+  A new callsign during the wait ends it (`new_callsign`; 2 Nov 2026 nightly review): IB1873 became IBS18AB on the ground at
+  Athens, a new leg with no board row, and the old row's deadline still gave DIVERSION "too late to land by its scheduled ?", then
+  its departure turn (hot) and a follow-up. Cost: a real diversion that takes a new callsign there is not alerted.
   A landing elsewhere must be believable (13 Oct 2026; all 4 DIVERSIONs of the run of 11-12 Oct were
   arrivals on approach to TLV with spoofed GPS - ETD3QF, AIZ282, ISR972, ELY5462): "on the ground" within
   `LANDING_AIRPORT_NM` (5) of an airport of the local `standing-data/` checkout (`StandingData.airfield_near`;
@@ -422,6 +425,8 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   A board departure with no usable route data points at the board's destination (`other_end`; 30 Oct 2026 nightly
   review): LY91 TLV -> NRT flew as ELY091 (route data: ELY91) and its turn onto Narita's arrival, 82 -> 188 deg 58 nm
   N of it at FL155, went out on Telegram.
+  A board arrival with no route data points at our airport the same way (2 Nov 2026 nightly review): IZ690 HAN -> TLV, 30 -> 316
+  deg at FL180 climbing out 60 nm from Hanoi (`OWN_TURN_NM` 50), TLV at 296 deg, on Telegram. Route-data arrivals already had this.
 - **SKYDIVE_PATTERN**: a jump run (>= 2 reports <= 80 kt at >= 6,000 ft over >= 15 s, positions
   agreeing) followed within 5 min by a descent of >= 3,000 ft/min and >= 1,000 ft. 4XDAN (P750) over
   the Dead Sea, 10 Oct 2026: a lift every ~40 min (climb to ~12,000 ft, ~50 kt while jumpers exit,
