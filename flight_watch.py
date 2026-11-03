@@ -91,7 +91,7 @@ STANDING_DATA = "https://raw.githubusercontent.com/vradarserver/standing-data/ma
 # api.adsb.lol allowed ~3.5 req/min. Rows: [dt, lat, lon, alt|"ground", gs, track, flags, vrate,
 # {details}|None, source, geometric alt, ...]; flags 1 stale position, 8 alt is GPS altitude.
 TRACE_RECENT = "https://adsb.lol/data/traces/{xx}/trace_recent_{hex}.json"
-TRACE_REFUSED_S, TRACE_REFUSED_MAX_S = 1800, 6 * 3600  # pause after HTTP 401/403 on a trace, doubling
+TRACE_REFUSED_S, TRACE_REFUSED_MAX_S = 1800, 6 * 3600  # pause after HTTP 401/403 on a trace or a provider, doubling
 ROUTE_TTL = 6 * 3600
 RELAY_URL = "https://flight-watch-relay.yuvharpaz.workers.dev"  # tools/cors_worker.js (Cloudflare)
 VIEWER_URL = "https://yuval-harpaz.github.io/flight-watch/flight_map.html"  # docs/ on GitHub Pages
@@ -1729,7 +1729,7 @@ class Monitor:
         self.stats = {}
         self.multi: dict[tuple, bool] = {}   # (provider, kind) -> accepts comma-separated ids
         self.cursor: dict[str, int] = {}     # follow rotation per provider (when > 1 request)
-        self.disabled: set[str] = set()      # providers that refused us (401/403)
+        self.refused: dict[str, tuple] = {}  # provider -> (paused until, pause) after HTTP 401/403 (note_refusal)
         self.last_follow = -1e9
         self.started = self.clock()
         self.starved_warned = -1e9
@@ -1827,11 +1827,21 @@ class Monitor:
             for t in self.tracks.values():
                 t.military = t.military or t.hex in self.mil_hexes
 
+    @property
+    def disabled(self) -> set[str]:
+        """Providers paused now because they refused us."""
+        now = self.clock()
+        return {p for p, (until, _) in self.refused.items() if now < until}
+
     def note_refusal(self, prov: str, e: requests.HTTPError) -> None:
+        """HTTP 401 / 403: no lookups on it for TRACE_REFUSED_S, doubling up to TRACE_REFUSED_MAX_S while it goes on
+        refusing. It used to be dropped until the restart, from when a 403 meant airplanes.live's permanent refusal:
+        api.adsb.lol's 403 3 s after the start of 2 Nov 2026 left followed flights on adsb.fi alone for 22 h."""
         code = e.response.status_code if e.response is not None else 0
         if code in (401, 403) and prov not in self.disabled:
-            self.disabled.add(prov)
-            log.error("%s refused access (HTTP %s) - dropping it for this run", prov, code)
+            pause = min(max(2 * self.refused.get(prov, (0, 0))[1], TRACE_REFUSED_S), TRACE_REFUSED_MAX_S)
+            self.refused[prov] = (self.clock() + pause, pause)
+            log.error("%s refused access (HTTP %s) - no lookups on it for %.0f min", prov, code, pause / 60)
 
     def remote_query(self, prov: str, kind: str, ids: list[str], local: list,
                      max_requests: int) -> tuple[list, list]:
@@ -1862,6 +1872,7 @@ class Monitor:
                 break
             out += [(now_r, ac) for ac in acs]
             done.append((now_r, g))
+            self.refused.pop(prov, None)
         return out, done
 
     def follow(self, local_hexes: set, local: list) -> list:

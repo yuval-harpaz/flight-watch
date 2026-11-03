@@ -144,6 +144,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   Tests and replays pin one feed (`--fallback-provider '' --remote-providers adsb.lol`).
 - **airplanes.live** became feeder-only in 2026 and returns **HTTP 403**. Do not make it a
   default or add it as a provider unless the owner becomes a feeder.
+- **HTTP 401 / 403 from a provider** pauses its lookups `TRACE_REFUSED_S` (30 min), doubling up to 6 h while it goes on
+  refusing, reset when it answers (`Monitor.refused`, `note_refusal`; 3 Nov 2026, the owner's choice). It used to drop the
+  provider until the restart: api.adsb.lol's 403 3 s after the start of 2 Nov left followed flights on adsb.fi alone for 22 h,
+  though it answered the local poll again and again that day.
 - **OpenSky** was rejected: its daily credit budget can't cover 10-second polling.
 - **ADS-B Exchange API** is paid; not used for data. Its *website* is used for links.
 - **Rate limits are the main constraint.** adsb.lol returns 429 (plain nginx page, no

@@ -448,7 +448,7 @@ class RateLimitTests(unittest.TestCase):
         clock.t += 60
         self.assertTrue(mon.multi_supported("adsb.lol", "hex", [feed.ac("999999"), feed.ac("999998")]))
 
-    def test_refusing_extra_provider_is_dropped(self):
+    def test_refusing_extra_provider_is_paused_and_asked_again(self):
         mon, feed, clock, alerts = make(["--no-routes", "--rate", "60",
                                          "--remote-providers", "adsb.lol,adsb.fi"])
         orig = feed.request
@@ -470,6 +470,22 @@ class RateLimitTests(unittest.TestCase):
         self.assertIn("adsb.fi", mon.disabled)
         self.assertEqual(sum("adsb.fi" in p for m, p in feed.calls), 1)
         self.assertTrue(any("/hex/" in p for m, p in feed.calls if "adsb.fi" not in p))
+        # api.adsb.lol's 403 of 2 Nov 2026 lasted seconds and cost 22 h: asked again after the pause, which doubles
+        self.assertEqual(mon.refused["adsb.fi"][1], fw.TRACE_REFUSED_S)
+        clock.t = mon.refused["adsb.fi"][0] + 1
+        self.assertNotIn("adsb.fi", mon.disabled)
+        err = fw.requests.HTTPError(response=FakeResponse(403, url="https://opendata.adsb.fi/x"))
+        mon.note_refusal("adsb.fi", err)
+        self.assertEqual(mon.refused["adsb.fi"][1], 2 * fw.TRACE_REFUSED_S)
+        mon.note_refusal("adsb.fi", err)  # (while paused: the same refusal, no longer a pause)
+        self.assertEqual(mon.refused["adsb.fi"][1], 2 * fw.TRACE_REFUSED_S)
+        for _ in range(8):
+            mon.note_refusal("adsb.fi", err)
+            clock.t = mon.refused["adsb.fi"][0] + 1
+        self.assertEqual(mon.refused["adsb.fi"][1], fw.TRACE_REFUSED_MAX_S)
+        feed.request = orig
+        mon.remote_query("adsb.fi", "hex", ["738001"], [], 1)
+        self.assertNotIn("adsb.fi", mon.refused)  # it answers: the next refusal starts from the short pause
 
 
 def path(lat, lon, tracks, alts, gs=450, dt=10, **kw):
