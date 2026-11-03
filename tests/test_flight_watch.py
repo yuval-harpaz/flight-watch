@@ -68,6 +68,7 @@ class FakeFeed:
         self.learned = []         # (json body, Authorization header) of POSTs to the relay's /learn
         self.traces = {}          # hex -> rows of its recent trace, absolute times (see trace_rows)
         self.bsky = []            # AeroSignals' posts (Bluesky getAuthorFeed "feed" items)
+        self.sqk_answer = {}      # squawk code -> the aircraft /sqk/ answers instead of the true ones
 
     def ac(self, hexid):
         a = dict(self.aircraft[hexid], hex=hexid)
@@ -89,6 +90,11 @@ class FakeFeed:
             return FakeResponse(200, {"now": now_ms, "ac": [self.ac(h) for h in sorted(self.local - unseen)]})
         if path.endswith("/v2/mil"):
             return FakeResponse(200, {"now": now_ms, "ac": [{"hex": h} for h in sorted(self.mil)]})
+        if "/sqk/" in path:
+            code = path.rsplit("/", 1)[1]
+            sqk = self.sqk_answer.get(code)
+            return FakeResponse(200, {"now": now_ms, "ac": sqk if sqk is not None else [
+                self.ac(h) for h, a in self.aircraft.items() if str(a.get("squawk")) == code and h not in unseen]})
         if "/hex/" in path:
             ids = path.rsplit("/", 1)[1].split(",")
             return FakeResponse(200, {"now": now_ms, "ac": [self.ac(h) for h in ids if h in self.aircraft]})
@@ -121,6 +127,7 @@ def make(argv=(), with_schedule=False):
     args = fw.parse_args(["--jsonl", "", "--no-schedule", "--turn-zones", "", "--fallback-provider", "",
                           "--remote-providers", "adsb.lol",  # one feed unless a test asks for more
                           "--aerosignals-interval", "0",  # Bluesky: AeroSignalsTests switch it on
+                          "--squawk-interval", "0",  # SquawkSearchTests switch it on
                           "--standing-data", fw.STANDING_DATA, *argv])  # the fake feed, never a local copy
     http = fw.Http(min_gap=0, rate=args.rate, rate_max=args.rate_max, clock=clock, rng=lambda: 0.5)
     feed = FakeFeed(clock)
@@ -3110,6 +3117,111 @@ class LegEndAndLightAircraftTests(unittest.TestCase):
         fly(mon, feed, clock, "73934e", path(32.87, 33.88, [134] * 6 + [106, 78, 50] + [50] * 6, [19000] * 15,
                                              gs=728), flight="HEZ652", r="4X-CZF", t="H25B")
         self.assertNotIn("SHARP_TURN", kinds(alerts))
+
+
+class SquawkSearchTests(unittest.TestCase):
+    """The feeds' own search for squawks anywhere (--squawk-interval): no squawk rests on one Bluesky account."""
+
+    FILES = {"routes/schema-01/W/WZZ-3.csv": "Callsign,Code,Number,AirlineCode,AirportCodes\nWZZ3W,WZZ,3W,WZZ,LHBP-LLBG\n"
+                                            "WZZ4X,WZZ,4X,WZZ,LHBP-EGGW\n"}
+
+    def setup(self, *argv):
+        mon, feed, clock, alerts = make(["--squawk-interval", "60", "--remote-providers", "adsb.lol,adsb.fi",
+                                         "--rate", "600", "--rate-max", "6000", *argv])
+        feed.files.update(self.FILES)
+        feed.local = {"999999"}
+        feed.aircraft["999999"] = airborne(32.5, 34.5, 10000, flight="LOC1", squawk="2000")
+        return mon, feed, clock, alerts
+
+    @staticmethod
+    def asks(feed, host_path="/sqk/"):
+        return [p for _, p in feed.calls if host_path in p]
+
+    def test_our_flight_far_away_alerts_once_and_is_followed(self):
+        """OS82 TLV -> VIE squawked 7700 over Bulgaria on 18 Oct 2026: nothing alerted."""
+        mon, feed, clock, alerts = self.setup()
+        feed.aircraft["471f8d"] = airborne(47.0, 19.0, 35000, flight="WZZ3W", squawk="7700")
+        for _ in range(20):
+            step(mon, clock)
+        self.assertEqual(kinds(alerts, "471f8d"), ["EMERGENCY"])
+        self.assertTrue(mon.tracks["471f8d"].followed)
+
+    def test_a_squawk_elsewhere_is_only_logged_once(self):
+        mon, feed, clock, alerts = self.setup()
+        feed.aircraft["471f8e"] = airborne(47.0, 19.0, 35000, flight="WZZ4X", squawk="7700")
+        with self.assertLogs("flight_watch", "INFO") as logs:
+            for _ in range(20):
+                step(mon, clock)
+        self.assertEqual(kinds(alerts, "471f8e"), [])
+        self.assertNotIn("471f8e", mon.tracks)
+        self.assertEqual(sum("squawk elsewhere: 7700 on WZZ4X" in m for m in logs.output), 1)
+
+    def test_searched_about_once_a_minute_for_each_code_at_the_real_rates(self):
+        """The budget refuses LOW requests when they come together; the search must not starve one code. Default --rate."""
+        mon, feed, clock, alerts = make(["--squawk-interval", "60", "--remote-providers", "adsb.lol,adsb.fi", "--no-routes"])
+        feed.local = {"999999"}
+        feed.aircraft["999999"] = airborne(32.5, 34.5, 10000, flight="LOC1", squawk="2000")
+        for _ in range(61):  # 10 min at a 10 s poll
+            step(mon, clock)
+        codes = [p.rsplit("/", 1)[1] for p in self.asks(feed)]
+        for code in ("7700", "7600", "7500"):
+            self.assertGreaterEqual(codes.count(code), 8, codes)
+            self.assertLessEqual(codes.count(code), 11, codes)
+        self.assertIn("2000", codes)
+        self.assertTrue(all("/v2/sqk/" in p for p in self.asks(feed)))
+
+    def test_the_second_feed_only_when_the_first_does_not_answer(self):
+        mon, feed, clock, alerts = self.setup()
+        host = []
+        orig = feed.request
+
+        def request(method, url, **kw):
+            if "/sqk/" in url:
+                host.append(urlparse(url).netloc)
+                if "adsb.fi" in url:
+                    return FakeResponse(500, url=url)
+            return orig(method, url, **kw)
+        feed.request = request
+        feed.aircraft["471f8d"] = airborne(47.0, 19.0, 35000, flight="WZZ3W", squawk="7600")
+        for _ in range(4):  # (a code the budget refused is asked for again within 20 s)
+            step(mon, clock)
+        self.assertIn("api.adsb.lol", host)
+        self.assertEqual(kinds(alerts, "471f8d"), ["EMERGENCY"])
+
+    def test_a_filter_gone_wrong_alerts_no_one(self):
+        """An answer of aircraft that do not send the code must not put the world's flights on Telegram."""
+        mon, feed, clock, alerts = self.setup()
+        feed.aircraft["471f8d"] = airborne(47.0, 19.0, 35000, flight="WZZ3W", squawk="1000")
+        feed.sqk_answer["7700"] = [feed.ac("471f8d")]
+        for _ in range(8):
+            step(mon, clock)
+        self.assertEqual(kinds(alerts, "471f8d"), [])
+
+    def test_a_dead_search_is_said_once_and_its_return_too(self):
+        mon, feed, clock, alerts = self.setup()
+        feed.sqk_answer["2000"] = []
+        with self.assertLogs("flight_watch", "INFO") as logs:
+            step(mon, clock)
+            clock.t += fw.SQUAWK_LIVE_S
+            step(mon, clock)
+        self.assertEqual(sum("not to be trusted" in m for m in logs.output), 1)
+        self.assertTrue(mon.squawk_dead)
+        del feed.sqk_answer["2000"]
+        with self.assertLogs("flight_watch", "INFO") as logs:
+            clock.t += fw.SQUAWK_LIVE_S
+            step(mon, clock)
+        self.assertEqual(sum("works again" in m for m in logs.output), 1)
+        self.assertFalse(mon.squawk_dead)
+
+    def test_a_refusal_pauses_the_feed_for_the_search_too(self):
+        mon, feed, clock, alerts = self.setup()
+        feed.refused = {"/api/v2/sqk/"}
+        step(mon, clock)
+        self.assertIn("adsb.fi", mon.disabled)
+        n = len([p for p in self.asks(feed) if p.startswith("/api/")])
+        clock.t += 70
+        step(mon, clock)
+        self.assertEqual(len([p for p in self.asks(feed) if p.startswith("/api/")]), n)
 
 
 class AeroSignalsTests(unittest.TestCase):

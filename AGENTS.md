@@ -173,7 +173,8 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   10 Oct 2026, replayed with the live run's polls (276 successful, the rest refused) and the trace 8 s
   behind: dives raised at 08:55:25, 09:37:34 (from the trace, during refusals), 10:17:54, 10:58:04
   (live: none, 09:37:47, none, 10:58:38); ~1 trace request a minute. Trace 16 s behind: 09:37:47.
-  **Refused since 18 Oct 2026 ~15:30 IDT**: adsb.lol answers its trace files (`/data/traces/*` and
+  **Answering again since 2 Nov 2026** (last 403 at 09:07 IST, read from 13:11; 3 Nov from here and through the worker: `trace_recent`, `trace_full`, `/globe_history`, no browser check; `globe.adsb.lol` only redirects to `adsb.lol`). Why it stopped is not known and it may return.
+  **Refused 18 Oct - 2 Nov 2026**: adsb.lol answered its trace files (`/data/traces/*` and
   `/globe_history/*`) with HTTP 403 and a browser check ("Verification", a proof-of-work page; not to be
   worked around). The fallback then asked 3 a poll, ~1,000 an hour, while the API refused our polls. After a
   401 / 403 trace requests pause `TRACE_REFUSED_S` (30 min), doubling up to 6 h. Without the trace: no
@@ -675,6 +676,14 @@ and `Monitor.telegram_followups` sends one reply, `FOLLOW_UP`, when it lands or 
 message - for a flight with 2+ messages or an emergency / diversion / return: where it ended (or is), its alerts with times,
 and the map of the whole flight (`t` = its last report). None after a landing alert (DIVERSION / RETURNED raised on the ground): LY353 TLV -> MUC landed at Athens on 21 Oct 2026, and the follow-up 2 min later repeated it. The same squawk alerted within 3 h is not alerted again (AeroSignals'
 post, then our feed's 7700), and an AeroSignals EMERGENCY on an aircraft last heard before the post is placed at the post's time.
+
+**The feeds' squawk search** (`Monitor.squawk_search`, 3 Nov 2026, the owner: not to rest on one Bluesky account): `/v2/sqk/<code>` for
+7700, 7600, 7500 every `--squawk-interval` (60 s; 3 requests, LOW priority; each code has its own due time, 20 s after no answer, as the budget refuses LOW requests that come together), adsb.fi first, adsb.lol only when it does not answer (adsb.lol's budget is
+the local poll's; `--squawk-providers`). A flight of ours - followed, on the board, or routed through an Israeli airport (`squawk_ours`) - joins the poll's batches and
+`check_emergency` alerts it (`aero_alerts` and it do not alert the same code twice); others are only logged, once per 3 h (`squawk elsewhere:`, to compare with
+AeroSignals). No real emergency could be tested through it: 0 aircraft on the three codes when tried. An answer's aircraft not sending the code asked are dropped, and every `SQUAWK_LIVE_S` (10 min) code 2000 is asked for: an empty
+search is also what a broken filter looks like (`log.error` once, the idea from github.com/guspzanetti/flight-alerts). Looked at and left out, the owner's choice: OARC's log
+(adsb.oarc.uk/emergencies/emergencies.json; 11 Jul - 2 Nov 2026: 510 entries, 58 of AeroSignals' 230 posts, 0 of the 4 TLV squawks in that time). Nothing else on GitHub offers more than these endpoints.
 
 **AeroSignals as a second source of squawks** (19 Oct 2026, the owner: "so we won't miss a squawk"). OS82 TLV -> VIE squawked
 7700 on 18 Oct over Bulgaria and diverted to Sofia while adsb.lol refused nearly every poll: nothing alerted. The monitor reads

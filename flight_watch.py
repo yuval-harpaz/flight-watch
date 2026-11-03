@@ -72,16 +72,20 @@ PROVIDERS = {
                        "hex": "/hex/{ids}", "callsign": "/callsign/{ids}"},
     "adsb.lol": {"base": "https://api.adsb.lol/v2",
                  "point": "/point/{lat}/{lon}/{radius}",
-                 "hex": "/hex/{ids}", "callsign": "/callsign/{ids}"},
+                 "hex": "/hex/{ids}", "callsign": "/callsign/{ids}", "sqk": "/sqk/{code}"},
     # personal, non-commercial use, 1 request/s, credit adsb.fi with a link (github.com/adsbfi/opendata);
     # no dbFlags in its answers: military aircraft come from its /v2/mil list. 19 Oct 2026: same readsb
     # fields as adsb.lol, several hex ids / callsigns per request.
     "adsb.fi": {"base": "https://opendata.adsb.fi/api",
                 "point": "/v3/lat/{lat}/lon/{lon}/dist/{radius}",
-                "hex": "/v2/hex/{ids}", "callsign": "/v2/callsign/{ids}", "mil": "/v2/mil",
+                "hex": "/v2/hex/{ids}", "callsign": "/v2/callsign/{ids}", "mil": "/v2/mil", "sqk": "/v2/sqk/{code}",
                 "rate_max": 30},
 }
 MIL_LIST_S = 600  # a feed's list of military aircraft (PROVIDERS "mil") is read this often
+# Is the squawk search alive? An empty answer is what a quiet sky and a broken filter both look like, so a code that is
+# always in the air is asked for this often (s). 3 Nov 2026: 95-102 aircraft on 2000 from both feeds.
+SQUAWK_LIVE_S, SQUAWK_LIVE_CODE = 600, "2000"
+SQUAWK_RETRY_S = 20  # a code no feed answered for is asked for again this soon, not after --squawk-interval
 # Callsign -> route and airport positions: Virtual Radar Server standing data (CC0, crowd-sourced;
 # adsb.lol's own route API now redirects to it). Per-airline CSV files, fetched on first use and
 # kept in memory only. A local checkout of the repository can be used instead (--standing-data).
@@ -1706,6 +1710,10 @@ class Monitor:
         self.tracks: dict[str, Track] = {}
         self.rides = self.past_rides()
         self.state_saved = -1e12  # wall time --state was last written
+        self.squawk_due = dict.fromkeys(("7700", "7600", "7500"), -1e12)  # code -> wall time to ask the feeds for it next
+        self.squawk_live_at = -1e12      # wall time of the search's liveness check
+        self.squawk_dead = False         # the liveness check failed, and that is logged
+        self.squawk_elsewhere: dict = {}  # (hex, code) -> wall time logged: squawks that are not ours, once per 3 h
         self.aero_at = -1e12             # wall time AeroSignals' posts were last read
         self.aero_pending: dict = {}     # post uri -> its squawk case, while we look for the aircraft
         self.aero_seen = self.past_aero()  # post ids already announced, or post uris read
@@ -1720,7 +1728,7 @@ class Monitor:
         self.local_feed = args.provider  # the provider of the last answered local poll
         self.mil_hexes: set[str] = set()  # military aircraft from feeds without dbFlags (PROVIDERS "mil")
         self.mil_at = -1e9
-        for prov in {args.provider, args.fallback_provider, *args.remote_providers} - {""}:
+        for prov in {args.provider, args.fallback_provider, *args.remote_providers, *args.squawk_providers} - {""}:
             cap = PROVIDERS[prov].get("rate_max")
             if cap:  # a feed's own published limit
                 http.budgets[PROVIDERS[prov]["base"].split("/")[2]] = Budget(
@@ -2115,6 +2123,7 @@ class Monitor:
         batches += self.follow(local_hexes, local)
         batches += self.discover(local)
         batches += self.aerosignals(local)  # a squawk reported on Bluesky: its aircraft
+        batches += self.squawk_search(local_hexes)  # a squawk anywhere, from the feeds themselves
 
         # merge (same aircraft may come from several queries) and update tracks
         latest: dict[str, tuple] = {}
@@ -2981,6 +2990,81 @@ class Monitor:
                                 pass
             except (OSError, TypeError):
                 pass
+        return out
+
+    def squawk_ask(self, code: str) -> tuple | None:
+        """(server time, aircraft sending `code`) from the first of --squawk-providers that answers, else None."""
+        for prov in self.args.squawk_providers:
+            if prov in self.disabled:
+                continue
+            try:
+                now_r, acs = self.fetch("sqk", prov, LOW, code=code)
+            except requests.HTTPError as e:
+                self.note_refusal(prov, e)
+                log.debug("%s squawk %s: %s", prov, code, e)
+            except (requests.RequestException, ValueError) as e:  # Throttled included
+                log.debug("%s squawk %s: %s", prov, code, e)
+            else:
+                return now_r, acs
+        return None
+
+    def squawk_live(self, now: float) -> None:
+        """An empty search says nothing unless the same search finds a code that is always in the air."""
+        if now - self.squawk_live_at < SQUAWK_LIVE_S:
+            return
+        self.squawk_live_at = now
+        got = self.squawk_ask(SQUAWK_LIVE_CODE)
+        if got is None:
+            return  # no answer: not the filter's fault, and logged as failures of the feed
+        match = sum(str(ac.get("squawk")) == SQUAWK_LIVE_CODE for ac in got[1])
+        dead = not match or match < len(got[1])
+        if dead and not self.squawk_dead:
+            log.error("squawk search not to be trusted: %d aircraft answered for %s, %d of them sending it",
+                      len(got[1]), SQUAWK_LIVE_CODE, match)
+        elif self.squawk_dead and not dead:
+            log.info("squawk search works again: %d aircraft on %s", match, SQUAWK_LIVE_CODE)
+        self.squawk_dead = dead
+
+    def squawk_ours(self, hexid: str, cs: str) -> bool:
+        """A flight of ours, as AeroSignals' posts are judged: tracked as ours, on the board, or routed through Israel."""
+        t = self.tracks.get(hexid)
+        if t and (t.followed or t.sched):
+            return True
+        if self.schedule and cs in self.schedule.by_callsign and not (t and cs == t.flown_cs):
+            return True
+        try:
+            codes = self.standing.route(cs) if cs and self.standing and not self.routes_off else None
+        except requests.RequestException:  # (Throttled too: asked again on the next search)
+            return False
+        return any(c.startswith("LL") for c in codes or [])
+
+    def squawk_search(self, local_hexes: set) -> list:
+        """Aircraft squawking 7700 / 7600 / 7500 anywhere, from the feeds' own search, every --squawk-interval, LOW priority.
+        The owner did not want a squawk to rest on one Bluesky account (3 Nov 2026). One of ours joins the poll's batches and
+        check_emergency alerts it as any other (same code within 3 h: not twice); the rest of the world is only logged."""
+        a, now = self.args, self.wall()
+        if a.squawk_interval <= 0:
+            return []
+        out = []
+        # each code has its own time: the budget can refuse a LOW request halfway through, and the same code must not be
+        # the one left out every time
+        for code in sorted(self.squawk_due, key=self.squawk_due.get):
+            if now < self.squawk_due[code]:
+                continue
+            got = self.squawk_ask(code)
+            self.squawk_due[code] = now + (a.squawk_interval if got else min(SQUAWK_RETRY_S, a.squawk_interval))
+            for ac in (got[1] if got else ()):
+                hexid, cs = (ac.get("hex") or "").lower(), (ac.get("flight") or "").strip()
+                if str(ac.get("squawk")) != code or not hexid or hexid in local_hexes:
+                    continue  # (not what we asked for: a filter gone wrong must not alert the world's aircraft)
+                if self.squawk_ours(hexid, cs):
+                    log.info("squawk %s on %s (%s), from %s's squawk search", code, cs or hexid, hexid, ac.get("_feed"))
+                    out.append((got[0], ac))
+                elif now - self.squawk_elsewhere.get((hexid, code), -1e12) > AERO_MAX_AGE_S:
+                    self.squawk_elsewhere[(hexid, code)] = now
+                    log.info("squawk elsewhere: %s on %s (%s, %s) at %s,%s %s ft, not ours", code, cs or "?", hexid,
+                             ac.get("t") or "?", ac.get("lat"), ac.get("lon"), ac.get("alt_baro"))
+        self.squawk_live(now)
         return out
 
     def aerosignals(self, local: list) -> list:
@@ -4425,6 +4509,10 @@ def parse_args(argv=None):
                    help="send the map page's relay callsign -> aircraft pairs heard near the airport "
                         "(only with RELAY_TOKEN set in the environment; '' to disable)")
     g.add_argument("--share-interval", type=float, default=300, help="seconds between those sends")
+    g.add_argument("--squawk-interval", type=float, default=60,
+                   help="seconds between searches of the feeds for squawks 7700 / 7600 / 7500 anywhere, 0 = off")
+    g.add_argument("--squawk-providers", default="adsb.fi,adsb.lol",
+                   help="feeds for that search, in order: the next only when one does not answer")
     g.add_argument("--aerosignals-interval", type=float, default=120,
                    help="seconds between reads of AeroSignals' squawk posts on Bluesky (a second source of "
                         "emergency squawks on flights to / from Israel); 0 = never")
@@ -4470,9 +4558,10 @@ def parse_args(argv=None):
         a.protect = "israel" if REGION_AIRPORTS.get(a.airport, (0, 0, False))[2] else "none"
     a.radius = min(a.radius, 250)
     a.remote_providers = [x.strip() for x in a.remote_providers.split(",") if x.strip()]
+    a.squawk_providers = [x.strip() for x in a.squawk_providers.split(",") if x.strip()]
     if a.fallback_provider == a.provider:
         a.fallback_provider = ""
-    bad = [x for x in a.remote_providers + [a.fallback_provider] if x and x not in PROVIDERS]
+    bad = [x for x in a.remote_providers + a.squawk_providers + [a.fallback_provider] if x and x not in PROVIDERS]
     if bad:
         p.error(f"unknown provider(s): {', '.join(bad)}")
     return a
