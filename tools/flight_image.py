@@ -25,6 +25,10 @@ FT_M = 0.3048
 GAP_S = 120
 LEG_GAP_S, LEG_GAP_KT = 600, 200  # a gap the aircraft spent stopped: FB.legs in docs/flightboard.js
 W, H, SS, TOP, STRIP = 1280, 900, 2, 92, 196
+MIN_SPAN = 0.03  # the map shows at least this (radians of longitude, ~100 nm)
+# A close-up when the alerts' part of the flight would be small on the whole flight's map: FZ1073's dive and turn were a
+# squiggle in a corner of its 1,000 nm. ROI_PAD_S of the track around the alerts, in a box INSET_W x INSET_H.
+ROI_PAD_S, ROI_GAP_S, INSET_SMALL, INSET_W, INSET_H = 600, 1800, 0.25, 560, 370
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans%s.ttf"
 BG, SEA, LAND, BORDER, TEXT, DIM, RED = (22, 28, 38), (205, 224, 236), (243, 240, 230), (165, 158, 145), (255, 255, 255), (200, 210, 222), (225, 30, 40)
 RAMP = [(0, (230, 60, 30)), (3000, (240, 150, 20)), (6000, (40, 170, 90)), (9000, (20, 130, 200)), (13000, (90, 30, 170))]
@@ -102,6 +106,25 @@ def group_alerts(alerts: list) -> list:
     return [(t, f"{hm(t)}  {', '.join(names)}") for names, t in out]
 
 
+def merc_y(lat: float) -> float:
+    return math.asinh(math.tan(math.radians(max(-85, min(85, lat)))))
+
+
+def region_of_interest(pts: list, alerts: list) -> tuple | None:
+    """(from, to) of the part of the flight the alerts are about: alerts within ROI_GAP_S of each other belong together;
+    of several such groups the one with an emergency, else the most alerts, else the first."""
+    if not alerts:
+        return None
+    groups = []
+    for name, t in sorted(alerts, key=lambda a: a[1]):
+        if groups and t - groups[-1][-1][1] <= ROI_GAP_S:
+            groups[-1].append((name, t))
+        else:
+            groups.append([(name, t)])
+    best = max(groups, key=lambda g: (any(n == "emergency" for n, _ in g), len(g), -g[0][1]))
+    return best[0][1] - ROI_PAD_S, best[-1][1] + ROI_PAD_S
+
+
 def basemap() -> dict:
     with gzip.open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "basemap.json.gz"), "rt", encoding="utf-8") as f:
         return json.load(f)
@@ -116,91 +139,142 @@ def render(pts: list, alerts: list, title: str, sub: str, source: str = "adsb.lo
         except OSError:  # (no DejaVu on this machine)
             return ImageFont.load_default(size * SS)
     mh = H - TOP - STRIP
-    mx = lambda lon: math.radians(lon)  # noqa: E731
-    my = lambda lat: math.asinh(math.tan(math.radians(max(-85, min(85, lat)))))  # noqa: E731
-    xs, ys = [mx(p[2]) for p in pts], [my(p[1]) for p in pts]
-    span = max(max(xs) - min(xs), 0.03) / (W - 220), max(max(ys) - min(ys), 0.03) / (mh - 170)
-    scale = 1 / max(span)  # pixels a radian
-    cx, cy = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
-    px = lambda lat, lon: ((W / 2 + (mx(lon) - cx) * scale) * SS, (TOP + mh / 2 - (my(lat) - cy) * scale) * SS)  # noqa: E731
-    img = Image.new("RGB", (W * SS, H * SS), SEA)
-    d = ImageDraw.Draw(img, "RGBA")
     data = basemap()
-
-    def ring(flat):
-        pp = [px(flat[i + 1], flat[i]) for i in range(0, len(flat), 2)]
-        x, y = [p[0] for p in pp], [p[1] for p in pp]
-        return pp if max(x) > 0 and min(x) < W * SS and max(y) > TOP * SS and min(y) < (H - STRIP) * SS else None
-
-    for layer, fill in (("land", LAND), ("holes", SEA)):
-        for flat in data[layer]:
-            pp = ring(flat)
-            if pp and len(pp) > 2:
-                d.polygon(pp, fill=fill)
-    for flat in data["borders"]:
-        pp = ring(flat)
-        if pp:
-            d.line(pp, fill=BORDER + (255,), width=2 * SS)
-    line = [px(p[1], p[2]) for p in pts]
-    # alerts' labels, and places where they fit: the track and the labels are in the way
-    busy = [(x - 8 * SS, y - 8 * SS, x + 8 * SS, y + 8 * SS) for x, y in line[::max(1, len(line) // 400)]]
     hit = lambda a, b: a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]  # noqa: E731
-    f_label, labels = font(17, True), []
-    for t, text in group_alerts(alerts):
-        lat, lon = position_at(pts, t)
-        x, y = px(lat, lon)
-        l, u, r, b = d.textbbox((0, 0), text, font=f_label)
-        w, h = r - l + 16 * SS, b - u + 14 * SS
-        best = None
-        for dist in (34, 70, 120):
-            for ang in range(0, 360, 30):
-                cxl = x + math.cos(math.radians(ang)) * (dist * SS + w / 2)
-                cyl = y + math.sin(math.radians(ang)) * (dist * SS + h / 2)
-                box = (cxl - w / 2, cyl - h / 2, cxl + w / 2, cyl + h / 2)
-                inside = box[0] > 8 * SS and box[2] < (W - 8) * SS and box[1] > (TOP + 8) * SS and box[3] < (H - STRIP - 8) * SS
-                cost = (0 if inside else 1000) + sum(hit(box, q) for q in busy) + dist / 1000
-                if best is None or cost < best[0]:
-                    best = (cost, box)
-        busy.append(best[1])
-        labels.append((x, y, best[1], text, (l, u)))
-    # places, largest first, where nothing else is
-    f_place, shown = font(13), 0
-    for name, lat, lon, _rank in data["places"]:
-        x, y = px(lat, lon)
-        if not (0 < x < W * SS and TOP * SS < y < (H - STRIP) * SS):
-            continue
-        w = d.textlength(name, font=f_place)
-        box = (x - 5 * SS, y - 10 * SS, x + w + 12 * SS, y + 10 * SS)
-        if any(hit(box, q) for q in busy) or box[2] > W * SS or box[1] < TOP * SS or box[3] > (H - STRIP) * SS:
-            continue
-        d.ellipse((x - 3 * SS, y - 3 * SS, x + 3 * SS, y + 3 * SS), fill=(90, 90, 90, 255))
-        d.text((x + 7 * SS, y - 9 * SS), name, font=f_place, fill=(70, 70, 70, 255))
-        busy.append(box)
-        shown += 1
-        if shown >= 22:
-            break
 
-    def dashed(a, b, colour_, width):
+    def view(fit, w, h, margin_x, margin_y):
+        """x, y in pixels (of a w x h picture, x SS) of a lat, lon: Mercator, `fit` filling it but for the margins."""
+        xs, ys = [math.radians(p[2]) for p in fit], [merc_y(p[1]) for p in fit]
+        scale = 1 / max(max(max(xs) - min(xs), MIN_SPAN) / (w - margin_x), max(max(ys) - min(ys), MIN_SPAN) / (h - margin_y))
+        cx, cy = (max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2
+        return lambda lat, lon: ((w / 2 + (math.radians(lon) - cx) * scale) * SS, (h / 2 - (merc_y(lat) - cy) * scale) * SS)
+
+    def dashed(d, a, b, colour_, width):
         n = max(2, int(math.dist(a, b) / (14 * SS)))
         for i in range(0, n, 2):
             d.line([(a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n),
                     (a[0] + (b[0] - a[0]) * (i + 1) / n, a[1] + (b[1] - a[1]) * (i + 1) / n)], fill=colour_, width=width)
 
-    d.line(line, fill=(255, 255, 255, 235), width=9 * SS, joint="curve")
-    for a, b, p, q in zip(line, line[1:], pts, pts[1:]):
-        d.line([a, b], fill=colour(p[3]) + (255,), width=5 * SS)
-        if q[0] - p[0] > GAP_S:
-            dashed(a, b, (255, 255, 255, 255), 5 * SS)
-    for x, y in (line[0], line[-1]):
-        r = 7 * SS
-        d.ellipse((x - r, y - r, x + r, y + r), fill=(255, 255, 255, 255), outline=(20, 20, 20, 255), width=2 * SS)
-    for x, y, box, text, (l, u) in labels:
+    def draw_map(w, h, px, labelled, marked, keep_out=(), places=22):
+        """The land, the track, the alerts: labels for `labelled` ((time, text)), a dot alone for the times in `marked`."""
+        img = Image.new("RGB", (w * SS, h * SS), SEA)
+        d = ImageDraw.Draw(img, "RGBA")
+
+        def ring(flat):
+            pp = [px(flat[i + 1], flat[i]) for i in range(0, len(flat), 2)]
+            x, y = [p[0] for p in pp], [p[1] for p in pp]
+            return pp if max(x) > 0 and min(x) < w * SS and max(y) > 0 and min(y) < h * SS else None
+
+        for layer, fill in (("land", LAND), ("holes", SEA)):
+            for flat in data[layer]:
+                pp = ring(flat)
+                if pp and len(pp) > 2:
+                    d.polygon(pp, fill=fill)
+        for flat in data["borders"]:
+            pp = ring(flat)
+            if pp:
+                d.line(pp, fill=BORDER + (255,), width=2 * SS)
+        line = [px(p[1], p[2]) for p in pts]
+        # the alerts' labels, where they fit: the track and the other labels are in the way
+        busy = list(keep_out) + [(x - 8 * SS, y - 8 * SS, x + 8 * SS, y + 8 * SS) for x, y in line[::max(1, len(line) // 400)]
+                                 if 0 < x < w * SS and 0 < y < h * SS]
+        labels = []
+        for t, text in labelled:
+            x, y = px(*position_at(pts, t))
+            l, u, r, b = d.textbbox((0, 0), text, font=f_label)
+            lw, lh = r - l + 16 * SS, b - u + 14 * SS
+            best = None
+            for dist in (34, 70, 120):
+                for ang in range(0, 360, 30):
+                    cxl = x + math.cos(math.radians(ang)) * (dist * SS + lw / 2)
+                    cyl = y + math.sin(math.radians(ang)) * (dist * SS + lh / 2)
+                    box = (cxl - lw / 2, cyl - lh / 2, cxl + lw / 2, cyl + lh / 2)
+                    inside = box[0] > 8 * SS and box[2] < (w - 8) * SS and box[1] > 8 * SS and box[3] < (h - 8) * SS
+                    cost = (0 if inside else 1000) + sum(hit(box, q) for q in busy) + dist / 1000
+                    if best is None or cost < best[0]:
+                        best = (cost, box)
+            busy.append(best[1])
+            labels.append((x, y, best[1], text, (l, u)))
+        # places, largest first, where nothing else is
+        shown = 0
+        for name, lat, lon, _rank in data["places"]:
+            x, y = px(lat, lon)
+            if not (0 < x < w * SS and 0 < y < h * SS):
+                continue
+            box = (x - 5 * SS, y - 10 * SS, x + d.textlength(name, font=f_place) + 12 * SS, y + 10 * SS)
+            if any(hit(box, q) for q in busy) or box[2] > w * SS or box[1] < 0 or box[3] > h * SS:
+                continue
+            d.ellipse((x - 3 * SS, y - 3 * SS, x + 3 * SS, y + 3 * SS), fill=(90, 90, 90, 255))
+            d.text((x + 7 * SS, y - 9 * SS), name, font=f_place, fill=(70, 70, 70, 255))
+            busy.append(box)
+            shown += 1
+            if shown >= places:
+                break
+        d.line(line, fill=(255, 255, 255, 235), width=9 * SS, joint="curve")
+        for a, b, p, q in zip(line, line[1:], pts, pts[1:]):
+            d.line([a, b], fill=colour(p[3]) + (255,), width=5 * SS)
+            if q[0] - p[0] > GAP_S:
+                dashed(d, a, b, (255, 255, 255, 255), 5 * SS)
+        for x, y in (line[0], line[-1]):
+            r = 7 * SS
+            d.ellipse((x - r, y - r, x + r, y + r), fill=(255, 255, 255, 255), outline=(20, 20, 20, 255), width=2 * SS)
         r = 9 * SS
-        ex, ey = min(max(x, box[0]), box[2]), min(max(y, box[1]), box[3])
-        d.line([(x, y), (ex, ey)], fill=(20, 20, 20, 220), width=2 * SS)
-        d.ellipse((x - r, y - r, x + r, y + r), fill=RED + (255,), outline=(255, 255, 255, 255), width=3 * SS)
-        d.rounded_rectangle(box, 6 * SS, fill=(255, 255, 255, 240), outline=RED + (255,), width=2 * SS)
-        d.text((box[0] + 8 * SS - l, box[1] + 7 * SS - u), text, font=f_label, fill=(20, 20, 20, 255))
+        for t in marked:
+            x, y = px(*position_at(pts, t))
+            d.ellipse((x - r, y - r, x + r, y + r), fill=RED + (255,), outline=(255, 255, 255, 255), width=3 * SS)
+        for x, y, box, text, (l, u) in labels:
+            ex, ey = min(max(x, box[0]), box[2]), min(max(y, box[1]), box[3])
+            d.line([(x, y), (ex, ey)], fill=(20, 20, 20, 220), width=2 * SS)
+            d.ellipse((x - r, y - r, x + r, y + r), fill=RED + (255,), outline=(255, 255, 255, 255), width=3 * SS)
+            d.rounded_rectangle(box, 6 * SS, fill=(255, 255, 255, 240), outline=RED + (255,), width=2 * SS)
+            d.text((box[0] + 8 * SS - l, box[1] + 7 * SS - u), text, font=f_label, fill=(20, 20, 20, 255))
+        return img
+
+    f_label, f_place = font(17, True), font(13)
+    px = view(pts, W, mh, 220, 170)
+    groups = group_alerts(alerts)
+    window = region_of_interest(pts, alerts)
+    inset = None
+    if window:
+        near = [p for p in pts if window[0] <= p[0] <= window[1]] or pts
+        xs_, ys_ = zip(*(px(p[1], p[2]) for p in near))
+        x0, x1, y0, y1 = min(xs_), max(xs_), min(ys_), max(ys_)
+        # small on the whole map: worth a closer look
+        if max(x1 - x0, 1) < INSET_SMALL * W * SS and max(y1 - y0, 1) < INSET_SMALL * mh * SS:
+            iw, ih = INSET_W, INSET_H
+            line_ = [px(p[1], p[2]) for p in pts]
+
+            def corner_cost(c):
+                # how much of the track it would hide (length, not reports: they crowd where it flies low)
+                return sum(math.dist(a, b) for a, b in zip(line_, line_[1:]) if c[0] < a[0] < c[2] and c[1] < a[1] < c[3]) + (
+                    1e9 * hit(c, (x0, y0, x1, y1)))
+
+            m = 14 * SS
+            corners = [(m, m, m + iw * SS, m + ih * SS), ((W - iw) * SS - m, m, W * SS - m, m + ih * SS),
+                       (m, mh * SS - m - ih * SS, m + iw * SS, mh * SS - m), ((W - iw) * SS - m, mh * SS - m - ih * SS, W * SS - m, mh * SS - m)]
+            inset = (min(corners, key=corner_cost), near, (x0, y0, x1, y1))
+    if inset:
+        corner, near, region = inset
+        px_i = view(near, INSET_W, INSET_H, 120, 110)
+        in_window = [g for g in groups if window[0] <= g[0] <= window[1]]
+        out_window = [g for g in groups if g not in in_window]
+        main = draw_map(W, mh, px, out_window, [g[0] for g in in_window], keep_out=[corner, region])
+        small_map = draw_map(INSET_W, INSET_H, px_i, in_window, [], places=8)
+        dm = ImageDraw.Draw(main, "RGBA")
+        pad = 12 * SS
+        dm.rectangle((region[0] - pad, region[1] - pad, region[2] + pad, region[3] + pad), outline=(20, 20, 20, 255), width=2 * SS)
+        # a line from the region to the close-up: which part it is
+        cx_, cy_ = (corner[0] + corner[2]) / 2, (corner[1] + corner[3]) / 2
+        rx_, ry_ = min(max(cx_, region[0] - pad), region[2] + pad), min(max(cy_, region[1] - pad), region[3] + pad)
+        ex_, ey_ = min(max(rx_, corner[0]), corner[2]), min(max(ry_, corner[1]), corner[3])
+        dm.line((rx_, ry_, ex_, ey_), fill=(20, 20, 20, 255), width=2 * SS)
+        main.paste(small_map, (round(corner[0]), round(corner[1])))
+        dm.rectangle(corner, outline=(20, 20, 20, 255), width=3 * SS)
+    else:
+        main = draw_map(W, mh, px, groups, [])
+    img = Image.new("RGB", (W * SS, H * SS), SEA)
+    img.paste(main, (0, TOP * SS))
+    d = ImageDraw.Draw(img, "RGBA")
     # the title
     d.rectangle((0, 0, W * SS, TOP * SS), fill=BG)
     d.text((24 * SS, 13 * SS), title, font=font(29, True), fill=TEXT)
@@ -220,7 +294,7 @@ def render(pts: list, alerts: list, title: str, sub: str, source: str = "adsb.lo
         d.text((L - 12 * SS - d.textlength(lab, font=small), ay(m) - 9 * SS), lab, font=small, fill=DIM)
     for a, b in zip(pts, pts[1:]):
         if b[0] - a[0] > GAP_S:
-            dashed((tx(a[0]), ay(a[3])), (tx(b[0]), ay(b[3])), (255, 255, 255, 255), 3 * SS)
+            dashed(d, (tx(a[0]), ay(a[3])), (tx(b[0]), ay(b[3])), (255, 255, 255, 255), 3 * SS)
             continue
         d.polygon([(tx(a[0]), ay(a[3])), (tx(b[0]), ay(b[3])), (tx(b[0]), B), (tx(a[0]), B)], fill=colour(a[3]) + (150,))
         d.line((tx(a[0]), ay(a[3]), tx(b[0]), ay(b[3])), fill=colour(a[3]) + (255,), width=3 * SS)
@@ -242,7 +316,7 @@ def render(pts: list, alerts: list, title: str, sub: str, source: str = "adsb.lo
         lab = f"{km}" + (" km" if km == 12 else "")
         d.text((x + km * 1000 / 13000 * bar - 4 * SS, ky + 14 * SS), lab, font=font(12), fill=DIM)
     x += bar + 44 * SS
-    dashed((x, ky + 6 * SS), (x + 56 * SS, ky + 6 * SS), (255, 255, 255, 255), 4 * SS)
+    dashed(d, (x, ky + 6 * SS), (x + 56 * SS, ky + 6 * SS), (255, 255, 255, 255), 4 * SS)
     x += 66 * SS
     d.text((x, ky - 2 * SS), "not heard: a straight guess", font=small, fill=TEXT)
     x += d.textlength("not heard: a straight guess", font=small) + 36 * SS

@@ -849,6 +849,18 @@ class FlightImageTests(unittest.TestCase):
         self.assertIn("off course", got[0][1])
         self.assertIn("course reversal", got[0][1])
 
+    def test_the_close_up_is_about_the_emergency_else_the_most_alerts(self):
+        h = 3600
+        self.assertIsNone(fi.region_of_interest([], []))
+        al = [("course reversal", 0), ("off course", 60), ("emergency", 5 * h), ("sharp turn", 9 * h), ("off course", 9 * h + 60), ("diversion", 9 * h + 120)]
+        self.assertEqual(fi.region_of_interest([], al), (5 * h - fi.ROI_PAD_S, 5 * h + fi.ROI_PAD_S))
+        self.assertEqual(fi.region_of_interest([], [x for x in al if x[0] != "emergency"]), (9 * h - fi.ROI_PAD_S, 9 * h + 120 + fi.ROI_PAD_S))
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "needs Pillow")
+    def test_a_long_flight_with_a_close_up_draws_too(self):
+        pts = [(1000.0 + 60 * i, 40.0, -30.0 + 0.2 * i, 10000.0) for i in range(300)]
+        self.assertEqual(fi.render(pts, [("emergency", 1000.0 + 60 * 250)], "x", "y")[:2], b"\xff\xd8")
+
     @unittest.skipUnless(importlib.util.find_spec("PIL"), "needs Pillow")
     def test_it_draws_a_jpeg(self):
         pts = fi.leg_at(self.rows(), 2000)
