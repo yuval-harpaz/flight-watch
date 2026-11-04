@@ -437,6 +437,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   N of it at FL155, went out on Telegram.
   A board arrival with no route data points at our airport the same way (2 Nov 2026 nightly review): IZ690 HAN -> TLV, 30 -> 316
   deg at FL180 climbing out 60 nm from Hanoi (`OWN_TURN_NM` 50), TLV at 296 deg, on Telegram. Route-data arrivals already had this.
+  Nor a board departure's reversal that brings it within `DEST_TURN_TOL` (35 deg) of its destination and at least `DEST_TURN_GAIN` (30)
+  nearer than before (`turned_nearer_destination`; 4 Nov 2026 nightly review): EY608 TLV -> AUH, 180 -> 78 deg at FL277 over Jordan with
+  Abu Dhabi at 109, then 116, on Telegram. Cost: a real diversion on such a turn, with no squawk, shows only when it lands.
 - **SKYDIVE_PATTERN**: a jump run (>= 2 reports <= 80 kt at >= 6,000 ft over >= 15 s, positions
   agreeing) followed within 5 min by a descent of >= 3,000 ft/min and >= 1,000 ft. 4XDAN (P750) over
   the Dead Sea, 10 Oct 2026: a lift every ~40 min (climb to ~12,000 ft, ~50 kt while jumpers exit,

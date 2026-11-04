@@ -3001,6 +3001,30 @@ class FarEndTests(unittest.TestCase):
             got[case] = "OFF_COURSE" in kinds(alerts, "48418c")
         self.assertEqual(got, {"stop": False, "too late": True, "high": True, "no field": True})
 
+    def test_departure_turned_nearer_its_destination_is_not_a_reversal(self):
+        """EY608 TLV -> AUH at FL277 over Jordan, 180 -> 78 deg with Abu Dhabi at 109, on Telegram (3 Nov 2026).
+        The same turn the other way, away from its destination, still alerts."""
+        got = {}
+        for case, new in (("nearer", 78), ("away", 282)):
+            mon, feed, clock, alerts = self.setup([board_row("EY", "608", "D", local_time(Clock(), 0), "AUH")])
+            feed.files["airports/schema-01/O/OM.csv"] = (
+                "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                "OMAA,Abu Dhabi,OMAA,AUH,Abu Dhabi,AE,24.4330,54.6511,88\n")
+            mon.standing.airport("OMAA")
+            start = (32.3, 36.47)
+            tracks = [180] * 20 + [180 + (new - 180) * i / 9 for i in range(1, 10)] + [new] * 20
+            fly(mon, feed, clock, "896678", path(*start, tracks, [27700] * len(tracks), gs=480), local=False,
+                flight="ETD608", r="A6-AES", t="A21N")
+            got[case] = "COURSE_CHANGE" in kinds(alerts, "896678")
+        self.assertEqual(got, {"nearer": False, "away": True})
+
+    def test_digest_does_not_count_a_closed_thread_as_a_message(self):
+        """A THREAD_END record read as "1 refused" and an empty message in the digest of 3 Nov 2026."""
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+        import daily_digest
+        posts = [dict(kind="DIVERSION", sent=True), dict(kind="THREAD_END", sent=False), dict(kind="OFF_COURSE", sent=False)]
+        self.assertEqual([p["kind"] for p in daily_digest.telegram_posts(posts)], ["DIVERSION", "OFF_COURSE"])
+
     def test_a_stop_is_not_called_a_diversion_on_an_old_report(self):
         """IB1873 as IBS18AB: DIVERSION on a report 22 min old, while it had left unheard (3 Nov 2026)."""
         mon, feed, clock, alerts = self.setup([board_row("KL", "463", "A", local_time(Clock(), 4), "AMS")])

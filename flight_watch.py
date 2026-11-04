@@ -201,6 +201,7 @@ STATUS_NAMES = {"general": "emergency", "lifeguard": "medical", "minfuel": "mini
 TAG_DETOUR = 1.25  # a board tag stop counts when on the way: origin -> stop -> TLV at most this x the straight line
 STOP_KT, STOP_TURN_S = 420, 1200  # an arrival's time from a stop on its way: block speed, and on the ground there
 STOP_APPROACH_ALT, STOP_APPROACH_NM = 10000, 30  # below this, this near an airfield: on approach to a stop (approaching_stop)
+DEST_TURN_TOL, DEST_TURN_GAIN = 35, 30  # a board departure's reversal to within this of its destination, this much nearer it
 APPROACH_NM, APPROACH_ALT = 20, 15000  # a descent here, into its own destination, is judged by its altitude history
 STOP_FRESH_S = 300  # "still at its stop" needs a report this recent (s): ground coverage is thin
 DIVERTED_NM = 30  # a departure on the ground this far from its destination landed elsewhere (check_landing)
@@ -3001,7 +3002,7 @@ class Monitor:
         elif (s.t - p["t"] >= a.turn_confirm and held and held[0].t <= s.t - a.turn_confirm * 0.8
               and all(heading_diff(x.track, s.track) <= 20 for x in held)):
             t.pending_turn = None
-            dest = self.turned_to_destination(t)
+            dest = self.turned_to_destination(t) or self.turned_nearer_destination(t, p["from"])
             if dest:  # MEA312 Beirut - Amman, 16 Oct 2026: east past Damascus, then south to Amman
                 log.info("%s turned toward its destination %s, not alerted (%s)", t.label(), dest, p["msg"])
                 return
@@ -3892,6 +3893,18 @@ class Monitor:
                 and heading_diff(s.track, bearing(s.lat, s.lon, lat, lon)) <= self.args.toward_dest_tol):
             return icao
         return None
+
+    def turned_nearer_destination(self, t: Track, was: float) -> str | None:
+        """The board's destination of a departure whose reversal took it from well off that bearing to near it, though
+        not within --toward-dest-tol. EY608 TLV -> AUH at FL277 over Jordan, 180 -> 78 deg with Abu Dhabi at 109, then
+        116 and on to land there: on Telegram (3 Nov 2026). A turn back only moves away from the destination."""
+        s = t.last
+        far = self.other_end(t, "DEP") if t.sched and t.sched.direction == "DEP" else None
+        if not far or haversine_nm(s.lat, s.lon, far[1], far[2]) <= 20:
+            return None
+        to = bearing(s.lat, s.lon, far[1], far[2])
+        now = heading_diff(s.track, to)
+        return far[0] if now <= DEST_TURN_TOL and heading_diff(was, to) - now >= DEST_TURN_GAIN else None
 
     def descending_toward(self, t: Track) -> str | None:
         """A regional airport <= 150 nm ahead (within --toward-dest-tol) of a flight descending
