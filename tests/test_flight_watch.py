@@ -2667,6 +2667,52 @@ class FlownOnTests(unittest.TestCase):
         fly(mon, feed, clock, "4c80b8", [dict(lat=34.7180, lon=32.4857, alt_baro="ground", gs=12, track=120)] * 4, **self.IDENT)
         self.assertIn("DIVERSION", kinds(alerts))
 
+    def unheard_near_larnaca(self, **extra):
+        """Its approach never heard: last heard at cruise, heard again at 179 kt on average, on to Vienna."""
+        mon, feed, clock, alerts = self.setup()
+        self.leave(mon, feed, clock, **extra)
+        fly(mon, feed, clock, "4c80b8", path(33.5, 34.2, [320] * 6, [26000] * 6, gs=420), **{**self.IDENT, **extra})
+        clock.t += 8640
+        self.to_vienna(mon, feed, clock, **extra)
+        return alerts
+
+    def test_landing_far_beyond_a_leg_that_should_be_over_is_another_leg(self):
+        self.assertNotIn("DIVERSION", kinds(self.unheard_near_larnaca()))
+
+    def test_under_an_emergency_squawk_it_is_still_a_diversion(self):
+        self.assertIn("DIVERSION", kinds(self.unheard_near_larnaca(squawk="7700")))
+
+    def test_board_time_counts_when_there_is_a_board_row(self):
+        """Take-off unseen (left_at 0): the board's time says the leg is over."""
+        mon, feed, clock, alerts = self.setup()
+        mon.schedule = fw.Schedule(mon.http, dict(fw.AIRLINE_ICAO), 1e9, 16)
+        mon.schedule.fetched = 1e18
+        mon.schedule.load([board_row("BZ", "112", "D", local_time(Clock(), 0), "LCA")],
+                          datetime.fromtimestamp(clock(), mon.schedule.tz))
+        fly(mon, feed, clock, "4c80b8", path(33.5, 34.2, [320] * 6, [26000] * 6, gs=420), **self.IDENT)
+        self.assertEqual(mon.tracks["4c80b8"].left_at, 0.0)
+        clock.t += 8640
+        self.to_vienna(mon, feed, clock)
+        self.assertNotIn("DIVERSION", kinds(alerts))
+
+    def test_far_from_its_destination_in_good_time_is_a_diversion(self):
+        """TLV -> London landing at Istanbul after 2 h, with hours of that leg left."""
+        mon, feed, clock, alerts = self.setup("LLBG-EGLL")
+        self.leave(mon, feed, clock)
+        clock.t += 7200
+        fly(mon, feed, clock, "4c80b8", path(41.26, 28.77, [320] * 6, [3000 - 400 * i for i in range(6)], gs=150), **self.IDENT)
+        fly(mon, feed, clock, "4c80b8", [dict(lat=41.2753, lon=28.7519, alt_baro="ground", gs=12, track=120)] * 4, **self.IDENT)
+        self.assertIn("DIVERSION", kinds(alerts))
+
+    def test_near_its_destination_late_is_a_diversion(self):
+        """Within AWAY_CLIMB_NM of the destination, however late: holding, then an alternate (Paphos for Larnaca)."""
+        mon, feed, clock, alerts = self.setup()
+        self.leave(mon, feed, clock)
+        fly(mon, feed, clock, "4c80b8", [dict(lat=34.6, lon=33.2, alt_baro=9000, gs=150, track=90)] * 13, dt=600, **self.IDENT)
+        fly(mon, feed, clock, "4c80b8", path(34.75, 32.60, [260] * 6, [3000 - 400 * i for i in range(6)], gs=150), **self.IDENT)
+        fly(mon, feed, clock, "4c80b8", [dict(lat=34.7180, lon=32.4857, alt_baro="ground", gs=12, track=120)] * 4, **self.IDENT)
+        self.assertIn("DIVERSION", kinds(alerts))
+
 
 class SquawkCaseTests(unittest.TestCase):
     """Misses found by replaying the AeroSignals squawk cases (tools/squawk_cases.py, 19 Oct 2026)."""

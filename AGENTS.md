@@ -261,6 +261,12 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   heard again after those 40 min at any speed (`was_landing`; 4 Nov 2026): BBG112, TLV -> LCA on the board, last heard at 1,425 ft 7 nm from
   Larnaca and flying on to Vienna on the same callsign. The monitor was down 12:43 - 14:18 IST, so it was next heard at FL380, 156 kt on
   average: a DIVERSION at Vienna, "1,099 nm from" LCLK. Cost: a go-around unheard for 40 min and landing elsewhere is not a DIVERSION.
+  A departure on the ground more than `AWAY_CLIMB_NM` (300) from its destination after that leg should have ended (board time or
+  take-off, `left_at`; the flight at `STOP_KT`; `LEG_OVER_S` 30 min), not hot, no emergency, is another leg, only logged (`beyond_leg`; 4 Nov
+  2026, the same flight had its approach not been heard). KL462 TLV -> LCA at Amsterdam (20 Oct) and TLV -> OTP at Amsterdam (27, 28 Oct) read the
+  same. Real ones stay: BZ272 at Prague (138 nm from Berlin), X7501 at Amsterdam (106 nm from Liege), LY353 at Athens (hours of its leg
+  left). Cost: a real diversion with a stale short route and nothing else to show is only logged. Squawk replay: 0 of 354 changed, though
+  its cases are single legs and hardly reach this.
   `Monitor.end_leg`: a departure landing away from TLV, or an arrival at it, has flown that callsign
   (`Track.flown_cs`): neither the board row nor the route data's direction applies to it again until the
   callsign changes. Such a track is kept 3 h after it was last heard, as a followed one (others: 30 min; 28 Oct 2026

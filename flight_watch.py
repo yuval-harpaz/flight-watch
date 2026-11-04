@@ -185,7 +185,7 @@ HOLDING_LANDING_ALT = 3000  # circling that reaches its period descending below 
 # from unseen), both after the restart of 24 Oct 2026 21:45 IDT
 STATE_FIELDS = ("callsign", "reg", "actype", "category", "military", "last_msg", "followed", "follow_why", "was_airborne",
                 "max_dist", "max_alt", "alerted", "squawk", "status_at", "status_seen", "hot_until", "israeli", "route_dir",
-                "leg_start", "amm_dep", "takeoff", "takeoff_pos", "climb_peak",
+                "leg_start", "amm_dep", "takeoff", "left_at", "takeoff_pos", "climb_peak",
                 "flown_cs", "feed", "left_home", "rose_home", "orig_first", "orig_max", "orig_left", "came_from", "sent",
                 "stop_wait")
 TG_RETRY_S = 3  # a Telegram message that failed to connect is sent once more after this
@@ -907,6 +907,7 @@ class Track:
     amm_dep: float = 0.0     # data time it was last on the ground at Amman / first heard climbing out of it
     amm_near: float = 0.0    # data time since which it has stayed within AMM_LOCAL_NM of Amman
     takeoff: float = 0.0     # data time of its take-off (left the ground, or first heard climbing low)
+    left_at: float = 0.0     # the same, kept on the ground until the leg ends (beyond_leg)
     stop_wait: tuple | None = None  # (its board time, ICAO, lat, lon, landed): an arrival on the ground on its way early
     turn_held: tuple | None = None  # (report before, turn report, message, bank): a SHARP_TURN waiting (settle_turn)
     turn_glitch: float = 0.0  # data time of the report that showed a held SHARP_TURN was a glitch (settle_turn)
@@ -2315,6 +2316,7 @@ class Monitor:
         t.takeoff_pos, t.status_at, t.status_seen = None, 0.0, ""
         if unseen:
             t.takeoff, t.leg_start = 0.0, t.last.t
+        t.left_at = 0.0
         if not t.stop_wait:  # (an early stop: still followed, to see it leave - check_stops)
             self.unfollow(t, "landed")
 
@@ -2469,7 +2471,7 @@ class Monitor:
             # (on the ground before a gap in our polls and high after it: when it took off is unknown -
             # 18 Oct 2026, 11 EARLY_DESCENTs on arrivals descending into their destinations, "1-8 min after
             # take-off", after the API refused our polls for up to 2 h)
-            t.takeoff, t.climb_peak = s.t, s.alt or 0
+            t.takeoff, t.climb_peak, t.left_at = s.t, s.alt or 0, s.t
             t.rose_home = d < 15
             t.takeoff_pos = (prev.lat, prev.lon) if prev is not None and prev.on_ground else (s.lat, s.lon)
         elif (not s.on_ground and not t.takeoff_pos and prev is not None and prev.on_ground
@@ -3589,7 +3591,10 @@ class Monitor:
                 log.info("%s on the ground at %s, a stop on its route - not a diversion", t.label(), stop)
             elif dest and haversine_nm(s.lat, s.lon, dest[1], dest[2]) > DIVERTED_NM:
                 place = self.landing_place(t, d)
-                if place is not None:
+                if place is not None and self.beyond_leg(t, s, dest):
+                    log.info("%s on the ground %.0f nm from %s, long after that leg should have ended: another leg on "
+                             "its callsign, not a diversion", t.label(), haversine_nm(s.lat, s.lon, dest[1], dest[2]), dest[0])
+                elif place is not None:
                     self.alert(t, "DIVERSION", f"{self.args.airport} departure bound for {dest[0]} on the ground "
                                f"{haversine_nm(s.lat, s.lon, dest[1], dest[2]):.0f} nm from it at "
                                f"{s.lat:.4f},{s.lon:.4f}{place}")
@@ -3776,6 +3781,16 @@ class Monitor:
             return False
         far = self.other_end(t, "DEP")
         return bool(far) and s.t > t.sched.ts + haversine_nm(self.args.lat, self.args.lon, far[1], far[2]) / STOP_KT * 3600 + LEG_OVER_S
+
+    def beyond_leg(self, t: Track, s: Sample, dest: tuple) -> bool:
+        """A departure on the ground more than AWAY_CLIMB_NM from its destination, after that leg should have ended (its
+        board time or take-off, the flight at STOP_KT, LEG_OVER_S more), with no alert to explain it: another leg. BBG112 TLV
+        -> LCA (185 nm) on the ground at Vienna 5 h after take-off, 1,099 nm from Larnaca (4 Nov 2026). A diversion lands
+        on the way (LY353 TLV -> MUC at Athens), or near the destination it could not reach (BZ272 at Prague, 138 nm from Berlin)."""
+        start = t.sched.ts if t.sched and t.sched.direction == "DEP" and t.sched.ts else t.left_at
+        if not start or self.hot(t) or self.in_emergency(t) or haversine_nm(s.lat, s.lon, dest[1], dest[2]) <= AWAY_CLIMB_NM:
+            return False
+        return s.t > start + haversine_nm(self.args.lat, self.args.lon, dest[1], dest[2]) / STOP_KT * 3600 + LEG_OVER_S
 
     def own_airport_near(self, t: Track, s: Sample, nm: float) -> str | None:
         """Its own origin or destination (board, route data) within `nm`, not our airport (the region's airports have
