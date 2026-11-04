@@ -2714,6 +2714,166 @@ class FlownOnTests(unittest.TestCase):
         self.assertIn("DIVERSION", kinds(alerts))
 
 
+class LandingWordsTests(unittest.TestCase):
+    """The owner, 4 Nov 2026: "Landed at Vienna; listed for Larnaca", unless something else was wrong with the flight."""
+    TLV = (32.0114, 34.8867)
+    IST = (41.2753, 28.7519)
+    IDENT = dict(flight="ELY357", r="4X-EKA", t="B738")
+
+    def setup(self, route="LLBG-EGLL"):
+        mon, feed, clock, alerts = with_routes()
+        mon.routes["ELY357"] = (clock(), route)
+        mon.standing.airfield_near = lambda lat, lon: ("LTFM", 1.0)
+        return mon, feed, clock, alerts
+
+    def leave(self, mon, feed, clock, **extra):
+        ident = {**self.IDENT, **extra}
+        fly(mon, feed, clock, "738357", [dict(lat=self.TLV[0], lon=self.TLV[1], alt_baro="ground", gs=5, track=270)] * 3, **ident)
+        fly(mon, feed, clock, "738357", path(*self.TLV, [300] * 6, [1500 + 800 * i for i in range(6)], gs=180), **ident)
+
+    def land(self, mon, feed, clock, **extra):
+        ident = {**self.IDENT, **extra}
+        clock.t += 7200
+        fly(mon, feed, clock, "738357", path(41.26, 28.77, [320] * 6, [3000 - 400 * i for i in range(6)], gs=150), **ident)
+        fly(mon, feed, clock, "738357", [dict(lat=self.IST[0], lon=self.IST[1], alt_baro="ground", gs=12, track=120)] * 4, **ident)
+
+    def diversion(self, alerts):
+        hits = [a for a in alerts if a["kind"] == "DIVERSION"]
+        self.assertEqual(len(hits), 1, kinds(alerts))
+        return hits[0]
+
+    def test_nothing_else_wrong_says_where_it_landed(self):
+        mon, feed, clock, alerts = self.setup()
+        self.leave(mon, feed, clock)
+        self.land(mon, feed, clock)
+        rec = self.diversion(alerts)
+        self.assertEqual({k: rec["landing"][k] for k in ("landed", "at", "listed")},
+                         {"landed": True, "at": "Istanbul", "listed": "London"})
+        self.assertAlmostEqual(rec["landing"]["nm"], fw.haversine_nm(*self.IST, 51.4706, -0.461941), delta=1)
+        self.assertIn("departure bound for EGLL", rec["message"])  # (the file and the log keep the full message)
+        text = fw.Announcer(mon.args).compose(rec, False)[0]["text"]
+        self.assertTrue(text.startswith("\U0001f6ec Landed at Istanbul; listed for London: "), text)
+        self.assertNotIn("Diversion", text)
+        self.assertNotIn("on the ground", text)
+        self.assertIn(f"{rec['landing']['nm']:.0f} nm from London", text)
+
+    def test_an_arrival_is_listed_for_our_airport(self):
+        mon, feed, clock, alerts = self.setup("LHBP-LLBG")
+        mon.standing.airport("LLBG")
+        self.land(mon, feed, clock)
+        rec = self.diversion(alerts)
+        self.assertEqual(rec["landing"]["listed"], "Tel Aviv")
+        self.assertIsNone(rec["landing"]["nm"])
+
+    def test_a_turn_or_other_trouble_in_this_leg_keeps_diversion(self):
+        for kind in ("SHARP_TURN", "COURSE_CHANGE", "TURNING_BACK", "OFF_COURSE", "VERTICAL_RATE:DESCENT", "EARLY_DESCENT",
+                     "ALTITUDE_WOBBLE", "HOLDING", "ABORTED_LANDING", "TOWARD_ISRAEL", "MEDICAL_FLIGHT"):
+            mon, feed, clock, alerts = self.setup()
+            self.leave(mon, feed, clock)
+            mon.tracks["738357"].alerted[kind] = (clock(), 0)
+            self.land(mon, feed, clock)
+            self.assertNotIn("landing", self.diversion(alerts), kind)
+
+    def test_coverage_and_gps_alerts_are_not_trouble(self):
+        for kind in ("LOST_CONTACT", "CONTACT_RESTORED", "POSITION_JUMP"):
+            mon, feed, clock, alerts = self.setup()
+            self.leave(mon, feed, clock)
+            mon.tracks["738357"].alerted[kind] = (clock(), 0)
+            self.land(mon, feed, clock)
+            self.assertIn("landing", self.diversion(alerts), kind)
+
+    def test_trouble_on_its_leg_before_does_not_count(self):
+        mon, feed, clock, alerts = self.setup()
+        mon.routes["ELY357"] = (clock(), "LLBG-EGLL")
+        clock.t += 600
+        fly(mon, feed, clock, "738357", [dict(lat=self.TLV[0], lon=self.TLV[1], alt_baro="ground", gs=5, track=270)], **self.IDENT)
+        mon.tracks["738357"].alerted["SHARP_TURN"] = (clock() - 300, 0)
+        clock.t += 60
+        fly(mon, feed, clock, "738357", path(*self.TLV, [300] * 6, [1500 + 800 * i for i in range(6)], gs=180), **self.IDENT)
+        self.land(mon, feed, clock)
+        self.assertIn("landing", self.diversion(alerts))
+
+    def test_an_emergency_keeps_diversion(self):
+        mon, feed, clock, alerts = self.setup()
+        self.leave(mon, feed, clock, squawk="7700")
+        self.land(mon, feed, clock, squawk="7700")
+        self.assertNotIn("landing", self.diversion(alerts))
+
+    def test_a_lone_status_report_keeps_diversion(self):
+        mon, feed, clock, alerts = self.setup()
+        self.leave(mon, feed, clock)
+        t = mon.tracks["738357"]
+        t.status_at, t.status_seen = clock(), "nordo"
+        self.land(mon, feed, clock)
+        self.assertNotIn("landing", self.diversion(alerts))
+
+    def test_flown_back_keeps_diversion(self):
+        """No alert on the way, seen or not: farther out before than where it landed."""
+        for dep in (True, False):
+            mon, feed, clock, alerts = self.setup("LLBG-EGLL" if dep else "EGLL-LLBG")
+            if dep:
+                self.leave(mon, feed, clock)
+            clock.t += 7200
+            fly(mon, feed, clock, "738357", path(41.26, 28.77, [320] * 6, [3000 - 400 * i for i in range(6)], gs=150), **self.IDENT)
+            t = mon.tracks["738357"]
+            if dep:
+                t.max_dist = mon.dist(t.last) + 60
+            else:
+                t.orig_max = fw.haversine_nm(t.last.lat, t.last.lon, 51.4706, -0.461941) + 60
+            fly(mon, feed, clock, "738357", [dict(lat=self.IST[0], lon=self.IST[1], alt_baro="ground", gs=12, track=120)] * 4, **self.IDENT)
+            self.assertNotIn("landing", self.diversion(alerts), dep)
+
+    def test_coming_down_unheard_is_not_said_to_have_landed(self):
+        ann = fw.Announcer(make()[0].args)
+        rec = alert_rec("DIVERSION", "TLV arrival went silent descending through 1475 ft", alt=1475,
+                        landing={"landed": False, "at": "LCA", "listed": "Tel Aviv", "nm": None})
+        self.assertEqual(ann.headline(rec)[1], "Probably landing at LCA; listed for Tel Aviv")
+        self.assertIn("1475 ft", ann.compose(rec, False)[0]["text"])
+        rec["landing"]["at"] = None
+        self.assertEqual(ann.headline(rec)[1], "Probably landing elsewhere; listed for Tel Aviv")
+
+    def test_not_called_a_diversion_in_links_and_summaries(self):
+        """The map's a=, the follow-up's "Alerts:" and the picture, the board's warnings."""
+        t = fw.Track("738357")
+        t.sent.append(("DIVERSION", 100.0))
+        t.sent.append(("DIVERSION", 200.0))
+        t.elsewhere_at = 200.0
+        self.assertIn("a=LANDED_ELSEWHERE~-100.LANDED_ELSEWHERE~0", fw.external_links(t, 200.0, "https://x/y")["map"])
+        t.sent.append(("DIVERSION", 300.0))  # (trouble in between: called a diversion from then)
+        self.assertEqual(t.shown_kind("DIVERSION", 300.0), "DIVERSION")
+        self.assertEqual(t.shown_kind("RETURNED", 100.0), "RETURNED")
+        self.assertEqual(fw.Announcer.NAMES[t.shown_kind("DIVERSION", 200.0)], "landed elsewhere")
+
+    def test_restart_keeps_the_words(self):
+        self.assertIn("elsewhere_at", fw.STATE_FIELDS)
+
+    def test_follow_up_and_picture_say_landed_elsewhere(self):
+        mon, feed, clock, alerts = make(["--telegram-images", "--no-routes"])
+        ups = []
+        mon.notifier.follow_up = lambda h, when, seg, **kw: ups.append((seg, kw))
+        fly(mon, feed, clock, "4c80b8", path(48.11, 16.57, [90] * 3, [0] * 3, gs=10), flight="BBG112", on_ground=True)
+        t = mon.tracks["4c80b8"]
+        t.samples.append(fw.Sample(**{**fw.asdict(t.last), "on_ground": True, "gs": 10}))
+        at = t.last.t
+        t.sent.append(("DIVERSION", at))
+        t.alerted["DIVERSION"] = (at, 0)
+        t.elsewhere_at = at
+        mon.notifier.tg_threads["4c80b8"] = {"id": 7, "t": at - 600, "last": at, "n": 1}
+        mon.telegram_followups(at + 130)
+        text = "".join(x.get("text") or x["link"] for x in ups[0][0])
+        self.assertIn("landed elsewhere", text)
+        self.assertNotIn("diversion", text)
+        self.assertEqual([n for n, _ in ups[0][1]["image"]["alerts"]], ["landed elsewhere"])
+        self.assertIn("a=LANDED_ELSEWHERE~0", "".join(x.get("url", "") for x in ups[0][0]))
+
+    def test_board_warnings_say_landed_elsewhere(self):
+        mon, *_ = make()
+        rec = alert_rec("DIVERSION", "TLV departure bound for LCLK", remote=True, traffic="DEP", route="LLBG-LCLK",
+                        landing={"landed": True, "at": "Vienna", "listed": "Larnaca", "nm": 1099})
+        fw.Notifier.send(mon.notifier, rec)  # (make() records instead of sending)
+        self.assertEqual([a[3] for a in mon.notifier.board_alerts], ["LANDED_ELSEWHERE"])
+
+
 class SquawkCaseTests(unittest.TestCase):
     """Misses found by replaying the AeroSignals squawk cases (tools/squawk_cases.py, 19 Oct 2026)."""
     TLV = (32.0114, 34.8867)

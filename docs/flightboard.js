@@ -374,7 +374,7 @@ FB.hexOf = async function (callsigns) {
 
 // The monitor's warnings (the relay's /alerts: {updated, alerts: [{hex, flight, callsign, kind, t}]}), shown on the board
 // only when asked ("show warnings", ?alerts=true): an experimental monitor's alerts must not alarm a casual reader.
-FB.ALERT_NAMES = {EMERGENCY: "emergency squawk", DIVERSION: "diversion", RETURNED: "landed back", TURNING_BACK: "turning back",
+FB.ALERT_NAMES = {EMERGENCY: "emergency squawk", DIVERSION: "diversion", LANDED_ELSEWHERE: "landed elsewhere", RETURNED: "landed back", TURNING_BACK: "turning back",
   OFF_COURSE: "off course", LOST_CONTACT: "lost contact", VERTICAL_RATE: "steep climb/descent", SHARP_TURN: "sharp turn",
   COURSE_CHANGE: "course reversal", HOLDING: "long holding", ALTITUDE_WOBBLE: "altitude up and down",
   EARLY_DESCENT: "early descent", ABORTED_LANDING: "aborted landing", GPS_SPOOFING: "GPS spoofing", SKYDIVE_PATTERN: "jump-plane pattern",

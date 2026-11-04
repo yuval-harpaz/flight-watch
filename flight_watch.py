@@ -176,6 +176,9 @@ EARLY_DROP, EARLY_MIN = 1000, 10
 # in between: 18 Oct 2026, ELY353 (TLV -> MUC) unheard 100 min, then 70 nm on climbing out of Munich, and
 # HYS236 (TLV -> OTP) unheard 3.7 h, then 145 nm on, back toward TLV: both "TLV departure heading back".
 MISSED_LANDING_S, MISSED_LANDING_KT = 2400, 150
+# A DIVERSION's words when nothing else was wrong (landing_words): these kinds say nothing about the flight itself
+NOT_TROUBLE = {"LOST_CONTACT", "CONTACT_RESTORED", "POSITION_JUMP", "GPS_DEGRADED", "GPS_SPOOFING", "MASS_SILENCE", "DIVERSION"}
+FLEW_BACK_NM = 50  # ... nor had it flown back this far toward where it came from
 LANDED_LOW_ALT = 5000  # ... or last heard descending below this near its own destination (was_landing)
 AMM_LOCAL_NM, AMM_LOCAL_S = 40, 1200  # around_amman: within 40 nm of Amman for 20 min
 HOLDING_LOCAL_ALT = 10000  # circling lower with no route is training, not holding (check_holding)
@@ -186,7 +189,7 @@ HOLDING_LANDING_ALT = 3000  # circling that reaches its period descending below 
 STATE_FIELDS = ("callsign", "reg", "actype", "category", "military", "last_msg", "followed", "follow_why", "was_airborne",
                 "max_dist", "max_alt", "alerted", "squawk", "status_at", "status_seen", "hot_until", "israeli", "route_dir",
                 "leg_start", "amm_dep", "takeoff", "left_at", "takeoff_pos", "climb_peak",
-                "flown_cs", "feed", "left_home", "rose_home", "orig_first", "orig_max", "orig_left", "came_from", "sent",
+                "flown_cs", "elsewhere_at", "feed", "left_home", "rose_home", "orig_first", "orig_max", "orig_left", "came_from", "sent",
                 "stop_wait")
 TG_RETRY_S = 3  # a Telegram message that failed to connect is sent once more after this
 LEG_OVER_S = 1800  # a board departure heard far away this long after it should have landed: another leg (leg_over)
@@ -517,8 +520,8 @@ def external_links(t: "Track", when: float, viewer: str = "", kind: str = "") ->
         if t.sched:  # the page then shows the board's data too
             q.update(f=t.sched.flight, d=t.sched.direction[0])
         q["t"] = int(when)  # the page shows the flight of this moment: live, or its replay once it ended
-        shown = sorted([(k, x) for k, x in t.sent if when - x <= MAP_ALERTS_S], key=lambda a: a[1]) + (
-            [(kind, when)] if kind else [])
+        shown = sorted([(t.shown_kind(k, x), x) for k, x in t.sent if when - x <= MAP_ALERTS_S], key=lambda a: a[1]) + (
+            [(t.shown_kind(kind, when), when)] if kind else [])
         if shown:  # this alert and the flight's earlier ones, drawn on the map
             q["a"] = map_alerts(shown[-MAP_ALERTS:], when)
         links["map"] = viewer + "?" + urlencode(q, safe="~")
@@ -908,6 +911,7 @@ class Track:
     amm_near: float = 0.0    # data time since which it has stayed within AMM_LOCAL_NM of Amman
     takeoff: float = 0.0     # data time of its take-off (left the ground, or first heard climbing low)
     left_at: float = 0.0     # the same, kept on the ground until the leg ends (beyond_leg)
+    elsewhere_at: float = 0.0  # data time of its DIVERSION worded as a landing elsewhere (landing_words)
     stop_wait: tuple | None = None  # (its board time, ICAO, lat, lon, landed): an arrival on the ground on its way early
     turn_held: tuple | None = None  # (report before, turn report, message, bank): a SHARP_TURN waiting (settle_turn)
     turn_glitch: float = 0.0  # data time of the report that showed a held SHARP_TURN was a glitch (settle_turn)
@@ -939,6 +943,11 @@ class Track:
     @property
     def large(self) -> bool:
         return self.category in LARGE_CATEGORIES or bool(LARGE_TYPES.fullmatch(self.actype or ""))
+
+    def shown_kind(self, kind: str, at: float) -> str:
+        """The name a sent alert goes by in links and summaries: a DIVERSION worded as a landing elsewhere is not called
+        one, nor the one before it (silent coming down, then on the ground): trouble after it would have ended the words."""
+        return "LANDED_ELSEWHERE" if kind == "DIVERSION" and at <= self.elsewhere_at else kind
 
     def position_only(self, span: float = 600) -> bool:
         """No speed nor track of its own for `span` s: positions only (MLAT, ground receivers' timing; no
@@ -1259,6 +1268,10 @@ class Announcer:
 
     def headline(self, rec: dict) -> tuple[str, str]:
         kind, msg = rec["kind"], rec["message"]
+        words = rec.get("landing")
+        if words:
+            verb = "Landed" if words["landed"] else "Probably landing"
+            return "\U0001f6ec", f"{verb} {'at ' + words['at'] if words['at'] else 'elsewhere'}; listed for {words['listed']}"
         if kind == "EMERGENCY":
             for code, text in (("7500", "Hijack code 7500"), ("7600", "Radio failure code 7600"),
                                ("7700", "Emergency code 7700")):
@@ -1280,7 +1293,8 @@ class Announcer:
             ident += f" ({extra})" if extra else ""
             ident += f" {rec['route_text']}" if rec.get("route_text") else ", route unknown"
         alt = rec.get("alt")
-        level = ("on the ground" if alt == 0 and rec["kind"] in ("DIVERSION", "RETURNED") else
+        level = ("" if (rec.get("landing") or {}).get("landed") else  # (the headline says so)
+                 "on the ground" if alt == 0 and rec["kind"] in ("DIVERSION", "RETURNED") else
                  f"FL{alt // 100:03d}" if isinstance(alt, int) and alt >= 10000 else
                  f"{alt} ft" if isinstance(alt, int) else "")
         where = f"{rec['dist_nm']:.0f} nm {compass(rec.get('bearing', 0))} of {a.airport}"
@@ -1307,6 +1321,7 @@ class Announcer:
         return segments
 
     NAMES = {"EMERGENCY": "emergency", "LOST_CONTACT": "lost contact", "DIVERSION": "diversion",
+             "LANDED_ELSEWHERE": "landed elsewhere",
              "TOWARD_ISRAEL": "turn toward Israel", "OFF_COURSE": "off course", "TURNING_BACK": "turning back",
              "VERTICAL_RATE": "steep climb/descent", "SHARP_TURN": "sharp turn",
              "COURSE_CHANGE": "course reversal", "HOLDING": "long holding", "POSITION_JUMP": "position jump",
@@ -1328,7 +1343,10 @@ class Announcer:
     def detail(self, rec: dict) -> str:
         """The facts the headline and position don't already say, compactly."""
         kind, msg = rec["kind"], re.sub(r" \[(also|skydiving pattern|from the feed's recent trace|military aircraft|light / private|MLAT position|lifeguard status)[^\]]*\]", "", rec["message"])
-        if kind in self.DETAILS:
+        words = rec.get("landing")
+        if words:
+            out = f"{words['nm']:.0f} nm from {words['listed']}" if words.get("nm") else ""
+        elif kind in self.DETAILS:
             m = re.search(self.DETAILS[kind][0], msg)
             out = self.DETAILS[kind][1].format(*m.groups()) if m else msg
         elif kind == "CONTACT_RESTORED" or (kind == "EMERGENCY" and "squawk" in msg):
@@ -1558,7 +1576,8 @@ class Notifier:
         post = self.announcer.announce(rec)
         if rec["kind"] != "GPS_SPOOFING" and self.telegram_wanted(rec):   # the board's warnings: what Telegram gets, per flight
             t =datetime.fromisoformat(rec["time"].replace("Z", "+00:00")).timestamp()
-            self.board_alerts.append([rec["hex"], rec.get("flight") or "", (rec.get("callsign") or "").strip(), rec["kind"], round(t)])
+            self.board_alerts.append([rec["hex"], rec.get("flight") or "", (rec.get("callsign") or "").strip(),
+                                      "LANDED_ELSEWHERE" if rec.get("landing") else rec["kind"], round(t)])
             del self.board_alerts[:-200]
         if self.bluesky.wanted(rec, post):
             self.bluesky.enqueue(post)
@@ -3364,7 +3383,8 @@ class Monitor:
             else:
                 level = f"FL{s.alt // 100:03d}" if (s.alt or 0) >= 10000 else f"{s.alt} ft"
                 outcome = f"flying at {level} {hm(s.t)}, {self.dist(s):.0f} nm from {self.args.airport}"
-            names = ", ".join(f"{Announcer.NAMES.get(k, k.lower())} {hm(x)}" for k, x in sent)
+            named = [(t.shown_kind(k, x), x) for k, x in sent]
+            names = ", ".join(f"{Announcer.NAMES.get(k, k.lower())} {hm(x)}" for k, x in named)
             links = external_links(t, s.t, self.args.viewer_url)
             ident = self.flight_number(t) or t.callsign or hexid.upper()
             route = self.route_text(t, *self.classify(t))
@@ -3378,7 +3398,7 @@ class Monitor:
             if self.args.telegram_images:
                 when = datetime.fromtimestamp(s.t, tz)
                 image = {"hex": hexid, "t": sent[-1][1] if sent else th["t"],
-                         "alerts": [(Announcer.NAMES.get(k.split(":")[0], k.lower()), x) for k, x in sent],
+                         "alerts": [(Announcer.NAMES.get(k.split(":")[0], k.lower()), x) for k, x in named],
                          "title": f"{ident}  {route}" if route else ident,
                          "sub": " \u00b7 ".join(x for x in (self.airline_name(t), " ".join(y for y in (t.actype, t.reg) if y),
                                                             f"{when.day} {when:%b %Y}", outcome) if x)}
@@ -3552,7 +3572,7 @@ class Monitor:
                              "there, not alerted", t.label(), apt, (now - t.last.t) / 60)
                 elif haversine_nm(t.last.lat, t.last.lon, lat, lon) <= DIVERTED_NM:
                     t.followed = True
-                    self.alert(t, "DIVERSION", f"{self.args.airport} arrival on the ground {self.dist(t.last):.0f} "
+                    self.diversion(t, "ARR", f"{self.args.airport} arrival on the ground {self.dist(t.last):.0f} "
                                f"nm away at {apt} since {time.strftime('%H:%M', time.gmtime(landed))}"
                                f"Z, still there at its scheduled {t.sched.when if t.sched else 'time'}")
 
@@ -3578,7 +3598,7 @@ class Monitor:
                 return
             place = self.landing_place(t, d)
             if place is not None:
-                self.alert(t, "DIVERSION", f"{self.args.airport} arrival on the ground "
+                self.diversion(t, "ARR", f"{self.args.airport} arrival on the ground "
                            f"{d:.0f} nm away at {s.lat:.4f},{s.lon:.4f}{place}")
         elif kind == "DEP" and d > 15:
             # a departure landing short of its destination: LY357 (TLV -> FRA, 7700) landed at Belgrade, and 14 of
@@ -3595,7 +3615,7 @@ class Monitor:
                     log.info("%s on the ground %.0f nm from %s, long after that leg should have ended: another leg on "
                              "its callsign, not a diversion", t.label(), haversine_nm(s.lat, s.lon, dest[1], dest[2]), dest[0])
                 elif place is not None:
-                    self.alert(t, "DIVERSION", f"{self.args.airport} departure bound for {dest[0]} on the ground "
+                    self.diversion(t, "DEP", f"{self.args.airport} departure bound for {dest[0]} on the ground "
                                f"{haversine_nm(s.lat, s.lon, dest[1], dest[2]):.0f} nm from it at "
                                f"{s.lat:.4f},{s.lon:.4f}{place}")
         elif kind == "DEP" and d < 15 and (t.max_dist > 40 or t.max_alt >= RETURN_MIN_ALT
@@ -3781,6 +3801,55 @@ class Monitor:
             return False
         far = self.other_end(t, "DEP")
         return bool(far) and s.t > t.sched.ts + haversine_nm(self.args.lat, self.args.lon, far[1], far[2]) / STOP_KT * 3600 + LEG_OVER_S
+
+    def diversion(self, t: Track, kind: str, msg: str, landed: bool = True) -> bool:
+        """A DIVERSION, worded as a plain fact when nothing else was wrong with the flight (`landing_words`)."""
+        words, before = self.landing_words(t, kind, landed), t.elsewhere_at
+        t.elsewhere_at = t.last.t if words else before
+        sent = self.alert(t, "DIVERSION", msg, fields={"landing": words} if words else None)
+        if not sent:
+            t.elsewhere_at = before
+        return sent
+
+    def landing_words(self, t: Track, kind: str, landed: bool) -> dict | None:
+        """{landed, at, listed, nm} when the flight landed away from where it is listed and nothing shows trouble: no alert in
+        this leg but those of NOT_TROUBLE, no emergency, not flown FLEW_BACK_NM back toward where it came from. The owner (4
+        Nov 2026): "Landed at Vienna; listed for Larnaca" is what we know; 17 of the 27 DIVERSIONs sent since 18 Oct were stops
+        on a callsign flying on, and "Diversion" claims more than the data says. The kind stays DIVERSION (cooldown, threads,
+        follow-up, files). A turn too routine to alert, or a smaller way back, leaves these words."""
+        s = t.last
+        since = max(t.left_at, s.t - MAP_ALERTS_S)
+        if (self.in_emergency(t) or (t.status_at and s.t - t.status_at <= STATUS_NOTE_S)
+                or any(k.split(":")[0] not in NOT_TROUBLE and at >= since for k, (at, _) in t.alerted.items())):
+            return None
+        far = self.other_end(t, kind)
+        if kind == "DEP":
+            if t.max_dist - self.dist(s) > FLEW_BACK_NM:
+                return None
+            listed, nm = self.city(far[0]) if far else None, haversine_nm(s.lat, s.lon, far[1], far[2]) if far else None
+        else:
+            if not far or t.orig_max - haversine_nm(s.lat, s.lon, far[1], far[2]) > FLEW_BACK_NM:
+                return None
+            listed, nm = self.city(self.args.icao, self.args.airport), None
+        if not listed:
+            return None
+        at = None
+        field = self.standing.airfield_near(s.lat, s.lon) if self.standing and landed else None
+        if field and field[1] <= LANDING_AIRPORT_NM:  # (not when only coming down: the nearest of ~35,000 may be an airstrip)
+            try:
+                self.standing.airport(field[0])  # (its file, for the city: a local checkout, as `field` says, so no request)
+            except requests.RequestException:
+                pass
+            at = self.city(field[0])
+        else:
+            apt, ad = nearest_airport(s.lat, s.lon, exclude=(self.args.airport,))
+            at = apt if ad <= (LANDING_AIRPORT_NM if landed else 30) else None
+        return {"landed": landed, "at": at, "listed": listed, "nm": nm}
+
+    def city(self, icao: str, default: str = "") -> str:
+        """An airport's city (a file already loaded), else `default` or the code."""
+        info = self.standing.airport_info(icao) if self.standing else None
+        return (info[1] or info[0]) if info and (info[1] or info[0]) else (default or icao)
 
     def beyond_leg(self, t: Track, s: Sample, dest: tuple) -> bool:
         """A departure on the ground more than AWAY_CLIMB_NM from its destination, after that leg should have ended (its
@@ -4105,9 +4174,9 @@ class Monitor:
                                  t.label(), s.lat, s.lon, fake)
                         continue
                     near = f", {ad:.0f} nm from {apt}" if ad <= 30 else ""
-                    self.alert(t, "DIVERSION", f"{a.airport} arrival went silent descending through "
+                    self.diversion(t, "ARR", f"{a.airport} arrival went silent descending through "
                                f"{s.alt} ft, {d:.0f} nm from {a.airport} at {s.lat:.4f},{s.lon:.4f}"
-                               f"{near} - probably landing {'at ' + apt if near else 'elsewhere'}")
+                               f"{near} - probably landing {'at ' + apt if near else 'elsewhere'}", landed=False)
                 continue
             if remote:
                 if not t.followed:
@@ -4163,8 +4232,8 @@ class Monitor:
                              "taken as a landing", t.label(), silent, where, ad, apt)
                 elif kind == "ARR":  # a TLV arrival descending into another airport
                     t.lost_alerted = True
-                    self.alert(t, "DIVERSION", f"{a.airport} arrival went silent {silent:.0f}s, "
-                               f"{where}, {ad:.0f} nm from {apt} - probably landing at {apt}")
+                    self.diversion(t, "ARR", f"{a.airport} arrival went silent {silent:.0f}s, "
+                                   f"{where}, {ad:.0f} nm from {apt} - probably landing at {apt}", landed=False)
                 else:
                     log.info("%s silent %.0fs descending near %s - probably landing there",
                              t.label(), silent, apt)
@@ -4443,10 +4512,10 @@ class Monitor:
         """Alerted within --hot-minutes (data time): followed every cycle, every anomaly reported."""
         return bool(t.last) and t.last.t < t.hot_until
 
-    def alert(self, t: Track, kind: str, msg: str, key: str | None = None,
-              severity: float = 0, force: bool = False, sample: Sample | None = None) -> bool:
+    def alert(self, t: Track, kind: str, msg: str, key: str | None = None, severity: float = 0, force: bool = False,
+              sample: Sample | None = None, fields: dict | None = None) -> bool:
         """Cooldown per key; a clearly worse reading (1.5x severity) or force bypasses it.
-        `sample`: where / when, if not the track's last (trusted) report (a spoofed report)."""
+        `sample`: where / when, if not the track's last (trusted) report (a spoofed report). `fields`: more of the record."""
         a = self.args
         s = sample or t.last
         if s is None:
@@ -4523,6 +4592,7 @@ class Monitor:
             "gps": t.gps if t.gps and now - t.gps_last <= 1800 else None,  # its GPS-degraded episode
             "skydive": t.skydive if t.skydive and now - t.skydive["t"] <= 1800 else None,
             "from_trace": self.from_trace,
+            **(fields or {}),
         })
         t.sent.append((kind, now))
         return True

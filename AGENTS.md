@@ -321,6 +321,13 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   A new callsign during the wait ends it (`new_callsign`; 2 Nov 2026 nightly review): IB1873 became IBS18AB on the ground at
   Athens, a new leg with no board row, and the old row's deadline still gave DIVERSION "too late to land by its scheduled ?", then
   its departure turn (hot) and a follow-up. Cost: a real diversion that takes a new callsign there is not alerted.
+  **The words** (`landing_words`, `Monitor.diversion`; 4 Nov 2026, the owner: "Landed at Vienna; listed for Larnaca" looks good, presuming no sharp
+  turns, going back 180 deg etc.): with no alert in this leg but `NOT_TROUBLE` (coverage and GPS), no emergency, no lone status report, and not
+  `FLEW_BACK_NM` (50) back toward where it came from (`max_dist`, `orig_max`), the post reads "Landed at <city>; listed for <city>" (silent coming down:
+  "Probably landing at / elsewhere; listed for ..."). 17 of the 27 DIVERSIONs sent 18 Oct - 4 Nov were stops on a callsign flying on. The kind stays
+  DIVERSION (cooldown, threads, follow-up, files, log; record `landing`), but links and summaries call it `LANDED_ELSEWHERE` (`Track.shown_kind`:
+  the map's `a=`, the follow-up, the picture, the board's warnings). Cost: a real diversion with nothing else to show reads more mildly
+  (LY353 at Athens), and a turn back near its origin that was too routine to alert does not change the words.
   A landing elsewhere must be believable (13 Oct 2026; all 4 DIVERSIONs of the run of 11-12 Oct were
   arrivals on approach to TLV with spoofed GPS - ETD3QF, AIZ282, ISR972, ELY5462): "on the ground" within
   `LANDING_AIRPORT_NM` (5) of an airport of the local `standing-data/` checkout (`StandingData.airfield_near`;
