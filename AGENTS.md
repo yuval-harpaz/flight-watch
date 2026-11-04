@@ -196,6 +196,8 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   `/v2/*` (api.adsb.lol) and `/data/traces/*` (adsb.lol) on the same origin, through
   `flight_watch.Http` (budget, 429 cooldown) with a short cache. The pages use the relay when
   served from localhost, otherwise try adsb.lol directly (`?feed=` overrides).
+- A cancelled row is its own flight, not its slot's (`Schedule.load`, `FB.flights`; 4 Nov 2026): U8 103 (cancelled) and BZ112, both
+  TLV -> LCA at 10:30, were read by the first row, and BZ112 had no board row all day. 3 of 1,184 slots on that board mix the two.
 - Flight-board quirks: codeshare rows (e.g. DAL7441 on an El Al flight) never transmit, so
   search one callsign per physical flight. Departures stay "DEPARTED" long after landing.
   The board has >3000 rows, so paginate.

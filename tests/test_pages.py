@@ -87,6 +87,18 @@ class BoardLogicMatchesPython(unittest.TestCase):
         self.assertEqual(js["D|2026-10-08T10:00:00|EWR"]["flight"], "LY25")
         self.assertEqual(js["A|2026-10-08T05:50:00|AUH"]["codeshares"], ["LY9604"])
 
+    def test_cancelled_row_is_its_own_flight_as_in_python(self):
+        """U8 103 (cancelled) and BZ112, TLV -> LCA at 10:30 on 4 Nov 2026: the page lists both, BZ112 not as cancelled."""
+        rows = [row("U8", "103", "D", "2026-10-08T10:30:00", "LCA", "CANCELED"),
+                row("BZ", "112", "D", "2026-10-08T10:30:00", "LCA", "DEPARTED")]
+        js = {f["flight"]: f for f in node("FB.flights(DATA)", rows)}
+        self.assertEqual(js["BZ112"]["status"], "DEPARTED")
+        self.assertEqual(js["BZ112"]["codeshares"], [])
+        self.assertEqual(js["U8103"]["status"], "CANCELED")
+        sched = fw.Schedule(None, dict(fw.AIRLINE_ICAO), 1e9, 24 * 30)
+        sched.load(rows, datetime(2026, 10, 8, 9, 0, tzinfo=sched.tz))
+        self.assertEqual([sf.flight for sf in sched.flights], ["BZ112"])
+
     def test_trace_points_keep_the_callsign_sent(self):
         d = {"timestamp": 1000, "trace": [[0, 32.0, 35.0, 30000, 450, 90, 0, 0, {"flight": "ENT368  "}],
                                           [60, 32.1, 35.1, 29000, 440, 90, 0, -900, None],

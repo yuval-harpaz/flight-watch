@@ -308,6 +308,19 @@ class ScheduleTests(unittest.TestCase):
         mon.schedule.load(board_rows(), self.NOW)
         return mon, feed, clock, alerts
 
+    def test_cancelled_row_does_not_hide_its_neighbour(self):
+        """U8 103 (cancelled) and BZ112, both TLV -> LCA at 10:30 on 4 Nov 2026: BZ112 had no board row, whichever came first."""
+        def row(op, num, status):
+            return {"CHOPER": op, "CHFLTN": num, "CHAORD": "D", "CHSTOL": "2026-10-05T10:30:00", "CHPTOL": "2026-10-05T10:30:00",
+                    "CHLOC1": "LCA", "CHLOC1D": "LARNACA", "CHRMINE": status}
+        rows = [row("U8", "103", "CANCELED"), row("BZ", "112", "DEPARTED")]
+        for records in (rows, rows[::-1]):
+            mon, *_ = make(with_schedule=True)
+            mon.schedule.load(records, self.NOW)
+            self.assertEqual(mon.schedule.by_callsign["BBG112"].flight, "BZ112")
+            self.assertEqual(mon.schedule.by_callsign["BBG112"].codeshares, ())
+            self.assertNotIn("CYF103", mon.schedule.by_callsign)
+
     def test_codeshares_collapse_to_operating_flight(self):
         mon, *_ = self.load()
         sf = mon.schedule.by_callsign["DAL7441"]

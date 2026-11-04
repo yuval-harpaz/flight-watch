@@ -129,7 +129,8 @@ FB.flights = function (records, airlineMap) {
   const op = r => String(r.CHOPER || "").trim().toUpperCase();
   const num = r => String(r.CHFLTN || "").trim().replace(/^0+/, "");
   for (const r of records) {
-    const slot = [String(r.CHAORD || "").toUpperCase().slice(0, 1), r.CHSTOL, r.CHLOC1].join("|");
+    const slot = [String(r.CHAORD || "").toUpperCase().slice(0, 1), r.CHSTOL, r.CHLOC1].join("|") +
+      (/CANCEL/i.test(String(r.CHRMINE || "")) ? "|cancelled" : "");  // (not its neighbour's flight: U8 103 and BZ112, 4 Nov 2026)
     let n = 1, key = slot;
     while (slots.has(key) && slots.get(key).some(x => op(x) === op(r) && num(x) !== num(r))) key = slot + "|" + ++n;
     if (!slots.has(key)) slots.set(key, []);

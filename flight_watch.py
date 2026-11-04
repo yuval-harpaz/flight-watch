@@ -1093,9 +1093,12 @@ class Schedule:
         # The board has one row per marketing flight number. Rows sharing direction, scheduled
         # time and other airport are one physical flight (e.g. LY25 / DL7441) - unless an airline
         # is there with two numbers: ENT238 and ENT368 from KTW, both due 04:00 on 14 Oct 2026, were two aircraft.
+        # A cancelled row is not its neighbour's flight: U8 103 (cancelled) and BZ112, both TLV -> LCA at 10:30 on 4 Nov
+        # 2026, were one slot read by its first row, so BZ112 had no board row all day.
         slots: dict[tuple, list[list[dict]]] = {}
         for r in records:
-            key = (str(r.get("CHAORD", "")).upper()[:1], r.get("CHSTOL"), r.get("CHLOC1"))
+            key = (str(r.get("CHAORD", "")).upper()[:1], r.get("CHSTOL"), r.get("CHLOC1"),
+                   "CANCEL" in str(r.get("CHRMINE") or "").upper())
             op = str(r.get("CHOPER") or "").strip().upper()
             num = str(r.get("CHFLTN") or "").strip().lstrip("0")
             groups = slots.setdefault(key, [])
