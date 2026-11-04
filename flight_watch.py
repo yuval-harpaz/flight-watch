@@ -176,6 +176,7 @@ EARLY_DROP, EARLY_MIN = 1000, 10
 # in between: 18 Oct 2026, ELY353 (TLV -> MUC) unheard 100 min, then 70 nm on climbing out of Munich, and
 # HYS236 (TLV -> OTP) unheard 3.7 h, then 145 nm on, back toward TLV: both "TLV departure heading back".
 MISSED_LANDING_S, MISSED_LANDING_KT = 2400, 150
+LANDED_LOW_ALT = 5000  # ... or last heard descending below this near its own destination (was_landing)
 AMM_LOCAL_NM, AMM_LOCAL_S = 40, 1200  # around_amman: within 40 nm of Amman for 20 min
 HOLDING_LOCAL_ALT = 10000  # circling lower with no route is training, not holding (check_holding)
 HOLDING_LANDING_ALT = 3000  # circling that reaches its period descending below this is a landing approach
@@ -2317,6 +2318,15 @@ class Monitor:
         if not t.stop_wait:  # (an early stop: still followed, to see it leave - check_stops)
             self.unfollow(t, "landed")
 
+    def was_landing(self, t: Track, p: Sample) -> bool:
+        """Our departure last heard (`p`) descending low near its own destination. BBG112 TLV -> LCA (4 Nov 2026): last heard
+        at 1,425 ft 7 nm from Larnaca, heard again 2.4 h later at FL380 flying on to Vienna on the same callsign. With the
+        monitor down for part of that it had averaged 156 kt, over MISSED_LANDING_KT, and Vienna was a DIVERSION."""
+        if (p.alt or 0) >= LANDED_LOW_ALT or (p.vrate or 0) > 0 or self.classify(t)[0] != "DEP":
+            return False
+        dest = self.destination(t)
+        return bool(dest) and haversine_nm(p.lat, p.lon, dest[1], dest[2]) <= DIVERTED_NM
+
     def light(self, t: Track, route: str | None = None) -> bool:
         """Light / private aircraft: not military (their own class), not an airliner's type, not on the board, no route
         data - bizjets, survey and training flights, air taxis, jump planes, whatever their callsign looks like (BDK12
@@ -2400,8 +2410,8 @@ class Monitor:
         d = self.dist(s)
         if prev is not None and not prev.on_ground and s.t - prev.t >= MISSED_LANDING_S:
             moved = haversine_nm(prev.lat, prev.lon, s.lat, s.lon)
-            if moved / ((s.t - prev.t) / 3600) < MISSED_LANDING_KT:
-                log.info("%s heard again after %.0f min only %.0f nm on: it landed in between - a new leg",
+            if moved / ((s.t - prev.t) / 3600) < MISSED_LANDING_KT or self.was_landing(t, prev):
+                log.info("%s heard again after %.0f min, %.0f nm on: it landed in between - a new leg",
                          t.label(), (s.t - prev.t) / 60, moved)
                 self.end_leg(t, min(self.dist(prev), d), unseen=True)
         kind, route = self.classify(t)

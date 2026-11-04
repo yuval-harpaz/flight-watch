@@ -257,7 +257,11 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   A landing we did not see ends it too (`MISSED_LANDING_S` / `_KT`: heard again after 40 min having averaged
   < 150 kt; 18 Oct 2026, API refusals for hours: ELY353 TLV -> MUC unheard 100 min, then climbing out of Munich
   still as ELY353, and HYS236 TLV -> OTP unheard 3.7 h, back on its way to TLV - both "TLV departure heading
-  back"). `Monitor.end_leg`: a departure landing away from TLV, or an arrival at it, has flown that callsign
+  back"). So does a departure last heard descending below `LANDED_LOW_ALT` (5,000 ft) within `DIVERTED_NM` of its own destination and
+  heard again after those 40 min at any speed (`was_landing`; 4 Nov 2026): BBG112, TLV -> LCA on the board, last heard at 1,425 ft 7 nm from
+  Larnaca and flying on to Vienna on the same callsign. The monitor was down 12:43 - 14:18 IST, so it was next heard at FL380, 156 kt on
+  average: a DIVERSION at Vienna, "1,099 nm from" LCLK. Cost: a go-around unheard for 40 min and landing elsewhere is not a DIVERSION.
+  `Monitor.end_leg`: a departure landing away from TLV, or an arrival at it, has flown that callsign
   (`Track.flown_cs`): neither the board row nor the route data's direction applies to it again until the
   callsign changes. Such a track is kept 3 h after it was last heard, as a followed one (others: 30 min; 28 Oct 2026
   nightly review): KL462 TLV -> OTP landed at Bucharest, unfollowed and unheard on the ground, was dropped with its

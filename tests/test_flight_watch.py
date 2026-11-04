@@ -2619,6 +2619,55 @@ class SecondFeedTests(unittest.TestCase):
 
 
 
+class FlownOnTests(unittest.TestCase):
+    """BBG112 (5B-DEH), TLV -> LCA on the board, on 4 Nov 2026 flew on from Larnaca to Vienna on the same callsign:
+    "TLV departure bound for LCLK on the ground 1099 nm from it"."""
+    TLV = (32.0114, 34.8867)
+    LCA = (34.8751, 33.6249)
+    VIE = (48.1103, 16.5697)
+    IDENT = dict(flight="BBG112", r="5B-DEH", t="A320")
+    HEAD = "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+
+    def setup(self, route="LLBG-LCLK"):
+        mon, feed, clock, alerts = with_routes()
+        feed.files.update({"airports/schema-01/L/LC.csv": self.HEAD + "LCLK,Larnaca,LCLK,LCA,Larnaca,CY,34.8751,33.6249,8\n",
+                           "airports/schema-01/L/LO.csv": self.HEAD + "LOWW,Vienna,LOWW,VIE,Vienna,AT,48.1103,16.5697,600\n"})
+        mon.routes["BBG112"] = (clock(), route)
+        return mon, feed, clock, alerts
+
+    def leave(self, mon, feed, clock, **extra):
+        ident = {**self.IDENT, **extra}
+        fly(mon, feed, clock, "4c80b8", [dict(lat=self.TLV[0], lon=self.TLV[1], alt_baro="ground", gs=5, track=270)] * 3, **ident)
+        fly(mon, feed, clock, "4c80b8", path(*self.TLV, [300] * 6, [1500 + 800 * i for i in range(6)], gs=180), **ident)
+
+    def to_vienna(self, mon, feed, clock, **extra):
+        """Heard again at cruise off Rhodes, then down and on the ground at Vienna."""
+        ident = {**self.IDENT, **extra}
+        fly(mon, feed, clock, "4c80b8", path(36.71, 26.41, [320] * 6, [38000] * 6, gs=420), **ident)
+        clock.t += 7200
+        fly(mon, feed, clock, "4c80b8", path(48.0, 16.45, [40] * 6, [3000 - 400 * i for i in range(6)], gs=150), **ident)
+        fly(mon, feed, clock, "4c80b8", [dict(lat=self.VIE[0], lon=self.VIE[1], alt_baro="ground", gs=12, track=120)] * 4, **ident)
+
+    def test_last_heard_landing_at_its_destination_ends_the_leg(self):
+        """156 kt on average over the gap: not "it landed" by speed alone, as the monitor was down for part of it."""
+        mon, feed, clock, alerts = self.setup()
+        self.leave(mon, feed, clock)
+        fly(mon, feed, clock, "4c80b8", path(34.94, 33.75, [240] * 6, [3000 - 300 * i for i in range(6)], gs=150), **self.IDENT)
+        clock.t += 8640
+        self.to_vienna(mon, feed, clock)
+        self.assertNotIn("DIVERSION", kinds(alerts))
+
+    def test_go_around_heard_soon_is_still_our_leg(self):
+        """Low near its destination, heard again 10 min later, landing elsewhere: a diversion."""
+        mon, feed, clock, alerts = self.setup()
+        self.leave(mon, feed, clock)
+        fly(mon, feed, clock, "4c80b8", path(34.94, 33.75, [240] * 6, [3000 - 300 * i for i in range(6)], gs=150), **self.IDENT)
+        clock.t += 600
+        fly(mon, feed, clock, "4c80b8", path(34.75, 32.60, [260] * 6, [3000 - 400 * i for i in range(6)], gs=150), **self.IDENT)
+        fly(mon, feed, clock, "4c80b8", [dict(lat=34.7180, lon=32.4857, alt_baro="ground", gs=12, track=120)] * 4, **self.IDENT)
+        self.assertIn("DIVERSION", kinds(alerts))
+
+
 class SquawkCaseTests(unittest.TestCase):
     """Misses found by replaying the AeroSignals squawk cases (tools/squawk_cases.py, 19 Oct 2026)."""
     TLV = (32.0114, 34.8867)
