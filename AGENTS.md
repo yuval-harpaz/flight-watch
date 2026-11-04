@@ -498,6 +498,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   of its route (> 90 deg from the origin too, opening): the route is another flight's. RJA6501 (E290, OJAQ-LOWL, learned
   "bound for OJAQ") flew SE into Saudi Arabia at FL350, OFF_COURSE on Telegram (29 Oct 2026; the owner's choice). A turn
   back heads for the origin (FZ1073) and still alerts.
+  Nor an arrival below `STOP_APPROACH_ALT` (10,000 ft) within `STOP_APPROACH_NM` (30) of an airfield, on its way and in time for a stop
+  there (`approaching_stop`, `stop_in_time`, as `early_stop`; not when hot; 4 Nov 2026 nightly review): IB1873 MAD -> TLV 15 nm from Athens
+  at 5,275 ft heading 337 deg, "637 nm out and opening", 7 min before its nightly stop, on Telegram. Needs the local checkout's airports.
+  Cost: a real diversion low on the way shows as a DIVERSION at its board time (`check_stops`), not as OFF_COURSE first.
   Neither within `--off-course-min-dist` of the far end (route data: an arrival's origin, a departure's
   destination): climbing out "away from" the destination and approach turns "back" (squawk replay: TO4755 out of
   Barcelona, AA2045 on approach to SFO "heading back to PHL, 2175 nm out").

@@ -2983,6 +2983,24 @@ class FarEndTests(unittest.TestCase):
             got[case] = (first, "DIVERSION" in kinds(alerts, "48418c"))
         self.assertEqual(got, {"flies on": (False, False), "stays": (False, True), "due soon": (True, True)})
 
+    def test_approach_to_a_stop_on_its_way_is_not_off_course(self):
+        """IB1873 MAD -> TLV, 15 nm from Athens at 5,275 ft heading 337 deg: OFF_COURSE "637 nm out and opening", 7 min
+        before its nightly stop (3 Nov 2026). Past its time for a stop, higher, or with no airfield near: alerted."""
+        got = {}
+        for case, due, alt, field in (("stop", 5, 5300, ("LROP", 15.0)), ("too late", 1, 5300, ("LROP", 15.0)),
+                                      ("high", 5, 12000, ("LROP", 15.0)), ("no field", 5, 5300, ("LROP", 80.0))):
+            mon, feed, clock, alerts = self.setup([board_row("KL", "463", "A", local_time(Clock(), due), "AMS")])
+            feed.files.update(self.KLM_FILES)
+            feed.files["routes/schema-01/K/KLM-all.csv"] = ("Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                                           "KLM463,KLM,463,KLM,EHAM-LLBG\n")
+            for icao in ("EHAM", "LROP"):
+                mon.standing.airport(icao)
+            mon.standing.airfield_near = lambda lat, lon, f=field: f
+            fly(mon, feed, clock, "48418c", path(44.0, 27.0, [330] * 30, [alt] * 30, gs=230), local=False,
+                flight="KLM463", r="PH-BXR", t="B739")
+            got[case] = "OFF_COURSE" in kinds(alerts, "48418c")
+        self.assertEqual(got, {"stop": False, "too late": True, "high": True, "no field": True})
+
     def test_a_stop_is_not_called_a_diversion_on_an_old_report(self):
         """IB1873 as IBS18AB: DIVERSION on a report 22 min old, while it had left unheard (3 Nov 2026)."""
         mon, feed, clock, alerts = self.setup([board_row("KL", "463", "A", local_time(Clock(), 4), "AMS")])

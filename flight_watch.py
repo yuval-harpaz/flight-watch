@@ -200,6 +200,7 @@ STATUS_NAMES = {"general": "emergency", "lifeguard": "medical", "minfuel": "mini
                 "unlawful": "unlawful interference", "downed": "downed aircraft"}
 TAG_DETOUR = 1.25  # a board tag stop counts when on the way: origin -> stop -> TLV at most this x the straight line
 STOP_KT, STOP_TURN_S = 420, 1200  # an arrival's time from a stop on its way: block speed, and on the ground there
+STOP_APPROACH_ALT, STOP_APPROACH_NM = 10000, 30  # below this, this near an airfield: on approach to a stop (approaching_stop)
 APPROACH_NM, APPROACH_ALT = 20, 15000  # a descent here, into its own destination, is judged by its altitude history
 STOP_FRESH_S = 300  # "still at its stop" needs a report this recent (s): ground coverage is thin
 DIVERTED_NM = 30  # a departure on the ground this far from its destination landed elsewhere (check_landing)
@@ -3715,13 +3716,25 @@ class Monitor:
         the board and route data do not name (IB1873 MAD -> TLV on the ground at Athens 01:41, landed at TLV 04:16,
         due 04:30; 26 Oct 2026). Waits in `Track.stop_wait` until the board time itself (check_stops): the flight on at
         STOP_KT + STOP_TURN_S was too tight a deadline, IB1873 at Athens on 1-3 Nov 2026 left after it and landed early."""
-        far = self.other_end(t, "ARR")
-        if not (far and t.sched and t.sched.direction == "ARR" and t.sched.ts and self.on_the_way(s, far)):
-            return None
-        if s.t > t.sched.ts - self.dist(s) / STOP_KT * 3600 - STOP_TURN_S:
+        if not self.stop_in_time(t, s):
             return None
         t.stop_wait = (t.sched.ts, self.field_name(s), s.lat, s.lon, s.t)
         return t.stop_wait[1]
+
+    def stop_in_time(self, t: Track, s: Sample) -> bool:
+        """A board arrival at `s`, on its way, early enough to stop here and still land by its board time."""
+        far = self.other_end(t, "ARR")
+        return bool(far and t.sched and t.sched.direction == "ARR" and t.sched.ts and self.on_the_way(s, far)
+                    and s.t <= t.sched.ts - self.dist(s) / STOP_KT * 3600 - STOP_TURN_S)
+
+    def approaching_stop(self, t: Track, s: Sample) -> str | None:
+        """The airfield an arrival is low near, on its way and in time for a stop there (`stop_in_time`): IB1873 MAD ->
+        TLV on its approach to Athens, 15 nm out at 5,275 ft heading 337 deg, was OFF_COURSE "637 nm out and opening",
+        7 min before it landed for its nightly stop (3 Nov 2026). Needs the local checkout's airports."""
+        if (s.alt or 0) >= STOP_APPROACH_ALT or not self.standing or not self.stop_in_time(t, s):
+            return None
+        field = self.standing.airfield_near(s.lat, s.lon)
+        return field[0] if field and field[1] <= STOP_APPROACH_NM else None
 
     def board_stop(self, t: Track, s: Sample, kind: str) -> str | None:
         """The board's tag stop (`Schedule.tag_stops`) within DIVERTED_NM, on the way: at most TAG_DETOUR
@@ -3789,6 +3802,10 @@ class Monitor:
         devs = [heading_diff(x.track, bearing(x.lat, x.lon, a.lat, a.lon)) for x in window]
         was = haversine_nm(a.lat, a.lon, old.lat, old.lon)
         if kind == "ARR" and min(devs) >= a.off_course and d > was + 3:
+            field = self.approaching_stop(t, s) if not self.hot(t) else None
+            if field:
+                self.note(t, "route", f"low near {field} on its way, in time for a stop there: not off course", every=1800)
+                return
             self.alert(t, "OFF_COURSE", f"{a.airport} arrival heading {s.track:.0f} deg, "
                        f"{devs[-1]:.0f} deg away from {a.airport} for {s.t - old.t:.0f}s, "
                        f"{d:.0f} nm out and opening ({was:.0f} -> {d:.0f} nm)")
