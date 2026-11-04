@@ -67,7 +67,7 @@ PY="$ROOT/.venv/bin/python"
 cd "$WT" || exit 1
 timeout 50m claude -p "$PROMPT" ${MODEL:+--model "$MODEL"} --add-dir "$ROOT" --permission-mode acceptEdits \
     --allowedTools Read Edit Write Grep Glob "Bash(git status*)" "Bash(git diff*)" "Bash(git log*)" "Bash(git add*)" \
-        "Bash(git commit*)" "Bash(git checkout -- *)" "Bash($PY *)" "Bash(rm -rf tmp_squawks*)" "Bash(cp -r *)" \
+        "Bash(git commit*)" "Bash(git checkout -- *)" "Bash($PY *)" \
         "Bash(grep *)" "Bash(head *)" "Bash(tail *)" "Bash(sed -n *)" "Bash(wc *)" "Bash(ls *)" \
     --disallowedTools "Bash(git push*)" > "$ROOT/reviews/$D.claude.txt"
 CLAUDE_EXIT=$?

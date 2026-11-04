@@ -25,7 +25,8 @@ import urllib.request
 
 ALLOWED = ("flight_watch.py", "AGENTS.md", "turn_zones.json", "tests/", "docs/")
 ALLOWED_TOOLS = ("tools/",)
-FORBIDDEN = ("tools/nightly.sh", "tools/nightly_prompt.md", "tools/nightly_publish.py", "tools/cors_worker.js")
+FORBIDDEN = ("tools/nightly.sh", "tools/nightly_prompt.md", "tools/nightly_publish.py", "tools/nightly_replay.py",
+             "tools/read_trace.py", "tools/cors_worker.js")
 LOGIC = ("flight_watch.py", "turn_zones.json")
 TEST_TIMEOUT, REPLAY_TIMEOUT = 900, 1800
 

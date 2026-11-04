@@ -43,7 +43,7 @@ the 03:00 UTC restart and unattended review, which ends by implementing its reco
 pushes them to main and restarts the monitor on them (the owner, 3 Nov 2026). Held back, with a message to the owner's private chat (`TELEGRAM_CHAT_ID`, never the channel), when the review writes `HOLD:` in `reviews/<date>.owner` (it
 suspects a new category of issue), or by the script's own checks: tests fail, the tests from before that night's commits fail on the new code, the squawk replay's kinds differ before / after, a commit touches
 a path it may not (this cycle's scripts, the worker, workflows, `monitor.sh`), the owner's unpushed commits on main. `NOTE:` lines (a fix reverted because it would lose an alert) are told too, the rest still goes out; each start logs its code -
-commit, `+changes` when `flight_watch.py` differs from it, the file's sha256 - so the review judges an alert by the code that raised it) are support code,
+commit, `+changes` when `flight_watch.py` differs from it, the file's sha256 - so the review judges an alert by the code that raised it; 4 Nov 2026: the review runs `tools/nightly_replay.py` and `tools/read_trace.py` under its Python permission, as Claude Code refuses `cp` with flags even when allowed and no general `curl` is given it) are support code,
 not part of the monitor.
 `tools/squawk_cases.py` (17 Oct 2026): the owner wanted real emergencies to measure the checks against,
 without keeping our own list. The AeroSignals bot on Bluesky (spotterintel.bsky.social, since 11 Apr 2026,

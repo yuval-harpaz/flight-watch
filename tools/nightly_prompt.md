@@ -11,7 +11,9 @@ checks are as they are; do not undo a choice it records.
 
 1. Judge each Telegram message of the day (what the public saw): **valid** (a real irregularity, or a
    correct sanity alert), **false** (a routine flight we misread - say what misled us), or **unclear**.
-   Use the log lines of that aircraft (grep its hex) and AGENTS.md. Each start in the digest names the code it ran
+   Use the log lines of that aircraft (grep its hex) and AGENTS.md. When the log does not settle it, or before changing a check for it, read
+   the track, as a command of its own: `{ROOT}/.venv/bin/python tools/read_trace.py <hex> --around <UTC YYYY-MM-DDTHH:MM> --minutes 20`.
+   Each start in the digest names the code it ran
    (`code <commit>[+changes] (flight_watch.py <sha256 8>)`): judge an alert by the code that raised it, and do not
    report as new a false alarm that a later commit (`git log`) already fixed. Note also anything alerted that the
    digest shows as noisy (many alerts on one aircraft, a kind suddenly frequent) and monitor health (restarts,
@@ -22,10 +24,8 @@ checks are as they are; do not undo a choice it records.
    the case allows and record its cost. Each fix gets a unit test in tests/ (the scenario that misled us), a line in AGENTS.md (date,
    case, why), and a commit on this branch (`git add <files>`, never `-A`). Before committing run
    `{ROOT}/.venv/bin/python -m unittest discover -s tests` (all must pass) and, when alert logic changed, the squawk
-   replay: `rm -rf tmp_squawks && cp -r {ROOT}/squawks tmp_squawks && {ROOT}/.venv/bin/python
-   tools/squawk_cases.py --out tmp_squawks --standing-data {ROOT}/standing-data --redo --no-fetch && {ROOT}/.venv/bin/python
-   {ROOT}/tools/compare_cases.py {ROOT}/squawks/cases.jsonl tmp_squawks/cases.jsonl`. Do not push: after you end, a script
-   runs its own checks and pushes your commits to main.
+   replay, as a command of its own: `{ROOT}/.venv/bin/python tools/nightly_replay.py --root {ROOT}` (~3 min; exits 1 when a
+   case changed). Do not push: after you end, a script runs its own checks and pushes your commits to main.
 3. Do not commit a change that would make us miss what we caught before: a changed squawk-replay case, an existing test whose
    expected alert had to change, an alert you judged valid (this day's or in earlier `{ROOT}/reviews/*.md`) that it would
    lose, or undoing a choice AGENTS.md records as the owner's. Revert it, keep the issue open marked `[needs owner]` with the
