@@ -83,10 +83,16 @@ def map_of(post: dict) -> str:
     return next((s["url"] for s in post.get("segments", []) if s.get("link") == "Map"), "")
 
 
+def telegram_posts(posts: list[dict]) -> list[dict]:
+    """What Telegram was asked to send: not THREAD_END, the monitor's own record that a thread is closed (`sent` false,
+    no text), which read as "1 refused" and an empty message on 3 Nov 2026."""
+    return [p for p in posts if p.get("kind") != "THREAD_END"]
+
+
 def digest(end: datetime) -> str:
     start = end - timedelta(hours=24)
     alerts = rows("alerts_*.jsonl", start, end)
-    tg = [p for p in rows("posts_telegram_*.jsonl", start, end)]
+    tg = telegram_posts(rows("posts_telegram_*.jsonl", start, end))
     log = log_lines(start, end)
     out = [f"# flight-watch day {il(start)} - {il(end)} Israel ({start:%Y-%m-%dT%H:%MZ} - {end:%H:%MZ})", ""]
 
