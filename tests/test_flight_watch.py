@@ -871,6 +871,10 @@ class FlightImageTests(unittest.TestCase):
         self.assertEqual(len(fi.leg_at(fly_on, 1000)), 4)
         stopped = fly_on[:2] + [(9000.0, 40.0, 0.2, 5000), (9030.0, 40.0, 0.3, 6000)]
         self.assertEqual(len(fi.leg_at(stopped, 1000)), 2)
+        # BDK27, 5 Nov 2026: unheard 15 min between 18,000 and 10,625 ft, 13 nm: no time to land and climb back
+        slow = [(1000.0, 32.46, 33.0, 18000), (1030.0, 32.46, 32.83, 18000), (1909.0, 32.41, 33.09, 10625),
+                (1939.0, 32.41, 33.1, 10625)]
+        self.assertEqual(len(fi.leg_at(slow, 1000)), 4)
 
     def test_full_and_recent_are_one_trace(self):
         traces = {"full": {"timestamp": 1000, "trace": [[0, 40, 3, 30000], [30, None, None, 30000], [60, 40, 3.1, 30000]]},
@@ -3786,8 +3790,24 @@ class TelegramThreadTests(unittest.TestCase):
         self.assertIn("emergency", text)
         self.assertIn("last heard", text)
         url = next(s["url"] for s in ups[0][2] if s.get("link") == "Map of the flight")
-        self.assertIn("a=EMERGENCY~", url)
+        self.assertIn("a=EMERGENCY_7700~", url)
         self.assertIsNone(ups[0][3]["image"])
+
+    def test_follow_up_names_each_squawk(self):
+        """BDK27, 5 Nov 2026: 7700 then 7600, and the update read "emergency 09:23, emergency 09:23"."""
+        mon, feed, clock, alerts = make(["--viewer-url", "https://x/flight_map.html"])
+        ups = []
+        mon.notifier.follow_up = lambda h, when, seg, **kw: ups.append(seg)
+        fly(mon, feed, clock, "4d22a0", path(32.5, 33.0, [90] * 3, [30000] * 3, squawk="7700"), flight="AIZ992")
+        fly(mon, feed, clock, "4d22a0", path(32.5, 33.1, [90] * 3, [30000] * 3, squawk="7600"), flight="AIZ992")
+        self.assertEqual(kinds(alerts), ["EMERGENCY", "EMERGENCY"])
+        self.assertIn("a=EMERGENCY_7700~", alerts[1]["links"]["map"])
+        self.assertIn(".EMERGENCY_7600~0", alerts[1]["links"]["map"])
+        t = mon.tracks["4d22a0"]
+        mon.notifier.tg_threads["4d22a0"] = {"id": 7, "t": t.sent[0][1], "last": t.sent[-1][1], "n": 2}
+        mon.telegram_followups(t.last.t + fw.TG_FOLLOWUP_S + 1)
+        text = "".join(x.get("text") or x["link"] for x in ups[0])
+        self.assertRegex(text, r"Alerts: emergency 7700 \d\d:\d\d, radio failure 7600 \d\d:\d\d\.")
 
     def test_a_flight_still_flying_gets_its_update_at_the_limit(self):
         mon, feed, clock, alerts = make([])
@@ -3830,7 +3850,7 @@ class TelegramThreadTests(unittest.TestCase):
         mon.notifier.tg_threads["4d22a0"] = {"id": 7, "t": at, "last": at, "n": 1}
         mon.telegram_followups(mon.tracks["4d22a0"].last.t + fw.TG_FOLLOWUP_S + 1)
         image = ups[0]["image"]
-        self.assertEqual((image["hex"], image["t"], image["alerts"]), ("4d22a0", at, [("emergency", at)]))
+        self.assertEqual((image["hex"], image["t"], image["alerts"]), ("4d22a0", at, [("emergency 7700", at)]))
         self.assertIn("A320 4X-ABC", image["sub"])
         self.assertFalse(ups[0]["image_only"])
 

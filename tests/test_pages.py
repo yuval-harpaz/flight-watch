@@ -158,6 +158,12 @@ class BoardLogicMatchesPython(unittest.TestCase):
         pts = out + back + ground
         legs = node("FB.legs(DATA).map(l => l.length)", pts)
         self.assertEqual(legs, [6, 6])                       # split by the unseen stop; ground ends the arrival
+        # BDK27, 5 Nov 2026: unheard 15 min between 18,000 and 10,625 ft (13 nm), 16 min at 7,000 ft: no time to land
+        slow = [{"t": t, "lat": 32.46, "lon": 33.0, "alt": 18000}, {"t": t + 30, "lat": 32.46, "lon": 32.83, "alt": 18000},
+                {"t": t + 909, "lat": 32.41, "lon": 33.09, "alt": 10625}, {"t": t + 939, "lat": 32.48, "lon": 33.16, "alt": 7000},
+                {"t": t + 1891, "lat": 32.36, "lon": 33.28, "alt": 7025}, {"t": t + 1921, "lat": 32.36, "lon": 33.29, "alt": 7025}]
+        self.assertEqual(node("FB.legs(DATA).map(l => l.length)", slow), [6])
+        self.assertEqual(node("FB.currentLeg(DATA).length", slow), 6)
         seen = t + 306 * 60                                  # the callsign last heard taxiing in
         arr = node(f"FB.legAt(DATA, {seen}, 'ARR')[0].t", pts)
         self.assertEqual(arr, back[0]["t"])

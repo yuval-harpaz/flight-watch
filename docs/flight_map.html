@@ -4,7 +4,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://unpkg.com/deck.gl@9.1.14/dist.min.js"></script>
 <script src="https://unpkg.com/@loaders.gl/terrain@4.2.1/dist/dist.min.js"></script>
-<script src="flightboard.js?v=a917a427"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
+<script src="flightboard.js?v=d611c76a"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
 <style>
 html,body{margin:0;height:100%;font-family:sans-serif;color:#222;background:#fff}
 body{display:flex;flex-direction:column}
@@ -116,8 +116,9 @@ let alertOf = null;  // ?hex=..&t=<unix time>: the link in an alert - {hex, t, f
 //   itself, run in the browser by Pyodide (tools/track_alerts.py, as tools/squawk_cases.py does), so the page has
 //   no copy of the checks. The files come from the repository (raw.githubusercontent.com; locally tools/serve.py /src/).
 const T0 = +params.get("t") || 0;
-const SENT = (params.get("a") || "").split(".").map(x => /^([A-Z_]+)~(-?\d+)$/.exec(x)).filter(Boolean)
-  .map(m => ({kind: m[1], t: T0 + +m[2]}));
+// EMERGENCY_7700: an emergency squawk with its code (flight_watch.sent_kind), shown "EMERGENCY 7700"
+const SENT = (params.get("a") || "").split(".").map(x => /^([A-Z_]+(?:_\d{4})?)~(-?\d+)$/.exec(x)).filter(Boolean)
+  .map(m => ({kind: m[1].replace(/_(\d{4})$/, " $1"), t: T0 + +m[2]}));
 let ANALYSIS = {state: "off"};  // off | running | shown | hidden | error, with hex, alerts, msg
 const PYODIDE = "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/";
 const PY_FILES = ["flight_watch.py", "tests/replay.py", "tools/capture_incident.py", "tools/track_segments.py",
@@ -669,7 +670,7 @@ function draw() {
   $("marklegend").style.display = sent.length || anal.length ? "" : "none";
   // one label per point (EMERGENCY and COURSE_CHANGE often come together): the kinds, one per line; the
   // analysis names only what was not sent there (its ring around a sent marker says it agrees)
-  const sentAt = new Set(sent.map(d => d.pos.join() + d.kind));
+  const sentAt = new Set(sent.map(d => d.pos.join() + d.kind.split(" ")[0]));
   const labels = (data, id, color, dy, skip) => {
     const at = new Map();
     for (const d of data) {

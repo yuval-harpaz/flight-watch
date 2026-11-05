@@ -24,6 +24,9 @@ from zoneinfo import ZoneInfo
 FT_M = 0.3048
 GAP_S = 120
 LEG_GAP_S, LEG_GAP_KT = 600, 200  # a gap the aircraft spent stopped: FB.legs in docs/flightboard.js
+# ... and long enough to come down from the altitude before it, stop and climb to the one after (FB.stopped): BDK27, 5 Nov
+# 2026, unheard 15 min between 18,000 and 10,625 ft (13 nm) and 16 min at 7,000 ft (9 nm) was cut into three "flights"
+STOP_FPM, STOP_MIN_S = 2000, 600
 W, H, SS, TOP, STRIP = 1280, 900, 2, 92, 196
 MIN_SPAN = 0.03  # the map shows at least this (radians of longitude, ~100 nm)
 # A close-up when the alerts' part of the flight would be small on the whole flight's map: FZ1073's dive and turn were a
@@ -65,17 +68,25 @@ def nm(a: tuple, b: tuple) -> float:
     return 3440.065 * 2 * math.asin(math.sqrt(h))
 
 
+def stopped(q: tuple, r: tuple) -> bool:
+    """The aircraft spent the gap between reports q and r (time, lat, lon, feet) on the ground somewhere: slow on average,
+    and long enough to descend from q's altitude, stop and climb to r's."""
+    dt = r[0] - q[0]
+    alt = sum(x[3] for x in (q, r) if x[3] != "ground")
+    return (dt > LEG_GAP_S and nm(q, r) / (dt / 3600) < LEG_GAP_KT
+            and dt >= alt / STOP_FPM * 60 + STOP_MIN_S)
+
+
 def leg_at(rows: list, t: float) -> list:
     """The flight at time t, with the ground report that ends it: (time, lat, lon, metres). FB.flightAt's legs, nearest t."""
     legs, leg = [], []
     for r in rows:
         q = leg[-1] if leg else None
-        stopped = q and r[0] - q[0] > LEG_GAP_S and nm(q, r) / ((r[0] - q[0]) / 3600) < LEG_GAP_KT
         if r[3] == "ground":
             if q:
                 legs.append(leg + [r])
             leg = []
-        elif stopped:
+        elif q and stopped(q, r):
             legs.append(leg)
             leg = [r]
         else:
@@ -121,7 +132,8 @@ def region_of_interest(pts: list, alerts: list) -> tuple | None:
             groups[-1].append((name, t))
         else:
             groups.append([(name, t)])
-    best = max(groups, key=lambda g: (any(n == "emergency" for n, _ in g), len(g), -g[0][1]))
+    best = max(groups, key=lambda g: (any(n == "emergency" or n[-4:] in ("7500", "7600", "7700") for n, _ in g),
+                                      len(g), -g[0][1]))
     return best[0][1] - ROI_PAD_S, best[-1][1] + ROI_PAD_S
 
 

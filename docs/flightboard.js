@@ -330,6 +330,14 @@ FB.replayURL = function (hex, t, flight) {
     (flight && flight.tookOff ? at("startTime", flight.start - 300) : "") +
     (flight && flight.landed && !flight.live ? at("endTime", flight.end + 300) : "") + "&timestamp=" + Math.round(t);
 };
+/** The aircraft spent the gap between points q and p on the ground somewhere: > 10 min at under 200 kt on
+ *  average, and long enough to descend from q's altitude at 2,000 ft/min, stop 10 min and climb to p's
+ *  (tools/flight_image.py's stopped). BDK27, 5 Nov 2026: unheard 15 min between 18,000 and 10,625 ft (13 nm)
+ *  and 16 min at 7,000 ft (9 nm) cut its flight in three, and its 7700 / 7600 at the start were off the map. */
+FB.stopped = function (q, p) {
+  const dt = p.t - q.t, alt = [q, p].reduce((a, x) => a + (x.alt === "ground" ? 0 : +x.alt || 0), 0);
+  return dt > 600 && FB.haversineNm(q.lat, q.lon, p.lat, p.lon) / (dt / 3600) < 200 && dt >= alt / 2000 * 60 + 600;
+};
 /** The points of the current leg: after the last time on the ground, or after a gap the aircraft
  *  could not have spent flying (> 10 min at under 200 kt on average): a stop where coverage is
  *  missing, e.g. LY5064 8 Oct 2026, TLV 03:05Z - unseen at Heraklion - next heard 06:41Z inbound. */
@@ -339,7 +347,7 @@ FB.currentLeg = function (pts) {
   pts.forEach((p, i) => {
     const q = pts[i - 1];
     if (p.alt === "ground") start = i + 1;
-    else if (q && p.t - q.t > 600 && FB.haversineNm(q.lat, q.lon, p.lat, p.lon) / ((p.t - q.t) / 3600) < 200) start = i;
+    else if (q && FB.stopped(q, p)) start = i;
   });
   return pts.slice(start);
 };
@@ -349,7 +357,7 @@ FB.legs = function (pts) {
   let leg = [];
   pts.filter(p => p.lat != null).forEach(p => {
     const q = leg[leg.length - 1];
-    if (p.alt === "ground" || (q && p.t - q.t > 600 && FB.haversineNm(q.lat, q.lon, p.lat, p.lon) / ((p.t - q.t) / 3600) < 200)) {
+    if (p.alt === "ground" || (q && FB.stopped(q, p))) {
       if (leg.length > 1) legs.push(leg);
       leg = p.alt === "ground" ? [] : [p];
     } else leg.push(p);

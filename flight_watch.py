@@ -505,6 +505,25 @@ def same_flight(flight: str, iata: str, number: str) -> bool:
     return bool(m) and m.group(1) == iata and m.group(2) == number.lstrip("0")
 
 
+def sent_kind(kind: str, key: str) -> str:
+    """How a sent alert is listed (Track.sent: the map's a=, the follow-up, its picture): an emergency squawk with its code,
+    EMERGENCY_7700 - BDK27 squawked 7700 and then 7600 (5 Nov 2026), and its update read "emergency 09:23, emergency 09:23"."""
+    return f"EMERGENCY_{key.split(':', 1)[1]}" if kind == "EMERGENCY" and key.startswith("EMERGENCY:") else kind
+
+
+def base_kind(kind: str) -> str:
+    """The alert kind of a sent_kind: EMERGENCY_7700 -> EMERGENCY."""
+    return re.sub(r"_\d{4}$", "", kind)
+
+
+def alert_name(kind: str) -> str:
+    """A sent_kind in words: "emergency 7700", "radio failure 7600", "course reversal"."""
+    m = re.fullmatch(r"EMERGENCY_(\d{4})", kind)
+    if m:
+        return {"7500": "hijack", "7600": "radio failure"}.get(m.group(1), "emergency") + " " + m.group(1)
+    return Announcer.NAMES.get(kind, kind.lower())
+
+
 def map_alerts(alerts, t: float) -> str:
     """The map link's `a=`: alerts (kind, data time) as KIND~seconds after t, joined by "." (characters a
     URL keeps as they are), e.g. VERTICAL_RATE~-560.EMERGENCY~0. The page draws a marker for each."""
@@ -3365,7 +3384,7 @@ class Monitor:
             if closing and not self.args.telegram_images:
                 n.close_thread(hexid, s.t)
                 continue
-            if not closing and not (th.get("n", 1) >= 2 or any(k in FOLLOWUP_KINDS for k, _ in sent)):
+            if not closing and not (th.get("n", 1) >= 2 or any(base_kind(k) in FOLLOWUP_KINDS for k, _ in sent)):
                 if now - th["last"] > TG_FOLLOWUP_S:
                     th["done"] = True
                 continue
@@ -3386,7 +3405,7 @@ class Monitor:
                 level = f"FL{s.alt // 100:03d}" if (s.alt or 0) >= 10000 else f"{s.alt} ft"
                 outcome = f"flying at {level} {hm(s.t)}, {self.dist(s):.0f} nm from {self.args.airport}"
             named = [(t.shown_kind(k, x), x) for k, x in sent]
-            names = ", ".join(f"{Announcer.NAMES.get(k, k.lower())} {hm(x)}" for k, x in named)
+            names = ", ".join(f"{alert_name(k)} {hm(x)}" for k, x in named)
             links = external_links(t, s.t, self.args.viewer_url)
             ident = self.flight_number(t) or t.callsign or hexid.upper()
             route = self.route_text(t, *self.classify(t))
@@ -3400,7 +3419,7 @@ class Monitor:
             if self.args.telegram_images:
                 when = datetime.fromtimestamp(s.t, tz)
                 image = {"hex": hexid, "t": sent[-1][1] if sent else th["t"],
-                         "alerts": [(Announcer.NAMES.get(k.split(":")[0], k.lower()), x) for k, x in named],
+                         "alerts": [(alert_name(k), x) for k, x in named],
                          "title": f"{ident}  {route}" if route else ident,
                          "sub": " \u00b7 ".join(x for x in (self.airline_name(t), " ".join(y for y in (t.actype, t.reg) if y),
                                                             f"{when.day} {when:%b %Y}", outcome) if x)}
@@ -4588,7 +4607,7 @@ class Monitor:
             "near_nm": round(ad, 1), "bearing": round(bearing(a.lat, a.lon, s.lat, s.lon)),
             "flight": self.flight_number(t), "airline": self.airline_name(t),
             "military": t.military, "reg": t.reg, "type": t.actype, "squawk": t.squawk, "route_text": self.route_text(t, traffic, route),
-            "recent": recent, "links": external_links(t, now, self.args.viewer_url, kind),
+            "recent": recent, "links": external_links(t, now, self.args.viewer_url, sent_kind(kind, key)),
             # the spoofing episode this flight was caught in (same label on every flight in it)
             "spoof": t.spoof if t.spoof and now - t.spoof_last <= 1800 else None,
             "gps": t.gps if t.gps and now - t.gps_last <= 1800 else None,  # its GPS-degraded episode
@@ -4596,7 +4615,7 @@ class Monitor:
             "from_trace": self.from_trace,
             **(fields or {}),
         })
-        t.sent.append((kind, now))
+        t.sent.append((sent_kind(kind, key), now))
         return True
 
 
