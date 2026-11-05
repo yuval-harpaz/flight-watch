@@ -406,6 +406,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   below 2,000 ft; 18 Oct 2026: on the ground before hours of refused polls and descending into its destination
   after them was "1-8 min after take-off", 11 EARLY_DESCENTs). AS1282 01:14:24, 13 min before
   RETURNED; of 184 large-aircraft take-offs the nearest was a 400 ft step by an E75L at 9.6 min.
+  The rate limit was +-500 ft/min until 5 Nov 2026 (nightly review): ET404 (ET-BAL, B38M) levelling off at 10,000 ft 36 nm E of TLV, slowing to
+  250 kt, went 150 ft up and down at +-640 ft/min and landed normally: "JT610, ET302 before their crashes" on Telegram. Now 700: FZ1073, the
+  lowest real one, reached -768 / +832. The 150 ft leg stays, as ET302 reaches 3 reversals only at that. Cost: a real wobble that stays under
+  700 ft/min both ways is not alerted, and the margin to FZ1073 is small (68 ft/min).
   Only for a board flight, or one with route data nearer its destination than its origin is (`not_our_route`; 31 Oct 2026,
   the owner's choice): AYT253 (Ayeet E145, no route) into Ramon AB (26 Oct 2026); 6H999 (A332, off the board, ISR999
   listed LLBG-LCLK) out over the Dead Sea and back to TLV, probably a test flight (30 Oct).

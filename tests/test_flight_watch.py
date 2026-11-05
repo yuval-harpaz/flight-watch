@@ -607,6 +607,29 @@ class ShareCallsigns(unittest.TestCase):
             self.assertGreater(sum(1 for m, p in feed.calls if "/point/" in p), 3)
 
 
+class WobbleTests(unittest.TestCase):
+    """ET404 (ET-BAL, B38M) levelling off at 10,000 ft east of TLV, 5 Nov 2026: 150 ft up and down at +-640 ft/min, slowing to
+    250 kt, was "altitude going up and down ... JT610, ET302 before their crashes" on Telegram. The readings every 10 s, from its trace."""
+    ALT_RATE = [(10925, -2112), (10600, -1856), (10300, -1344), (10150, -384), (10075, -384), (10000, -448), (9950, -384),
+                (9875, -640), (9825, 64), (9850, 640), (9950, 384), (9975, 128), (9960, -64), (9950, -64), (9950, -384),
+                (9850, -576), (9825, -64), (9825, 0), (9850, 320), (9950, 448), (9975, -64)]
+
+    def run_it(self, top):
+        mon, feed, clock, alerts = with_routes()
+        mon.routes["ETH404"] = (clock(), "HAAB-LLBG")
+        rows = [(alt, top if rate == 640 else rate) for alt, rate in self.ALT_RATE]
+        states = path(31.86, 35.82, [292] * len(rows), [alt for alt, _ in rows], gs=260)
+        states = [{**st, "baro_rate": rate} for st, (_, rate) in zip(states, rows)]
+        fly(mon, feed, clock, "040235", states, flight="ETH404", r="ET-BAL", t="B38M", category="A3")
+        return kinds(alerts)
+
+    def test_a_shallow_oscillation_at_a_level_off_is_not_a_wobble(self):
+        self.assertNotIn("ALTITUDE_WOBBLE", self.run_it(640))
+
+    def test_the_same_altitudes_at_fz1073s_rate_are(self):
+        self.assertEqual(self.run_it(832).count("ALTITUDE_WOBBLE"), 1)
+
+
 class AbortedLandingTests(unittest.TestCase):
     """A go-around from very near the ground: ELY834 and ETD5SM at TLV (2026). The start is 4 nm E of the field, flying W."""
 

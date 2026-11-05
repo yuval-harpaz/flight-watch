@@ -166,7 +166,9 @@ RETURN_MIN_ALT = 10000
 # for 8 min, ET302 (10 Mar 2019) 4 before its data ended; FZ1073 (30 Sep 2026) 4. No other large aircraft
 # of the incident fixtures (619; ADS-B Exchange traces) reached 3, sampled every 10 s or from the trace.
 # A spread of the altitude's second difference ranked single glitches first (an A20N at FL380).
-WOBBLE_TURNS, WOBBLE_FT, WOBBLE_S, WOBBLE_MAX_ALT, WOBBLE_RATE = 3, 150, 180, 25000, 500
+# WOBBLE_RATE 500 until 5 Nov 2026: ET404 levelling off at 10,000 ft, 150 ft up and down at +-640 ft/min. FZ1073 reached
+# -768 / +832 (the lowest of the real ones). WOBBLE_FT cannot rise: ET302 reaches 3 only at 150 ft.
+WOBBLE_TURNS, WOBBLE_FT, WOBBLE_S, WOBBLE_MAX_ALT, WOBBLE_RATE = 3, 150, 180, 25000, 700
 # EARLY_DESCENT: an airliner descending EARLY_DROP ft below the height it climbed to (held on two
 # reports) within EARLY_MIN minutes of take-off. AS1282 (door plug, 6 Jan 2024) turned down at 16,300 ft
 # 7 min after take-off at ~2,000 ft/min, neither steep nor fast; the first descent of the other 184
