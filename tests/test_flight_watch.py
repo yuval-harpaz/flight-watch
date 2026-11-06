@@ -850,6 +850,24 @@ class MlatTests(unittest.TestCase):
         self.assertNotIn("POSITION_JUMP", kinds(alerts))
         self.assertTrue(all(x.lon < 35 for x in t.samples), "only real positions in the track")
 
+    def test_an_mlat_fix_out_of_reach_is_no_reference(self):
+        """BDK27, 5 Nov 2026: FL199 W-bound 55 nm W of TLV, one report at 'under 50 kt' (an episode of
+        its own), then one MLAT fix 1 nm from TLV. Its true GPS reports were dropped against that fix
+        for 3 min and its 7700 went out '1 nm NW of TLV'."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        states = path(32.069, 34.168, [288] * 20, [19925] * 20, gs=313)
+        states[6] = {**states[6], "gs": 20}
+        states[7] = {**states[7], "lat": 32.019, "lon": 34.870, "type": "mlat", "mlat": ["lat", "lon"]}
+        for i in range(12, 20):
+            states[i] = {**states[i], "squawk": "7700"}
+        fly(mon, feed, clock, "738685", states, flight="BDK27", r="", t="")
+        t = mon.tracks["738685"]
+        self.assertTrue(t.spoof)
+        em = [a for a in alerts if a["kind"] == "EMERGENCY"]
+        self.assertEqual(len(em), 1)
+        self.assertLess(em[0]["lon"], 34.2, "placed where the aircraft was, not at the MLAT fix")
+        self.assertEqual(t.last.lon, states[-1]["lon"])
+
 
 class FlightImageTests(unittest.TestCase):
     """tools/flight_image.py: which flight, what is drawn. No network."""

@@ -612,7 +612,11 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   timing; the feed's `type: mlat` / `mlat: [fields]`) are independent of the aircraft's GPS: never
   judged spoofed, and their gs / track are dropped unless MLAT computed them too (MLAT records
   often carry the aircraft's spoofed 0.7 kt / 0 deg). For a flight in an episode, a GPS report
-  farther from its latest MLAT fix (<= 3 min) than it could have flown is fake. Measured 6 Oct:
+  farther from its latest MLAT fix (<= 3 min) than it could have flown is fake - unless that fix is itself out of reach
+  of the report before it (`off_mlat`; 6 Nov 2026 nightly review): BDK27 (5 Nov) at FL199 55 nm W of TLV, one report "under
+  50 kt" (an episode of its own), then one MLAT fix 1 nm from TLV (42.7 nm in 129 s); its true GPS reports were dropped for
+  3 min and its 7700 / 7600 went out "1 nm NW of TLV". Cost: a fake GPS track that moves at a believable speed is taken
+  when the only MLAT fix near it arrived as a jump (MLAT's zig-zags near TLV). Measured 6 Oct:
   MLAT vs clean GPS median 0.2 km (78% within 1 km); while GPS was spoofed MLAT followed the real
   path (AEE925 climbing out of TLV), but MLAT zig-zags up to ~20 km low near TLV (poor geometry),
   and the feed gives one position per aircraft (GPS preferred), so MLAT appears only intermittently.

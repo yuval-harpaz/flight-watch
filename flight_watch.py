@@ -4451,8 +4451,16 @@ class Monitor:
         GPS was spoofed MLAT followed the real path (AEE925 climbing out of TLV)."""
         if x.mlat:
             return False
-        fix = next((y for y in reversed(t.samples) if y.mlat), None)
-        if fix is None or not 0 <= x.t - fix.t <= 180:
+        i = next((k for k in range(len(t.samples) - 1, -1, -1) if t.samples[k].mlat), None)
+        if i is None or not 0 <= x.t - t.samples[i].t <= 180:
+            return False
+        fix = t.samples[i]
+        # A fix out of reach of the report before it is no reference: BDK27, 5 Nov 2026, at FL199 55 nm W
+        # of TLV, had one MLAT fix 1 nm from TLV (42.7 nm in 129 s), and its true GPS reports were dropped
+        # against it for 3 min - its 7700 / 7600 went out "1 nm NW of TLV".
+        prev = t.samples[i - 1] if i > 0 else None
+        if prev is not None and (haversine_nm(prev.lat, prev.lon, fix.lat, fix.lon)
+                                 > 3 + 650 * max(0.0, fix.t - prev.t) / 3600):
             return False
         return haversine_nm(fix.lat, fix.lon, x.lat, x.lon) > 3 + 650 * (x.t - fix.t) / 3600
 
