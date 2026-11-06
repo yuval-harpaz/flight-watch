@@ -426,6 +426,14 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   lands): `[<status> status at <UTC>]`, first in the post's detail ("⚕️ ADS-B lifeguard (medical) status at HH:MM",
   "ADS-B nordo (radio failure) status, one unconfirmed report at HH:MM") - the owner: "if anything else happens like
   divert alert, it should be reported too".
+  An emergency squawk back to a normal code within `SQUAWK_BRIEF_S` (90 s, our first report of the code to our first of the
+  normal one, held `STATUS_HOLD_S`) gets a reply, **SQUAWK_CLEARED** ("Squawk back to normal: 2245 after 50 s of 7700, 7600.
+  Often a code set by mistake; ATC can also give an aircraft in an emergency a code of its own"; `Monitor.squawk_back`, 6 Nov
+  2026, the owner: alert at once, then say it went off). BDK27 (5 Nov) squawked 7700, 7600 12 s later, 2245 within ~1-2 min
+  (adsb.lol's trace marks the squawk every 20-60 s). Not "over": of 259 AeroSignals cases none went back within 2 min (shortest
+  121 s by the trace's marks, an upper bound), and AAL383, SWA139 and IGO74F were given codes of their own after 4-8 min, then
+  diverted or returned. Later: logged; the follow-up tells where it ended. Priority 2 (a reply only), not an anomaly, sent
+  for private / military flights too (in `EXTREME`). Cost: a real emergency given its own code within 90 s reads milder.
 - **COURSE_CHANGE**: a large reversal (>= 70 deg in 2 min) above `--turn-min-alt`. Not
   reported within ~35 nm of a regional airport below FL250 (all 10 replay false alarms were
   departure/arrival routings at Beirut, Amman, Damascus, TLV) nor at learned route corners

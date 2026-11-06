@@ -192,6 +192,31 @@ class AlertSimulation(unittest.TestCase):
         self.assertEqual(len(em), 1)
         self.assertIn("7700", em[0]["message"])
 
+    def squawks(self, codes):
+        """One report every 10 s with each squawk of `codes`; the alerts' kinds and the records."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        feed.local = {"738685"}
+        for i, sq in enumerate(codes):
+            feed.aircraft["738685"] = airborne(32.2, 33.7 - i * 0.02, 19925, track=288, gs=313, flight="BDK27", squawk=sq)
+            step(mon, clock)
+        return [a["kind"] for a in alerts], alerts
+
+    def test_a_brief_emergency_squawk_gets_a_reply(self):
+        """BDK27 (5 Nov 2026): 7700, 7600 12 s later, 2245 again within ~1-2 min. The owner: alert at once, then reply."""
+        kinds, alerts = self.squawks(["2245"] * 3 + ["7700"] + ["7600"] * 4 + ["2245"] * 5)
+        self.assertEqual(kinds, ["EMERGENCY", "EMERGENCY", "SQUAWK_CLEARED"])
+        self.assertRegex(alerts[-1]["message"], r"^squawk 2245 from \S+ UTC, 50 s after 7700, 7600 \(")
+        post = "".join(s.get("text", "") for s in fw.Announcer(fw.parse_args([])).compose(alerts[-1], reply=True))
+        self.assertIn("Squawk back to normal", post)
+        self.assertIn("2245 after 50 s of 7700, 7600. Often a code set by mistake", post)
+        self.assertLessEqual(len(post), fw.Announcer.LIMIT)
+
+    def test_an_emergency_squawk_back_later_or_unheld_gets_no_reply(self):
+        # back after 100 s: ATC can give an aircraft in an emergency a code of its own (AAL383 after 4 min, then a return)
+        self.assertEqual(self.squawks(["7700"] * 10 + ["2245"] * 5)[0], ["EMERGENCY"])
+        # one report of a normal code, then 7700 again: not back
+        self.assertEqual(self.squawks(["7700"] * 3 + ["2245"] + ["7700"] * 3 + ["2245"] * 2)[0], ["EMERGENCY"])
+
     def test_local_lost_contact(self):
         mon, feed, clock, alerts = make(["--no-routes"])
         feed.local = {"738001", "738002"}

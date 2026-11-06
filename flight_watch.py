@@ -139,7 +139,7 @@ PRIORITY = {"EMERGENCY": 5, "LOST_CONTACT": 5, "DIVERSION": 5, "TOWARD_ISRAEL": 
             "RETURNED": 4, "TURNING_BACK": 4, "VERTICAL_RATE": 4, "SHARP_TURN": 4,
             "COURSE_CHANGE": 4, "HOLDING": 4, "POSITION_JUMP": 3, "GPS_SPOOFING": 3, "MASS_SILENCE": 3,
             "GPS_DEGRADED": 3, "SKYDIVE_PATTERN": 5, "ALTITUDE_WOBBLE": 5, "EARLY_DESCENT": 5, "ABORTED_LANDING": 4,
-            "CONTACT_RESTORED": 2, "MEDICAL_FLIGHT": 3}
+            "CONTACT_RESTORED": 2, "MEDICAL_FLIGHT": 3, "SQUAWK_CLEARED": 2}
 # kinds that describe abnormal flying; two different ones on one flight within --hot-minutes
 # are reported as a pattern (priority 5)
 ANOMALIES = {"EMERGENCY", "LOST_CONTACT", "DIVERSION", "TOWARD_ISRAEL", "OFF_COURSE", "TURNING_BACK",
@@ -220,12 +220,17 @@ TURN_KINDS = {"COURSE_CHANGE", "SHARP_TURN"}
 # What is sent, by class of flight (Monitor.flight_class, checked in Monitor.alert): every check runs for every flight, and
 # what is not sent is logged. A class not listed gets everything. 3 Nov 2026, the owner: no military nor private flights
 # "unless for some extreme circumstances". FALL: a fall at --vrate or faster, or contact lost during one.
-EXTREME = {"EMERGENCY", "MEDICAL_FLIGHT", "FALL"}
+EXTREME = {"EMERGENCY", "MEDICAL_FLIGHT", "FALL", "SQUAWK_CLEARED"}  # (the last: the reply to an EMERGENCY sent)
 PUBLISH = {"military": EXTREME, "private": EXTREME}
 # ... and one VERTICAL_RATE fall in this long on such a flight, whatever its severity (CHLE1B, CHLE1D: Jordanian PC21
 # trainers at -16,000 to -18,800 ft/min in aerobatics, 18 Oct and 2 Nov 2026). Its lost contact while falling still goes.
 QUIET_FALL_S = 7200
 STATUS_ONCE_S = 7200  # an ADS-B status alert: not again on this flight (Monitor.check_emergency)
+# An emergency squawk back to a normal code this soon (s, from our first report of it to our first of the normal code,
+# held STATUS_HOLD_S): SQUAWK_CLEARED, a reply to its EMERGENCY (Monitor.squawk_back). BDK27 (5 Nov 2026) squawked 7700,
+# then 7600, then 2245 within ~1-2 min. None of 259 AeroSignals cases went back within 2 min (trace squawk marks: shortest
+# 121 s), while ATC gave AAL383, SWA139 and IGO74F codes of their own after 4-8 min, before they diverted / returned.
+SQUAWK_BRIEF_S = 90
 # GPS spoofing (Monitor.spoofed): an aircraft reported motionless at altitude is spoofed unless it
 # climbs / descends at least this fast (a stall or spin falls 10,000+ ft/min) - then it is checked.
 SPOOF_MAX_RATE = 6000
@@ -899,6 +904,8 @@ class Track:
     squawk: str = ""
     em_status: str = ""      # the last ADS-B emergency status (check_emergency)
     em_since: float = 0.0    # data time it began
+    em_run: list = field(default_factory=list)  # emergency squawks set, [(code, data time first heard)] (squawk_back)
+    sq_back: float | None = None  # data time a normal code was first heard again after them (held: STATUS_HOLD_S)
     status_at: float = 0.0   # data time this flight first reported an ADS-B emergency status (noted on its alerts)
     status_seen: str = ""    # ... which one
     category: str = ""     # ADS-B emitter category, e.g. A1 = light aircraft
@@ -1277,7 +1284,8 @@ class Announcer:
                  "MASS_SILENCE": ("\U0001f4e1", "Many aircraft silent at once"),
                  "GPS_DEGRADED": ("\U0001f6f0️", "GPS jamming / spoofing"),
                  "SKYDIVE_PATTERN": ("\U0001fa82", "Large aircraft flying like a jump plane"),
-                 "MEDICAL_FLIGHT": ("⚕️", "Medical flight (ADS-B lifeguard status)")}
+                 "MEDICAL_FLIGHT": ("⚕️", "Medical flight (ADS-B lifeguard status)"),
+                 "SQUAWK_CLEARED": ("ℹ️", "Squawk back to normal")}
 
     def __init__(self, args, out=None):
         self.args = args
@@ -1349,7 +1357,7 @@ class Announcer:
              "SKYDIVE_PATTERN": "skydiving pattern", "ALTITUDE_WOBBLE": "altitude up and down",
              "EARLY_DESCENT": "early descent", "ABORTED_LANDING": "aborted landing",
              "CONTACT_RESTORED": "contact restored",
-             "MEDICAL_FLIGHT": "medical flight"}
+             "MEDICAL_FLIGHT": "medical flight", "SQUAWK_CLEARED": "squawk back to normal"}
     DETAILS = {  # kind -> (pattern in the alert message, compact wording)
         "LOST_CONTACT": (r"silent (\d+)s.*?track (\S+) deg", "silent {0} s, last track {1}°"),
         "VERTICAL_RATE": (r"([+-]\d+) ft/min, (-?[\d.]+) deg", "{0} ft/min ({1}°)"),
@@ -1372,6 +1380,10 @@ class Announcer:
             out = self.DETAILS[kind][1].format(*m.groups()) if m else msg
         elif kind == "CONTACT_RESTORED" or (kind == "EMERGENCY" and "squawk" in msg):
             out = ""
+        elif kind == "SQUAWK_CLEARED":
+            m = re.search(r"squawk (\d{4}) from \S+ UTC, (\d+) s after ([\d, ]+) \(", msg)
+            out = (f"{m.group(1)} after {m.group(2)} s of {m.group(3)}. Often a code set by mistake; ATC can also give an "
+                   "aircraft in an emergency a code of its own. Still followed") if m else msg
         else:
             out = msg
         k = rec.get("skydive")
@@ -2714,6 +2726,12 @@ class Monitor:
         em = ac.get("emergency")
         changed, t.squawk = sq != t.squawk, sq or t.squawk
         if sq in EMERGENCY_SQUAWKS:
+            if not t.em_run or t.em_run[-1][0] != sq:
+                t.em_run.append((sq, t.last.t if t.last else 0))
+            t.sq_back = None  # (a lone normal report in between: not back)
+        elif sq and t.em_run:
+            self.squawk_back(t, sq)
+        if sq in EMERGENCY_SQUAWKS:
             at = t.alerted.get(f"EMERGENCY:{sq}", (-1e12,))[0]
             if changed and t.last and t.last.t - at <= AERO_MAX_AGE_S:
                 # the same emergency, alerted already (AeroSignals' post before our feed had the code: IZ992,
@@ -2742,6 +2760,30 @@ class Monitor:
                             f"ADS-B emergency status: {em} ({STATUS_NAMES.get(em, em)})")
                     self.alert(t, kind, f"{text} since {since} UTC", key=key, force=True)
         t.em_status = em or ""
+
+    def squawk_back(self, t: Track, sq: str) -> None:
+        """Emergency squawks (t.em_run) back to a normal code, held on reports STATUS_HOLD_S apart: SQUAWK_CLEARED, a reply
+        to the EMERGENCY sent, when it came SQUAWK_BRIEF_S or sooner after the first of them. The owner (6 Nov 2026): alert
+        at once, then say when it went off - BDK27 squawked 7700, 7600, then 2245 in ~1-2 min (5 Nov). Its words do not
+        say the emergency is over: ATC can give an aircraft in one a code of its own (AAL383 after 4 min, then a return).
+        Later than that: logged; the flight's follow-up tells where it ended."""
+        now = t.last.t if t.last else 0
+        if t.sq_back is None:
+            t.sq_back = now
+            return
+        if now - t.sq_back < STATUS_HOLD_S:
+            return
+        run, back, t.em_run, t.sq_back = t.em_run, t.sq_back, [], None
+        secs, codes = back - run[0][1], ", ".join(c for c, _ in run)
+        hms = lambda x: time.strftime("%H:%M:%S", time.gmtime(x))
+        sent = any(now - t.alerted.get(f"EMERGENCY:{c}", (-1e12,))[0] <= AERO_MAX_AGE_S for c, _ in run)
+        if secs > SQUAWK_BRIEF_S or not sent:
+            log.info("%s squawk %s from %s UTC, %.0f s after %s%s", t.label(), sq, hms(back), secs, codes,
+                     "" if sent else " (not alerted)")
+            return
+        self.alert(t, "SQUAWK_CLEARED", f"squawk {sq} from {hms(back)} UTC, {secs:.0f} s after {codes} "
+                   f"({hms(run[0][1])} UTC): a code this brief is often set by mistake; ATC can also give an "
+                   "aircraft in an emergency a code of its own", force=True)
 
     def check_vrate(self, t: Track) -> None:
         """Too steep a climb or descent, as a flight-path angle (rate alone flags every fast jet).
