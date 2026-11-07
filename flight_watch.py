@@ -1641,7 +1641,8 @@ class Notifier:
             segments = self.announcer.compose(rec, reply=bool(thread))
             mid = self.telegram(segments, thread["id"] if thread else None)
             if mid and mid > 0 and not thread:
-                self.tg_threads[rec["hex"]] = thread = {"id": mid, "t": t, "last": t, "n": 0}
+                self.tg_threads[rec["hex"]] = thread = {"id": mid, "t": t, "last": t, "n": 0,
+                                                        "route": rec.get("route_text")}
             if thread:
                 thread["last"], thread["done"] = max(thread["last"], t), False
                 thread["n"] = thread.get("n", 0) + 1
@@ -3475,7 +3476,10 @@ class Monitor:
             names = ", ".join(f"{alert_name(k)} {hm(x)}" for k, x in named)
             links = external_links(t, s.t, self.args.viewer_url)
             ident = self.flight_number(t) or t.callsign or hexid.upper()
-            route = self.route_text(t, *self.classify(t))
+            # (the route its first message named: after a landing the leg is flown and the board row dropped, and the
+            #  route data may be another leg's - LH697 TLV -> FRA landed at Athens, its update read "LH697 Arbil ->
+            #  Frankfurt" from DLH697 ORER-EDDF, 7 Nov 2026)
+            route = th.get("route") or self.route_text(t, *self.classify(t))
             segments = [{"text": f"\U0001f9fe Update: {ident}{' ' + route if route else ''} - {outcome}. "
                                  f"Alerts: {names or '-'}.\n"}]
             for i, (label, key) in enumerate((("Map of the flight", "map"), ("Replay", "replay_adsbx"),

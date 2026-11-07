@@ -3972,6 +3972,25 @@ class TelegramThreadTests(unittest.TestCase):
         fly(mon, feed, clock, "4d22a0", path(32.5, 33.1, [90] * 3, [30000] * 3, squawk="7700"), flight="AIZ992")
         self.assertEqual(kinds(alerts), ["EMERGENCY"])
 
+    def test_follow_up_names_the_route_of_its_first_message(self):
+        """LH697 TLV -> FRA landed at Athens; its update read "LH697 Arbil -> Frankfurt" (DLH697 is ORER-EDDF in the route
+        data, the board row dropped with the landing)."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        ups = []
+        mon.notifier.follow_up = lambda h, when, seg, **kw: ups.append(seg)
+        fly(mon, feed, clock, "3c64a2", path(37.937, 23.956, [37] * 3, [0] * 3, gs=10), flight="DLH697", on_ground=True)
+        mon.routes["DLH697"] = (clock(), "ORER-EDDF")
+        t = mon.tracks["3c64a2"]
+        t.samples.append(fw.Sample(**{**fw.asdict(t.last), "on_ground": True, "gs": 10}))
+        at = t.last.t
+        t.sent.append(("DIVERSION", at - 300))
+        mon.notifier.tg_threads["3c64a2"] = {"id": 7, "t": at - 300, "last": at - 300, "n": 1,
+                                             "route": "TLV → Frankfurt (FRA)"}
+        mon.telegram_followups(at + 130)
+        text = "".join(x.get("text") or x["link"] for x in ups[0])
+        self.assertIn("TLV → Frankfurt (FRA)", text)
+        self.assertNotIn("ORER", text)
+
 
 class SingleInstanceTests(unittest.TestCase):
     def test_second_monitor_is_refused_until_the_first_ends(self):
