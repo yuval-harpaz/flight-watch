@@ -3576,6 +3576,17 @@ class LegEndAndLightAircraftTests(unittest.TestCase):
                                              gs=728), flight="HEZ652", r="4X-CZF", t="H25B")
         self.assertNotIn("SHARP_TURN", kinds(alerts))
 
+    def test_embraer_business_jets_are_private(self):
+        """H5763 (VistaJet D-AAHO, E35L, no route): its approach turn at Malta went out as a course reversal - E35L matched
+        LARGE_TYPES' Embraer airliners."""
+        self.assertEqual([t for t in ("E35L", "E545", "E550", "E55P") if fw.LARGE_TYPES.fullmatch(t)], [])
+        self.assertEqual([t for t in ("E120", "E135", "E145", "E170", "E175", "E190", "E195", "E75L", "E75S", "E290")
+                          if not fw.LARGE_TYPES.fullmatch(t)], [])
+        mon, feed, clock, alerts = make(["--no-routes"])
+        fly(mon, feed, clock, "3c450f", path(33.0, 33.0, [258] * 3, [14000] * 3, gs=270), flight="VJH763", r="D-AAHO",
+            t="E35L")
+        self.assertEqual(mon.flight_class(mon.tracks["3c450f"]), "private")
+
 
 class SquawkSearchTests(unittest.TestCase):
     """The feeds' own search for squawks anywhere (--squawk-interval): no squawk rests on one Bluesky account."""

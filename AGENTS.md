@@ -394,6 +394,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   3 Nov), the jump plane's one check-in dive (16 Oct; 4XDAN still sent 4 dives with follow-ups on 31 Oct, cause not looked for, gone
   with it), and the survey-line rule (14 Oct; no such flight left to reach it). Cost: an accident on such a flight that shows only as
   a turn, a normal descent or a TOWARD_ISRAEL, with no squawk, is only logged, and the alerts no longer show that the monitor sees them.
+  `LARGE_TYPES` names Embraer's airliners only (E120 - E195, E75L / E75S, E2s; 7 Nov 2026 nightly review): its `E[0-9]{2}[05LS]` also took
+  the business jets E35L (Legacy 600 / 650), E545 / E550 (Legacy 450 / 500), now in `BIZJET_TYPES`. H5763 (VistaJet D-AAHO, E35L, no
+  route) was an "airliner" and its approach turn at Malta, FL111 descending, went out as a course reversal.
 - **ALTITUDE_WOBBLE / EARLY_DESCENT** (16 Oct 2026, from the incident fixtures; airline callsign and large
   aircraft only). Wobble: the altitude reverses 3+ times (each leg >= 150 ft, `reversals`) within 3 min below
   FL250, with the aircraft's own vertical rate both >= +500 and <= -500 (a lone bad altitude is 2 reversals with a

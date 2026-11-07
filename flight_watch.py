@@ -287,7 +287,10 @@ JUMP_PLANES = {
 # emitter categories of large aircraft (A3 large, A4 B757-class, A5 heavy) and airliner type codes:
 # such an aircraft flying a jump run is not skydiving (slow flight near the stall at height)
 LARGE_CATEGORIES = {"A3", "A4", "A5"}
-LARGE_TYPES = re.compile(r"A[0-9]{2}[0-9K]|A[23][0-9]N|B7[0-9][0-9A-Z]|B[37][0-9X]M|BCS[13]|E1[79]0|E[0-9]{2}[05LS]|"
+# (Embraer airliners only: E135 / E145 / E170 ... E195, E75L / E75S, E2s. "E[0-9]{2}[05LS]" also took the business jets
+# E35L (Legacy 600 / 650), E545 / E550 (Legacy 450 / 500): H5763, VistaJet's D-AAHO, was "airliner" and its approach turn
+# at Malta went out as a course reversal, 6 Nov 2026)
+LARGE_TYPES = re.compile(r"A[0-9]{2}[0-9K]|A[23][0-9]N|B7[0-9][0-9A-Z]|B[37][0-9X]M|BCS[13]|E1[2-9][05]|E7[05][LS]|"
                          r"E2[0-9]{2}|CRJ[0-9X]|AT[47][0-9]|DH8[A-D]|MD[0-9]{2}")
 # Rough outline of Israeli-controlled airspace over land (incl. West Bank, Golan), lat/lon.
 # Israeli airlines (ICAO): El Al, Israir, Arkia, CAL Cargo, Sun d'Or, Challenge Airlines IL, Air Haifa
@@ -301,7 +304,8 @@ SMALL_MAX_KT = 600   # faster over the ground than a bizjet / light aircraft fli
 # bank too. 679 (military GLF5) "343 -> 305 deg in 28 s at 599 kt (~37 deg bank)" at FL370 15 nm W of TLV, 28 Oct 2026;
 # a GLF5 cruises at ~510 kt TAS (the owner's choice, 29 Oct 2026: by type, not size)
 BIZJET_TYPES = re.compile(r"GLF[2-6]|GA[5-8]C|GLEX|GL[5-8]T|CL[36]0|CL35|H25[ABC]|HA4T|FA[5-8]X|F900|F2TH|FA50|"
-                          r"C25[ABCM]|C5[0-6][0-9X]|C680|C68A|C700|C750|LJ[2-7][0-9]|E5[05]P|G150|G280|GALX|ASTR|PRM1")
+                          r"C25[ABCM]|C5[0-6][0-9X]|C680|C68A|C700|C750|LJ[2-7][0-9]|E5[05]P|E35L|E545|E550|G150|G280|"
+                          r"GALX|ASTR|PRM1")
 BIZJET_MAX_KT = 560
 # A SHARP_TURN waits this long (s, data time) for a report back on its old course where it would have been without
 # the turn - a velocity / position glitch (settle_turn); sent when a trusted report after it is not, or nothing is
