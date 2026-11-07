@@ -298,6 +298,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   flight to the board's destination at `STOP_KT` + `LEG_OVER_S` 30 min; 31 Oct 2026, the owner's choice): W46404 again
   (9H-WBY), found by the board's callsign near Rome at 22:55 IST, due out of TLV for MXP at 19:18, not climbing at first,
   then TURNING_BACK "1,209 nm out". Earlier it is ours (a diversion that landed unseen: OS82 at Sofia).
+  So is one first heard on the ground that far out and taking off there once its whole board leg could have been flown at `STOP_KT`
+  (`Track.ground_far`, `leg_over(.., 0)`; 7 Nov 2026 nightly review): W46404 (9H-WBB, due 18:58 IST) on the ground at Rome at 22:29, out
+  at 22:34 heading NE, TURNING_BACK at 22:44, 12 min before `leg_over`. Cost: a departure that diverted unseen, first heard on the ground
+  there and flying back to TLV after that time, is not TURNING_BACK.
   A landing within `DIVERTED_NM` of a stop listed in the route data (`planned_stop`: an airport between the ends,
   when the route's far end agrees with the board) is logged, not a DIVERSION: KLM461 AMS -> TLV is EHAM-LCLK-LLBG
   and "went silent ... probably landing at LCA" (20 Oct 2026). 113 routes through TLV list stops (crowd-sourced,

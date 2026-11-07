@@ -2560,6 +2560,25 @@ class Run18OctTests(unittest.TestCase):
                 got[hours] = ("TURNING_BACK" in kinds(alerts), mon.tracks["4d2405"].sched is None)
         self.assertEqual(got, {-5: (False, True), -1: (True, False)})
 
+    def test_departure_first_heard_on_the_ground_far_away_takes_off_after_its_leg(self):
+        """W46404 (9H-WBB, TLV -> MXP due 18:58 IST) first heard on the ground at Rome at 22:29, out at 22:34 heading NE:
+        TURNING_BACK "1,212 nm out and closing" (6 Nov 2026), 22 min before leg_over. The leg's flight at STOP_KT is
+        3.5 h; one hour after its board time it is still ours (test_board_departure_heard_far_away_after_its_leg...)."""
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "airports", "schema-01", "L"))
+            with open(os.path.join(d, "airports", "schema-01", "L", "LI.csv"), "w") as f:
+                f.write("Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                        "LIMC,Malpensa,LIMC,MXP,Milan,IT,45.6306,8.7281,768\n")
+            mon, feed, clock, alerts = with_board([board_row("W4", "6404", "D", local_time(mon_clock(), -3.75), "MXP")])
+            mon.standing = fw.StandingData(mon.http, d)
+            ident = dict(flight="WMT6404", r="9H-WBB", t="A20N")
+            fly(mon, feed, clock, "4d2430", [dict(lat=41.80, lon=12.24, alt_baro="ground", gs=8, track=160)] * 3, **ident)
+            self.assertFalse(mon.leg_over(mon.tracks["4d2430"], mon.tracks["4d2430"].last))
+            fly(mon, feed, clock, "4d2430", path(41.80, 12.24, [100] * 10 + [55] * 30,
+                                                 [1500 + 600 * i for i in range(40)], gs=280), **ident)
+            self.assertNotIn("TURNING_BACK", kinds(alerts))
+            self.assertIsNone(mon.tracks["4d2430"].sched)
+
     def test_circuits_near_amman_with_no_route_are_not_holding(self):
         """RJA017 (A321 JY-AYV): took off from Amman and circled east of it at 4,300 ft 2 h later."""
         mon, feed, clock, alerts = make(["--no-routes"])

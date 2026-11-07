@@ -942,6 +942,7 @@ class Track:
     nic_bad: Sample | None = None  # its last NIC-0 report dropped as out of reach (see integrity)
     amm_dep: float = 0.0     # data time it was last on the ground at Amman / first heard climbing out of it
     amm_near: float = 0.0    # data time since which it has stayed within AMM_LOCAL_NM of Amman
+    ground_far: tuple | None = None  # (lat, lon): our departure first heard on the ground > AWAY_CLIMB_NM out
     takeoff: float = 0.0     # data time of its take-off (left the ground, or first heard climbing low)
     left_at: float = 0.0     # the same, kept on the ground until the leg ends (beyond_leg)
     elsewhere_at: float = 0.0  # data time of its DIVERSION worded as a landing elsewhere (landing_words)
@@ -2515,6 +2516,21 @@ class Monitor:
             t.takeoff_pos = t.takeoff_pos or (s.lat, s.lon)
             log.info("%s first heard %s at %s ft %.0f nm from %s: another leg on our departure's callsign",
                      t.label(), how, s.alt, d, self.args.airport)
+        elif (len(t.samples) <= 2 and not t.left_home and d > AWAY_CLIMB_NM and s.on_ground and not t.was_airborne
+              and self.classify(t)[0] == "DEP"):
+            t.ground_far = (s.lat, s.lon)
+        elif t.ground_far and not s.on_ground:
+            if (t.sched and self.classify(t)[0] == "DEP" and haversine_nm(s.lat, s.lon, *t.ground_far) <= TAKEOFF_POS_NM
+                    and self.leg_over(t, s, 0)):
+                # first heard on the ground far away, it takes off there after its whole board leg could have been
+                # flown (at STOP_KT; leg_over's LEG_OVER_S is for one first heard in the air): another leg. W46404
+                # (9H-WBB, TLV -> MXP due 18:58 IST) on the ground at Rome at 22:29, out at 22:34 heading NE, 22 min
+                # before leg_over: TURNING_BACK "1,212 nm out and closing" (6 Nov 2026)
+                t.flown_cs, t.sched = t.callsign, None
+                t.takeoff_pos = t.takeoff_pos or t.ground_far
+                log.info("%s took off %.0f nm from %s, where it was first heard, after its board leg: another leg on "
+                         "our departure's callsign", t.label(), d, self.args.airport)
+            t.ground_far = None
         amm = haversine_nm(s.lat, s.lon, *REGION_AIRPORTS["AMM"][:2])
         if (s.on_ground and amm < 5) or (len(t.samples) <= 2 and amm < 15 and (s.alt or 0) < 8000
                                          and (s.vrate or 0) > 300):
@@ -3877,7 +3893,7 @@ class Monitor:
         via = haversine_nm(org[1], org[2], stop[1], stop[2]) + haversine_nm(stop[1], stop[2], *home)
         return stop[0] if straight and via <= TAG_DETOUR * straight else None
 
-    def leg_over(self, t: Track, s: Sample) -> bool:
+    def leg_over(self, t: Track, s: Sample, extra: float = LEG_OVER_S) -> bool:
         """A board departure whose leg should have landed by `s` (its board time, the flight to the board's destination
         at STOP_KT, LEG_OVER_S more): heard now far away, it flies another leg on the callsign. W46404 (9H-WBY, TLV ->
         MXP due 19:18 IST, ~3 h) was first found at 22:55 near Rome, then climbing out heading NE: TURNING_BACK
@@ -3886,7 +3902,7 @@ class Monitor:
         if not (t.sched and t.sched.direction == "DEP" and t.sched.ts):
             return False
         far = self.other_end(t, "DEP")
-        return bool(far) and s.t > t.sched.ts + haversine_nm(self.args.lat, self.args.lon, far[1], far[2]) / STOP_KT * 3600 + LEG_OVER_S
+        return bool(far) and s.t > t.sched.ts + haversine_nm(self.args.lat, self.args.lon, far[1], far[2]) / STOP_KT * 3600 + extra
 
     def diversion(self, t: Track, kind: str, msg: str, landed: bool = True) -> bool:
         """A DIVERSION, worded as a plain fact when nothing else was wrong with the flight (`landing_words`)."""
