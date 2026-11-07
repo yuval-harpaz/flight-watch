@@ -3283,8 +3283,14 @@ class Monitor:
             log.info("squawk search works again: %d aircraft on %s", match, SQUAWK_LIVE_CODE)
         self.squawk_dead = dead
 
-    def squawk_ours(self, hexid: str, cs: str) -> bool:
-        """A flight of ours, as AeroSignals' posts are judged: tracked as ours, on the board, or routed through Israel."""
+    def squawk_ours(self, hexid: str, cs: str, ac: dict | None = None) -> bool:
+        """A flight of ours, as AeroSignals' posts are judged: tracked as ours, on the board, or routed through Israel; or
+        inside --radius (`ac`'s position): the local poll alerts any squawk there it hears, and 4XDAV (C172, 7700 at 7,100 ft
+        21 nm E of TLV, 5 Nov 2026) was missing from it while adsb.fi's search had it - "not ours"."""
+        lat, lon = (ac or {}).get("lat"), (ac or {}).get("lon")
+        if isinstance(lat, (int, float)) and isinstance(lon, (int, float)) and haversine_nm(
+                self.args.lat, self.args.lon, lat, lon) <= self.args.radius:
+            return True
         t = self.tracks.get(hexid)
         if t and (t.followed or t.sched):
             return True
@@ -3315,7 +3321,7 @@ class Monitor:
                 hexid, cs = (ac.get("hex") or "").lower(), (ac.get("flight") or "").strip()
                 if str(ac.get("squawk")) != code or not hexid or hexid in local_hexes:
                     continue  # (not what we asked for: a filter gone wrong must not alert the world's aircraft)
-                if self.squawk_ours(hexid, cs):
+                if self.squawk_ours(hexid, cs, ac):
                     log.info("squawk %s on %s (%s), from %s's squawk search", code, cs or hexid, hexid, ac.get("_feed"))
                     out.append((got[0], ac))
                 elif now - self.squawk_elsewhere.get((hexid, code), -1e12) > AERO_MAX_AGE_S:

@@ -716,7 +716,7 @@ post, then our feed's 7700), and an AeroSignals EMERGENCY on an aircraft last he
 
 **The feeds' squawk search** (`Monitor.squawk_search`, 3 Nov 2026, the owner: not to rest on one Bluesky account): `/v2/sqk/<code>` for
 7700, 7600, 7500 every `--squawk-interval` (60 s; 3 requests, LOW priority; each code has its own due time, 20 s after no answer, as the budget refuses LOW requests that come together), adsb.fi first, adsb.lol only when it does not answer (adsb.lol's budget is
-the local poll's; `--squawk-providers`). A flight of ours - followed, on the board, or routed through an Israeli airport (`squawk_ours`) - joins the poll's batches and
+the local poll's; `--squawk-providers`). A flight of ours - followed, on the board, routed through an Israeli airport, or inside `--radius` (`squawk_ours`; 7 Nov 2026: 4XDAV, a C172 squawking 7700 21 nm E of TLV on 5 Nov, was missing from adsb.lol's local answer and logged "not ours") - joins the poll's batches and
 `check_emergency` alerts it (`aero_alerts` and it do not alert the same code twice); others are only logged, once per 3 h (`squawk elsewhere:`, to compare with
 AeroSignals). No real emergency could be tested through it: 0 aircraft on the three codes when tried. An answer's aircraft not sending the code asked are dropped, and every `SQUAWK_LIVE_S` (10 min) code 2000 is asked for: an empty
 search is also what a broken filter looks like (`log.error` once, the idea from github.com/guspzanetti/flight-alerts). Looked at and left out, the owner's choice: OARC's log

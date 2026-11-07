@@ -3670,6 +3670,16 @@ class SquawkSearchTests(unittest.TestCase):
         self.assertEqual(kinds(alerts, "471f8d"), ["EMERGENCY"])
         self.assertTrue(mon.tracks["471f8d"].followed)
 
+    def test_a_squawk_inside_the_radius_is_ours_though_the_local_poll_missed_it(self):
+        """4XDAV (C172, 7700 at 7,100 ft 21 nm E of TLV, 5 Nov 2026): not in adsb.lol's local answer, found by adsb.fi's
+        search and logged "squawk elsewhere ... not ours"."""
+        mon, feed, clock, alerts = self.setup("--no-routes")
+        feed.aircraft["739210"] = dict(airborne(32.0537, 35.2737, 7100, gs=95, flight="4XDAV", squawk="7700"),
+                                       r="4X-DAV", t="C172")
+        for _ in range(8):
+            step(mon, clock)
+        self.assertEqual(kinds(alerts, "739210"), ["EMERGENCY"])
+
     def test_a_squawk_elsewhere_is_only_logged_once(self):
         mon, feed, clock, alerts = self.setup()
         feed.aircraft["471f8e"] = airborne(47.0, 19.0, 35000, flight="WZZ4X", squawk="7700")
