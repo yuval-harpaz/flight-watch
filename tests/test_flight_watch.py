@@ -71,6 +71,7 @@ class FakeFeed:
         self.learned = []         # (json body, Authorization header) of POSTs to the relay's /learn
         self.traces = {}          # hex -> rows of its recent trace, absolute times (see trace_rows)
         self.bsky = []            # AeroSignals' posts (Bluesky getAuthorFeed "feed" items)
+        self.mastodon = []        # Squawk Alert's posts (Mastodon statuses)
         self.sqk_answer = {}      # squawk code -> the aircraft /sqk/ answers instead of the true ones
 
     def ac(self, hexid):
@@ -112,6 +113,8 @@ class FakeFeed:
                 return FakeResponse(404, url=url)
             return FakeResponse(200, {"icao": hexid, "timestamp": rows[0][0],
                                       "trace": [[r[0] - rows[0][0], *r[1:]] for r in rows]}, url=url)
+        if path.startswith("/api/v1/accounts/") and path.endswith("/statuses"):
+            return FakeResponse(200, self.mastodon, url=url)
         if path.endswith("/app.bsky.feed.getAuthorFeed"):
             return FakeResponse(200, {"feed": self.bsky}, url=url)
         if path == "/learn" and method == "POST":
@@ -131,6 +134,7 @@ def make(argv=(), with_schedule=False):
                           "--remote-providers", "adsb.lol",  # one feed unless a test asks for more
                           "--aerosignals-interval", "0",  # Bluesky: AeroSignalsTests switch it on
                           "--squawk-interval", "0",  # SquawkSearchTests switch it on
+                          "--squawkalert-interval", "0",  # Mastodon: SquawkAlertTests switch it on
                           "--standing-data", fw.STANDING_DATA, *argv])  # the fake feed, never a local copy
     http = fw.Http(min_gap=0, rate=args.rate, rate_max=args.rate_max, clock=clock, rng=lambda: 0.5)
     feed = FakeFeed(clock)
@@ -3815,6 +3819,117 @@ class AeroSignalsTests(unittest.TestCase):
             step(mon, clock)
         self.assertEqual((posts, kinds(alerts)), ([], []))
         self.assertEqual(mon.aero_pending, {})
+
+
+def sa_post(clock, names, kind, hexid, squawk="7700", n=1, minutes_ago=3):
+    """A Squawk Alert post as Mastodon serves it (HTML, the ADSBx link's hex split across spans)."""
+    created = datetime.fromtimestamp(clock() - 60 * minutes_ago, timezone.utc)
+    return {"id": str(117563540943227000 + n), "created_at": created.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "url": f"https://mstdn.social/@SquawkAlert/{117563540943227000 + n}", "in_reply_to_id": None,
+            "content": f'<p>{names} / {kind} has squawked {squawk}. Track (FR24): <a href="https://www.flightradar24.com/'
+                       f'4270489c/"><span class="invisible">https://www.</span><span class="">flightradar24.com/4270489c/'
+                       f'</span></a> Track (ADSBx): <a href="https://globe.adsbexchange.com/?icao={hexid.upper()}" '
+                       f'target="_blank"><span class="invisible">https://</span><span class="ellipsis">globe.adsbexchange'
+                       f'.com/?icao={hexid[0].upper()}</span><span class="invisible">{hexid[1:].upper()}</span></a> <a href'
+                       f'="https://mstdn.social/tags/Squawk{squawk}" class="mention hashtag" rel="tag">#<span>Squawk{squawk}'
+                       f'</span></a></p>'}
+
+
+class SquawkAlertTests(unittest.TestCase):
+    """A third source of emergency squawks: Squawk Alert's posts on Mastodon (every squawk it hears, with the hex, no route).
+    It posted 4XDAV's 7700 21 nm E of TLV (5 Nov 2026), which our squawk search logged as "not ours"."""
+
+    FILES = SquawkSearchTests.FILES
+
+    def setup(self, *argv):
+        mon, feed, clock, alerts = make(["--squawkalert-interval", "120", "--rate", "600", "--rate-max", "6000", *argv])
+        feed.files.update(self.FILES)
+        posts = []
+        mon.notifier.send_post = posts.append
+        feed.local = {"999999"}
+        feed.aircraft["999999"] = airborne(32.5, 34.5, 10000, flight="LOC1")
+        return mon, feed, clock, alerts, posts
+
+    def test_parses_the_template(self):
+        c = fw.squawkalert_case(sa_post(lambda: 0, "SK2749 / SAS2749", "E195 (SE-RSR)", "4aca72")["content"])
+        self.assertEqual((c["squawk"], c["hex"], c["callsigns"], c["flight"], c["type_name"], c["reg"]),
+                         ("7700", "4aca72", ["SK2749", "SAS2749"], "SK2749", "E195", "SE-RSR"))
+        c = fw.squawkalert_case(sa_post(lambda: 0, "4XDAV", "C172 (4X-DAV)", "739210")["content"])
+        self.assertEqual((c["callsigns"], c["flight"], c["reg"]), (["4XDAV"], "", "4X-DAV"))
+        self.assertEqual(fw.squawkalert_case(sa_post(lambda: 0, "0", "A21N (9H-XLC)", "4d213b", "7600")["content"])
+                         ["callsigns"], [])
+        self.assertIsNone(fw.squawkalert_case("<p>Squawk Alert is back after maintenance.</p>"))
+
+    def test_squawk_inside_the_radius_our_polls_missed_is_alerted_once(self):
+        """4XDAV: back on 2000 by the time of the post, so the feeds' squawk search would not find it either."""
+        mon, feed, clock, alerts, posts = self.setup("--no-routes")
+        feed.aircraft["739210"] = dict(airborne(32.0537, 35.2737, 7100, gs=95, flight="4XDAV", squawk="2000"),
+                                       r="4X-DAV", t="C172")
+        feed.mastodon = [sa_post(clock, "4XDAV", "C172 (4X-DAV)", "739210")]
+        for _ in range(30):
+            step(mon, clock)
+        hits = [a for a in alerts if a["kind"] == "EMERGENCY"]
+        self.assertEqual([a["hex"] for a in hits], ["739210"], kinds(alerts))
+        self.assertIn("reported by Squawk Alert", hits[0]["message"])
+        self.assertIn("mstdn.social/@SquawkAlert/117563540943227001", hits[0]["message"])
+        self.assertEqual(posts, [])
+
+    def test_our_route_far_away_is_alerted(self):
+        mon, feed, clock, alerts, posts = self.setup()
+        feed.aircraft["471f8d"] = airborne(47.0, 19.0, 35000, flight="WZZ3W", squawk="1000")
+        feed.mastodon = [sa_post(clock, "W63W / WZZ3W", "A21N (HA-LVA)", "471f8d")]
+        for _ in range(30):
+            step(mon, clock)
+        self.assertEqual(kinds(alerts, "471f8d"), ["EMERGENCY"])
+        self.assertTrue(mon.tracks["471f8d"].followed)
+
+    def test_a_squawk_elsewhere_is_only_logged(self):
+        mon, feed, clock, alerts, posts = self.setup()
+        feed.aircraft["a2d3b3"] = airborne(36.0, -97.0, 30000, flight="SWA3396", squawk="7700")
+        feed.mastodon = [sa_post(clock, "WN3396 / SWA3396", "B737 (N281WN)", "a2d3b3")]
+        with self.assertLogs("flight_watch", "INFO") as logs:
+            for _ in range(80):  # 13 min
+                step(mon, clock)
+        self.assertEqual((kinds(alerts), posts), ([], []))
+        self.assertNotIn("a2d3b3", mon.tracks)
+        self.assertEqual(mon.sa_pending, {})
+        self.assertEqual(sum("Squawk Alert: squawk 7700 on WN3396 / SWA3396 (a2d3b3), not ours" in m for m in logs.output), 1)
+        self.assertEqual(sum("/hex/a2d3b3" in p for _, p in feed.calls), 1)  # asked once
+
+    def test_not_in_our_feeds_is_the_post_if_ours_by_callsign(self):
+        mon, feed, clock, alerts, posts = self.setup()
+        feed.mastodon = [sa_post(clock, "W63W / WZZ3W", "A21N (HA-LVA)", "471f8d", n=1),
+                         sa_post(clock, "N79584", "C172 (N79584)", "aace25", "7600", n=2)]
+        for _ in range(80):
+            step(mon, clock)
+        self.assertEqual([p["hex"] for p in posts], ["471f8d"])
+        self.assertEqual(posts[0]["flight"], "W63W")
+        self.assertNotIn("EMERGENCY", kinds(alerts))
+        self.assertEqual(mon.sa_pending, {})
+
+    def test_squawk_we_alerted_ourselves_is_not_repeated(self):
+        mon, feed, clock, alerts, posts = self.setup("--no-routes")
+        feed.local = {"999999", "738001"}
+        feed.aircraft["738001"] = airborne(32.2, 34.6, 12000, flight="ELY315", squawk="7700")
+        step(mon, clock)
+        feed.mastodon = [sa_post(clock, "LY315 / ELY315", "B789 (4X-EDC)", "738001", minutes_ago=0)]
+        for _ in range(20):
+            step(mon, clock)
+        self.assertEqual(kinds(alerts, "738001"), ["EMERGENCY"])
+        self.assertNotIn("Squawk Alert", " ".join(a["message"] for a in alerts))
+
+    def test_old_posts_and_posts_announced_before_a_restart_are_left_out(self):
+        with tempfile.TemporaryDirectory() as d:
+            saved = os.path.join(d, "posts_telegram.jsonl")
+            with open(saved, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"kind": "EMERGENCY", "text": "https://mstdn.social/@SquawkAlert/117563540943227001"})
+                        + "\n")
+            mon, feed, clock, alerts, posts = self.setup("--telegram-posts", saved)
+        feed.mastodon = [sa_post(clock, "W63W / WZZ3W", "A21N (HA-LVA)", "471f8d", n=1),
+                         sa_post(clock, "W64X / WZZ4X", "A21N (HA-LVB)", "471f8e", n=2, minutes_ago=4 * 60)]
+        for _ in range(80):
+            step(mon, clock)
+        self.assertEqual((posts, kinds(alerts), mon.sa_pending), ([], [], {}))
 
 
 class TelegramThreadTests(unittest.TestCase):

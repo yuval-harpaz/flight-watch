@@ -734,6 +734,18 @@ the post and FR24, `--telegram-posts`; not in `--jsonl`, no position). Posts > `
 ids and EMERGENCY callsigns in the day's files are read at start (`past_aero`), so a restart does not repeat one. Tests and
 replays pass `--aerosignals-interval 0`. Not announced: squawks elsewhere (the bot posts ~2 a day) and its "Update:" replies.
 
+**Squawk Alert as a third source** (7 Nov 2026, the owner: "they can catch extra squawks if we are blocked"). The bot behind
+x.com/Squawk_Alert posts the same on Mastodon (@SquawkAlert@mstdn.social; public API, no login - X itself needs a login or its paid
+API): every 7700 / 7600 / 7500 it hears, ~15-20 a day, light and military aircraft too, as "SK2749 / SAS2749 / E195 (SE-RSR) has
+squawked 7700" with an ADS-B Exchange link carrying the hex; no route, no outcome replies. It had 4XDAV (above) and OS82 (18 Oct, a
+minute before AeroSignals), not AIZ992, BDK04, BDK27. The monitor reads it every `--squawkalert-interval` (120 s, LOW;
+`Monitor.squawkalert`, `squawkalert_case`) and asks the remote feeds for each post's hex once a minute; an answer that is ours
+(`squawk_ours` with its position, as the squawk search) joins the poll's batches, then `squawkalert_alerts` as `aero_alerts`: our own
+EMERGENCY within 3 h -> logged; else EMERGENCY "reported by Squawk Alert" (the squawk may be over by the post: 4XDAV's 7700 at 11:10:46
+UTC, the post at 11:14); not ours -> logged; not found within `AERO_FIND_S` -> the post (`send_post`) only when a callsign of it is ours
+by the board or the route data. Post ids (`sa:<id>`) in the day's files are not repeated after a restart. Tests and replays pass
+`--squawkalert-interval 0`. Looked at and left out: t.me/s/FlightEmergency (last post Dec 2022).
+
 ## Testing
 
 No network access is assumed in tests: `tests/test_flight_watch.py` replaces the HTTP session

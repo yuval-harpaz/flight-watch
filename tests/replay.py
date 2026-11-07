@@ -134,7 +134,7 @@ def run(fixture: dict, argv=(), warmup: float = 300) -> tuple[list[dict], fw.Mon
     args = fw.parse_args(["--airport", meta["airport"], *where, "--radius", str(meta["radius"]),
                           "--jsonl", "", "--posts", "", "--telegram-posts", "", "--rate", "60", "--rate-max", "600",
                           "--fallback-provider", "", "--remote-providers", "adsb.lol",  # the captured feed only
-                          "--aerosignals-interval", "0", "--squawk-interval", "0",
+                          "--aerosignals-interval", "0", "--squawk-interval", "0", "--squawkalert-interval", "0",
                           *argv])
     clock = Clock(meta["start"] - warmup)
     http = fw.Http(min_gap=0, rate=args.rate, rate_max=args.rate_max, clock=clock, rng=lambda: 0.5)
