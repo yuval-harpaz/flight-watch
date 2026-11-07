@@ -3099,6 +3099,10 @@ class Monitor:
                 if field and field[1] <= near:
                     return field[0]  # nothing names its ends: any airport while descending. RJ872 (E290, no route)
                     #                  onto Sabiha Gokcen's arrival 26 nm out at FL168 (29 Oct 2026)
+        if (t.amm_dep and s.t - t.amm_dep <= CLIMB_OUT_S and (s.vrate or 0) >= 500 and not t.sched
+                and not (t.callsign and self.routes.get(t.callsign, (0, None))[1])):
+            return "climbing out of Amman"  # nothing names its ends, any height: RJA874 (A20N, no route) 11 min out of
+            #                                  Amman turned 221 -> 348 deg at FL295 over the Negev onto its way west (6 Nov 2026)
         if self.zones.expected(s.lat, s.lon, s.track):
             return "a route corner"  # seen on many flights
         return None

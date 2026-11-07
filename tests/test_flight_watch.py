@@ -1903,6 +1903,21 @@ class AmmanAndEilatTests(unittest.TestCase):
         self.assertNotIn("TOWARD_ISRAEL", self.run_path(east(29.60), flight="QTR536", r="A7-AHA", t="A320"))
         self.assertIn("TOWARD_ISRAEL", self.run_path(east(30.40), flight="QTR536", r="A7-AHA", t="A320"))
 
+    def test_amman_departure_with_no_route_turning_in_its_climb_out(self):
+        """RJA874 (A20N, no route) first heard climbing out of Amman at 5,300 ft, turned 221 -> 348 deg at FL295 over the
+        Negev 11 min later, still climbing: a COURSE_CHANGE on Telegram. First heard high (not seen leaving Amman), the
+        same turn still alerts."""
+        got = {}
+        for first_alt in (5300, 9000):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            alts = [first_alt + 450 * i for i in range(50)]
+            alts += [alts[-1] + 150 * i for i in range(1, 25)]
+            tracks = [245] * 50 + [245 + 14 * i for i in range(1, 9)] + [357] * 16
+            fly(mon, feed, clock, "74482e", path(31.75, 35.95, tracks, alts, gs=330), flight="RJA874", r="JY-RAN",
+                t="A20N")
+            got[first_alt] = "COURSE_CHANGE" in kinds(alerts, "74482e")
+        self.assertEqual(got, {5300: False, 9000: True})
+
 
 class MlatSpeedTests(unittest.TestCase):
     def descent(self, mlat_gs, **ident):

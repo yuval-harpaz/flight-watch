@@ -461,7 +461,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   nor within 35 nm of where it took off in this leg (`Track.takeoff_pos`; ISR178 out of Budapest, above),
   nor, for a flight with no board row nor route, descending (<= -500 ft/min) within 40 nm of any airport of the
   standing data (`airfield_near`; 30 Oct 2026, the owner's choice: RJ872, E290 `DEP?`, onto Sabiha Gokcen's arrival at
-  FL168 26 nm out; cost: a real reversal descending near any airport on such a flight is only logged).
+  FL168 26 nm out; cost: a real reversal descending near any airport on such a flight is only logged),
+  nor, for such a flight, climbing (>= 500 ft/min) at any height within `CLIMB_OUT_S` (20 min) of leaving Amman (`Track.amm_dep`; 7 Nov 2026
+  nightly review: RJA874, A20N, 221 -> 348 deg at FL295 over the Negev 11 min out of Amman, its way west over Israel; cost: a real
+  reversal on such a departure while it still climbs is only logged).
   `routine_turn_place` judges these when the turn starts; when it is reported, 2 min later, the destination is judged
   again (ETD238, OMAA-VOBL, began its approach turn at Bangalore just over 35 nm out and was reported at 17 nm, 22 Oct
   2026) - not the origin: AA1009 (ORD -> LAX, 6 Oct 2026) turning back to Chicago ended its turn within 35 nm of it,
