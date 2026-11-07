@@ -539,6 +539,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   there (`approaching_stop`, `stop_in_time`, as `early_stop`; not when hot; 4 Nov 2026 nightly review): IB1873 MAD -> TLV 15 nm from Athens
   at 5,275 ft heading 337 deg, "637 nm out and opening", 7 min before its nightly stop, on Telegram. Needs the local checkout's airports.
   Cost: a real diversion low on the way shows as a DIVERSION at its board time (`check_stops`), not as OFF_COURSE first.
+  Nor a board arrival heading (within `TAG_STOP_TOL`, 30 deg) for the route data's origin when that differs from the board's and its leg
+  ends at our airport - the tag stop `planned_stop` already knows (`tag_stop_ahead`; not hot, no emergency; 7 Nov 2026 nightly review):
+  IZ902 VAR -> TLV, AIZ902 LBSF-LLBG, left Varna westbound for Sofia, "121 deg away from TLV, 781 nm out". Cost: an arrival that turns
+  back toward such a stop is not OFF_COURSE.
   Neither within `--off-course-min-dist` of the far end (route data: an arrival's origin, a departure's
   destination): climbing out "away from" the destination and approach turns "back" (squawk replay: TO4755 out of
   Barcelona, AA2045 on approach to SFO "heading back to PHL, 2175 nm out").

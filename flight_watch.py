@@ -205,6 +205,7 @@ STATUS_NOTE_S = 6 * 3600  # ... and a lone report noted, with its time, on the f
 STATUS_NAMES = {"general": "emergency", "lifeguard": "medical", "minfuel": "minimum fuel", "nordo": "radio failure",
                 "unlawful": "unlawful interference", "downed": "downed aircraft"}
 TAG_DETOUR = 1.25  # a board tag stop counts when on the way: origin -> stop -> TLV at most this x the straight line
+TAG_STOP_TOL = 30  # deg: an arrival heading for the route data's tag stop (tag_stop_ahead) is not OFF_COURSE
 STOP_KT, STOP_TURN_S = 420, 1200  # an arrival's time from a stop on its way: block speed, and on the ground there
 STOP_APPROACH_ALT, STOP_APPROACH_NM = 10000, 30  # below this, this near an airfield: on approach to a stop (approaching_stop)
 DEST_TURN_TOL, DEST_TURN_GAIN = 35, 30  # a board departure's reversal to within this of its destination, this much nearer it
@@ -3804,6 +3805,24 @@ class Monitor:
             return self.field_name(s)
         return self.board_stop(t, s, kind)
 
+    def tag_stop_ahead(self, t: Track, s: Sample) -> str | None:
+        """A board arrival whose route data's leg into our airport starts elsewhere than the board's origin (a tag
+        flight, as in `planned_stop`), heading for that stop (within TAG_STOP_TOL deg): IZ902 VAR -> TLV (board), AIZ902
+        LBSF-LLBG, left Varna westbound for Sofia: OFF_COURSE "121 deg away from TLV, 781 nm out" (6 Nov 2026)."""
+        route = self.routes.get(t.callsign, (0, None))[1] if t.callsign != t.flown_cs else None
+        parts = route.split("-") if route else []
+        if not (t.sched and t.sched.direction == "ARR" and len(parts) == 2 and parts[-1] == self.args.icao
+                and self.standing and s.track is not None):
+            return None
+        far = self.other_end(t, "ARR")
+        if not far or far[0] == parts[0]:
+            return None
+        try:
+            pos = self.standing.airport(parts[0])
+        except requests.RequestException:
+            return None
+        return parts[0] if pos and heading_diff(s.track, bearing(s.lat, s.lon, *pos)) <= TAG_STOP_TOL else None
+
     def on_the_way(self, s: Sample, far: tuple) -> bool:
         """`s` on the way between our airport and `far` (ICAO, lat, lon): at most TAG_DETOUR longer than flying straight."""
         home = (self.args.lat, self.args.lon)
@@ -3970,6 +3989,11 @@ class Monitor:
             field = self.approaching_stop(t, s) if not self.hot(t) else None
             if field:
                 self.note(t, "route", f"low near {field} on its way, in time for a stop there: not off course", every=1800)
+                return
+            stop = self.tag_stop_ahead(t, s) if not (self.hot(t) or self.in_emergency(t)) else None
+            if stop:
+                self.note(t, "route", f"flying to {stop}, the route data's origin of its leg into "
+                          f"{a.airport} (a stop): not off course", every=1800)
                 return
             self.alert(t, "OFF_COURSE", f"{a.airport} arrival heading {s.track:.0f} deg, "
                        f"{devs[-1]:.0f} deg away from {a.airport} for {s.t - old.t:.0f}s, "

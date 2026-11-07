@@ -3433,6 +3433,27 @@ class FarEndTests(unittest.TestCase):
             got[origin] = "DIVERSION" in kinds(alerts, "4d21e6")
         self.assertEqual(got, {"LIRF": False, "LIME": True})
 
+    def test_arrival_flying_to_the_routes_tag_stop_is_not_off_course(self):
+        """IZ902 VAR -> TLV (board), AIZ902 LBSF-LLBG: left Varna westbound for Sofia, OFF_COURSE "121 deg away from TLV,
+        781 nm out" on Telegram (6 Nov 2026). With a route that agrees with the board, the same flight still alerts."""
+        varna = (43.2321, 27.8251)
+        got = {}
+        for origin in ("LBSF", "LBWN"):
+            mon, feed, clock, alerts = self.setup([board_row("IZ", "902", "A", local_time(Clock(), 4), "VAR")])
+            feed.files["airports/schema-01/L/LB.csv"] += f"LBWN,Varna,LBWN,VAR,Varna,BG,{varna[0]},{varna[1]},230\n"
+            feed.files["routes/schema-01/A/AIZ-all.csv"] = ("Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                                           f"AIZ902,AIZ,902,AIZ,{origin}-LLBG\n")
+            mon.standing.files.pop("airports/schema-01/L/LB.csv", None)  # (read by setup without Varna)
+            mon.standing.airport("LBWN")
+            ident = dict(flight="AIZ902", r="LZ-EAO", t="A320")
+            fly(mon, feed, clock, "4521ba", [dict(lat=varna[0], lon=varna[1], alt_baro="ground", gs=5, track=270)] * 3,
+                local=False, **ident)
+            fly(mon, feed, clock, "4521ba", path(*varna, [266] * 90, [min(1500 + 600 * i, 28000) for i in range(90)],
+                                                 gs=430), local=False, **ident)
+            self.assertEqual(mon.other_end(mon.tracks["4521ba"], "ARR")[0], "LBWN")
+            got[origin] = "OFF_COURSE" in kinds(alerts, "4521ba")
+        self.assertEqual(got, {"LBSF": False, "LBWN": True})
+
     def ramon(self):
         mon, feed, clock, alerts = self.setup([board_row("IZ", "807", "D", local_time(Clock(), 0.5), "ETM")])
         feed.files.update({"routes/schema-01/A/AIZ-all.csv": "Callsign,Code,Number,AirlineCode,AirportCodes\n"
