@@ -1922,6 +1922,23 @@ class AmmanAndEilatTests(unittest.TestCase):
             got[first_alt] = "COURSE_CHANGE" in kinds(alerts, "74482e")
         self.assertEqual(got, {5300: False, 9000: True})
 
+    def test_our_departure_with_no_route_turning_in_its_climb_out(self):
+        """WZZ46KE (A21N, no board row nor route) took off from TLV westbound and 13 min later, still climbing at FL285
+        65 nm NW, turned 295 -> 18 deg onto its way north: a COURSE_CHANGE on Telegram (7 Nov 2026). The same turn
+        back toward TLV still alerts."""
+        got = {}
+        for new in (15, 115):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            ground = [dict(lat=32.0114, lon=34.87, alt_baro="ground", gs=gs, track=260) for gs in (10, 60, 120)]
+            alts = [1000 + 360 * i for i in range(76)]
+            alts += [alts[-1] + 150 * i for i in range(1, 25)]
+            turn = (new - 295) % 360 if new == 15 else -180
+            tracks = [295] * 76 + [295 + turn * i / 8 for i in range(1, 9)] + [new] * 16
+            fly(mon, feed, clock, "4d2427", ground + path(32.0, 34.84, tracks, alts, gs=330), flight="WZZ46KE",
+                r="9H-WAS", t="A21N")
+            got[new] = "COURSE_CHANGE" in kinds(alerts, "4d2427")
+        self.assertEqual(got, {15: False, 115: True})
+
 
 class MlatSpeedTests(unittest.TestCase):
     def descent(self, mlat_gs, **ident):

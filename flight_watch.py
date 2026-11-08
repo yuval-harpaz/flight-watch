@@ -3109,6 +3109,13 @@ class Monitor:
         a = self.args
         near = a.terminal_radius + 5
         if done:
+            if (t.rose_home and t.takeoff and s.t - t.takeoff <= CLIMB_OUT_S + a.turn_confirm
+                    and (s.vrate or 0) >= 500 and not t.sched
+                    and not (t.callsign and self.routes.get(t.callsign, (0, None))[1])
+                    and heading_diff(s.track, bearing(s.lat, s.lon, a.lat, a.lon)) > 90):
+                return f"climbing out of {a.airport}"  # nothing names its ends, any height, its new track not back
+                #   toward us: WZZ46KE (A21N, no route) 13 min out of TLV, 295 -> 18 deg at FL285 65 nm NW onto its
+                #   way north (7 Nov 2026). A turn back toward TLV is still reported
             if s.alt >= 25000:
                 return None
             ends = self.route_ends(t)

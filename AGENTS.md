@@ -465,6 +465,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   nor, for such a flight, climbing (>= 500 ft/min) at any height within `CLIMB_OUT_S` (20 min) of leaving Amman (`Track.amm_dep`; 7 Nov 2026
   nightly review: RJA874, A20N, 221 -> 348 deg at FL295 over the Negev 11 min out of Amman, its way west over Israel; cost: a real
   reversal on such a departure while it still climbs is only logged).
+  Nor, for such a flight seen taking off from our airport (`rose_home`), climbing within `CLIMB_OUT_S` (+ the 2 min hold) of take-off,
+  when the held new track is > 90 deg from the way back to us (judged when reported; 8 Nov 2026 nightly review): WZZ46KE (A21N, Wizz's
+  alphanumeric callsign, no route) 13 min out of TLV turned 295 -> 18 deg at FL285 65 nm NW onto its way north. Cost: a real reversal of
+  such a departure that does not head back toward TLV is only logged while it still climbs.
   `routine_turn_place` judges these when the turn starts; when it is reported, 2 min later, the destination is judged
   again (ETD238, OMAA-VOBL, began its approach turn at Bangalore just over 35 nm out and was reported at 17 nm, 22 Oct
   2026) - not the origin: AA1009 (ORD -> LAX, 6 Oct 2026) turning back to Chicago ended its turn within 35 nm of it,
