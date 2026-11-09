@@ -4,7 +4,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://unpkg.com/deck.gl@9.1.14/dist.min.js"></script>
 <script src="https://unpkg.com/@loaders.gl/terrain@4.2.1/dist/dist.min.js"></script>
-<script src="flightboard.js?v=d611c76a"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
+<script src="flightboard.js?v=ceb8c1b3"></script>  <!-- v = first 8 hex of its sha256: a changed file is never taken from the browser cache -->
 <style>
 html,body{margin:0;height:100%;font-family:sans-serif;color:#222;background:#fff}
 body{display:flex;flex-direction:column}
@@ -639,7 +639,8 @@ const onGround = () => TERRAIN ? {extensions: [new deck._TerrainExtension()], te
 
 function draw() {
   const {ac, ends, trail} = cur;
-  const last = !ac && cur.fromTrace && trail.length ? trail[trail.length - 1] : null;
+  const off = FB.offTrack(trail), fine = trail.filter((p, i) => !off.has(i));  // (bad positions: not in the view)
+  const last = !ac && cur.fromTrace && fine.length ? fine[fine.length - 1] : null;
   const pos = ac && ac.lat != null ? [ac.lon, ac.lat, hgt(ac.alt_baro)] : last ? [last.lon, last.lat, hgt(last.alt)] : null;
   const route = ends.length === 2 ? [{path: FB.greatCircle(ends[0], ends[1], 96)}] : [];
   const ahead = ac && pos && ac.gs > 50 && ac.track != null && !FB.onGround(ac)
@@ -729,7 +730,7 @@ function draw() {
   ]});
   if (!fitted && (pos || ends.length === 2 || trail.length > 1)) {
     // the aircraft, TLV and (when known) the other airport in view, at least ~100 km across
-    const pts = ends.map(e => [e.lon, e.lat]).concat(pos && !cur.ended ? [pos] : trail.map(p => [p.lon, p.lat]));
+    const pts = ends.map(e => [e.lon, e.lat]).concat(pos && !cur.ended ? [pos] : fine.map(p => [p.lon, p.lat]));
     const lo = [Math.min(...pts.map(p => p[0])) - 0.5, Math.min(...pts.map(p => p[1])) - 0.5];
     const hi = [Math.max(...pts.map(p => p[0])) + 0.5, Math.max(...pts.map(p => p[1])) + 0.5];
     const el = $("map");

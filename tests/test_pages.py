@@ -178,6 +178,23 @@ class BoardLogicMatchesPython(unittest.TestCase):
 
 
 @unittest.skipUnless(NODE, "node not installed")
+@unittest.skipUnless(NODE, "node not installed")
+class BadPositionsMatchPython(unittest.TestCase):
+    """FB.offTrack (the map's view) and tools/flight_image.py's off_track (the picture) leave out the same positions."""
+
+    def test_same_positions(self):
+        import flight_image as fi
+        sys.path.insert(0, os.path.join(ROOT, "tests"))
+        from test_flight_watch import FlightImageTests
+        cases = [FlightImageTests.ly859(),
+                 FlightImageTests.ly859()[:8] + [(1100.0 + 60 * i, 48.5 + 0.125 * i, 23.0, 11600) for i in range(15)],
+                 [(1000.0 + 30 * i, 40.0, 2.0 + 0.1 * i, 10000) for i in range(20)]]
+        for pts in cases:
+            got = node("DATA.map(pts => [...FB.offTrack(pts.map(p => ({t: p[0], lat: p[1], lon: p[2]})))].sort((a, b) => a - b))",
+                       [pts])[0]
+            self.assertEqual(got, sorted(fi.off_track(pts)))
+
+
 class BoardArchive(unittest.TestCase):
     """A past board is rebuilt from over.org.il's archive: the latest state of each row seen by then."""
     def test_snapshot_query(self):

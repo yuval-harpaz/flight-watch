@@ -27,6 +27,10 @@ LEG_GAP_S, LEG_GAP_KT = 600, 200  # a gap the aircraft spent stopped: FB.legs in
 # ... and long enough to come down from the altitude before it, stop and climb to the one after (FB.stopped): BDK27, 5 Nov
 # 2026, unheard 15 min between 18,000 and 10,625 ft (13 nm) and 16 min at 7,000 ft (9 nm) was cut into three "flights"
 STOP_FPM, STOP_MIN_S = 2000, 600
+# A position out of reach of the last good one (3 nm + 750 kt, flight_watch's --max-gap-speed) is a bad one, drawn orange (the
+# map's position jump) and left out of the map's extent: LY859 (4X-EKZ, TLV -> FRA, 9 Nov 2026) was over Romania, then 30 s
+# at Lima, Peru, and its picture showed half the globe with a line that looked like a track. Still away after OFF_MAX_S: real.
+OFF_NM, OFF_KT, OFF_MAX_S, JUMP = 3, 750, 600, (255, 153, 0)
 W, H, SS, TOP, STRIP = 1280, 900, 2, 92, 196
 MIN_SPAN = 0.03  # the map shows at least this (radians of longitude, ~100 nm)
 # A close-up when the alerts' part of the flight would be small on the whole flight's map: FZ1073's dive and turn were a
@@ -99,6 +103,22 @@ def leg_at(rows: list, t: float) -> list:
     if best is None or off(best) > 1800:
         return []
     return [(r[0], r[1], r[2], 0 if r[3] == "ground" else r[3] * FT_M) for r in best]
+
+
+def off_track(pts: list) -> set:
+    """Indices of the positions (time, lat, lon, ..) the aircraft could not have reached from its last good one: OFF_NM +
+    OFF_KT. A run of them that lasts over OFF_MAX_S is where it really went. FB.offTrack in docs/flightboard.js alike."""
+    bad, run, good = set(), [], None
+    for i, p in enumerate(pts):
+        if good is None or nm(good, p) <= OFF_NM + OFF_KT * (p[0] - good[0]) / 3600:
+            good, run = p, []
+        elif run and p[0] - pts[run[0]][0] > OFF_MAX_S:
+            bad -= set(run)
+            good, run = p, []
+        else:
+            run.append(i)
+            bad.add(i)
+    return bad
 
 
 def position_at(pts: list, t: float) -> tuple:
@@ -187,12 +207,13 @@ def render(pts: list, alerts: list, title: str, sub: str, source: str = "adsb.lo
             if pp:
                 d.line(pp, fill=BORDER + (255,), width=2 * SS)
         line = [px(p[1], p[2]) for p in pts]
+        ok = [i for i in range(len(pts)) if i not in bad]
         # the alerts' labels, where they fit: the track and the other labels are in the way
         busy = list(keep_out) + [(x - 8 * SS, y - 8 * SS, x + 8 * SS, y + 8 * SS) for x, y in line[::max(1, len(line) // 400)]
                                  if 0 < x < w * SS and 0 < y < h * SS]
         labels = []
         for t, text in labelled:
-            x, y = px(*position_at(pts, t))
+            x, y = px(*position_at(good, t))
             l, u, r, b = d.textbbox((0, 0), text, font=f_label)
             lw, lh = r - l + 16 * SS, b - u + 14 * SS
             best = None
@@ -222,17 +243,20 @@ def render(pts: list, alerts: list, title: str, sub: str, source: str = "adsb.lo
             shown += 1
             if shown >= places:
                 break
-        d.line(line, fill=(255, 255, 255, 235), width=9 * SS, joint="curve")
-        for a, b, p, q in zip(line, line[1:], pts, pts[1:]):
+        d.line([line[i] for i in ok], fill=(255, 255, 255, 235), width=9 * SS, joint="curve")
+        for i, (a, b, p, q) in enumerate(zip(line, line[1:], pts, pts[1:])):
+            if i in bad or i + 1 in bad:  # to and from a bad position: orange, as the map's position jump
+                d.line([a, b], fill=JUMP + (255,), width=4 * SS)
+                continue
             d.line([a, b], fill=colour(p[3]) + (255,), width=5 * SS)
             if q[0] - p[0] > GAP_S:
                 dashed(d, a, b, (255, 255, 255, 255), 5 * SS)
-        for x, y in (line[0], line[-1]):
+        for x, y in (line[ok[0]], line[ok[-1]]):
             r = 7 * SS
             d.ellipse((x - r, y - r, x + r, y + r), fill=(255, 255, 255, 255), outline=(20, 20, 20, 255), width=2 * SS)
         r = 9 * SS
         for t in marked:
-            x, y = px(*position_at(pts, t))
+            x, y = px(*position_at(good, t))
             d.ellipse((x - r, y - r, x + r, y + r), fill=RED + (255,), outline=(255, 255, 255, 255), width=3 * SS)
         for x, y, box, text, (l, u) in labels:
             ex, ey = min(max(x, box[0]), box[2]), min(max(y, box[1]), box[3])
@@ -243,18 +267,20 @@ def render(pts: list, alerts: list, title: str, sub: str, source: str = "adsb.lo
         return img
 
     f_label, f_place = font(17, True), font(13)
-    px = view(pts, W, mh, 220, 170)
+    bad = off_track(pts)
+    good = [p for i, p in enumerate(pts) if i not in bad]
+    px = view(good, W, mh, 220, 170)
     groups = group_alerts(alerts)
     window = region_of_interest(pts, alerts)
     inset = None
     if window:
-        near = [p for p in pts if window[0] <= p[0] <= window[1]] or pts
+        near = [p for p in good if window[0] <= p[0] <= window[1]] or good
         xs_, ys_ = zip(*(px(p[1], p[2]) for p in near))
         x0, x1, y0, y1 = min(xs_), max(xs_), min(ys_), max(ys_)
         # small on the whole map: worth a closer look
         if max(x1 - x0, 1) < INSET_SMALL * W * SS and max(y1 - y0, 1) < INSET_SMALL * mh * SS:
             iw, ih = INSET_W, INSET_H
-            line_ = [px(p[1], p[2]) for p in pts]
+            line_ = [px(p[1], p[2]) for p in good]
 
             def corner_cost(c):
                 # how much of the track it would hide (length, not reports: they crowd where it flies low)
@@ -336,6 +362,10 @@ def render(pts: list, alerts: list, title: str, sub: str, source: str = "adsb.lo
     d.ellipse((x, ky - r + 6 * SS, x + 2 * r, ky + r + 6 * SS), fill=RED + (255,), outline=(255, 255, 255, 255), width=2 * SS)
     d.line((x + 2 * r + 14 * SS, ky - 4 * SS, x + 2 * r + 14 * SS, ky + 16 * SS), fill=RED + (255,), width=2 * SS)
     d.text((x + 2 * r + 26 * SS, ky - 2 * SS), "alert", font=small, fill=TEXT)
+    if bad:
+        x += 2 * r + 26 * SS + d.textlength("alert", font=small) + 36 * SS
+        d.line((x, ky + 6 * SS, x + 56 * SS, ky + 6 * SS), fill=JUMP + (255,), width=4 * SS)
+        d.text((x + 66 * SS, ky - 2 * SS), "bad position", font=small, fill=TEXT)
     d.text((L, (H - 19) * SS), f"Flight data: {source}  ·  Map: Natural Earth  ·  Israel time  ·  Flight Watch TLV", font=font(12), fill=(150, 160, 175))
     out = io.BytesIO()
     img.resize((W, H), Image.LANCZOS).save(out, "JPEG", quality=88, optimize=True)

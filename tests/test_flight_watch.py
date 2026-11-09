@@ -943,6 +943,27 @@ class FlightImageTests(unittest.TestCase):
         self.assertEqual(fi.region_of_interest([], al), (5 * h - fi.ROI_PAD_S, 5 * h + fi.ROI_PAD_S))
         self.assertEqual(fi.region_of_interest([], [x for x in al if x[0] != "emergency"]), (9 * h - fi.ROI_PAD_S, 9 * h + 120 + fi.ROI_PAD_S))
 
+    @staticmethod
+    def ly859():
+        """LY859 (4X-EKZ, TLV -> FRA, 9 Nov 2026) over Romania: 85 nm north for 19 s, then 30 s at Lima, Peru."""
+        on = [(1000.0 + 10 * i, 46.5 + 0.012 * i, 24.3 - 0.01 * i, 11600) for i in range(8)]
+        north = [(1090.0 + 2 * i, 47.95, 23.27, 11600) for i in range(5)]
+        lima = [(1110.0 + 2 * i, -12.03, -77.05 + 0.001 * i, 11600) for i in range(10)]
+        back = [(1180.0 + 10 * i, 46.65 + 0.012 * i, 24.13 - 0.01 * i, 11600) for i in range(8)]
+        return on + north + [(1105.0, 46.62, 24.15, 11600)] + lima + back
+
+    def test_positions_out_of_reach_are_bad(self):
+        pts = self.ly859()
+        self.assertEqual(sorted(fi.off_track(pts)), list(range(8, 13)) + list(range(14, 24)))
+        # flying on from there for over 10 min: that is where it went (the reports before it were the bad ones)
+        moved = pts[:8] + [(1100.0 + 60 * i, 48.5 + 0.125 * i, 23.0, 11600) for i in range(15)]
+        self.assertEqual(fi.off_track(moved), set())
+        self.assertEqual(fi.off_track([]), set())
+
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "needs Pillow")
+    def test_bad_positions_are_drawn_and_left_out_of_the_map(self):
+        self.assertEqual(fi.render(self.ly859(), [("landed elsewhere", 1250.0)], "LY859", "y")[:2], b"\xff\xd8")
+
     @unittest.skipUnless(importlib.util.find_spec("PIL"), "needs Pillow")
     def test_a_long_flight_with_a_close_up_draws_too(self):
         pts = [(1000.0 + 60 * i, 40.0, -30.0 + 0.2 * i, 10000.0) for i in range(300)]

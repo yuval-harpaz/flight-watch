@@ -351,6 +351,19 @@ FB.currentLeg = function (pts) {
   });
   return pts.slice(start);
 };
+/** Indices of the points ({t, lat, lon}) the aircraft could not have reached from its last good one (3 nm + 750 kt);
+ *  a run of them lasting over 10 min is where it really went (tools/flight_image.py's off_track). LY859, 9 Nov 2026:
+ *  30 s at Lima, Peru, between two reports over Romania - the map zoomed out to half the globe to show it. */
+FB.offTrack = function (pts) {
+  const bad = new Set();
+  let run = [], good = null;
+  pts.forEach((p, i) => {
+    if (!good || FB.haversineNm(good.lat, good.lon, p.lat, p.lon) <= 3 + 750 * (p.t - good.t) / 3600) { good = p; run = []; }
+    else if (run.length && p.t - pts[run[0]].t > 600) { run.forEach(j => bad.delete(j)); good = p; run = []; }
+    else { run.push(i); bad.add(i); }
+  });
+  return bad;
+};
 /** All legs in the points: split at ground points and at gaps the aircraft spent stopped. */
 FB.legs = function (pts) {
   const legs = [];
