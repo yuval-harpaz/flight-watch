@@ -554,6 +554,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   ends at our airport - the tag stop `planned_stop` already knows (`tag_stop_ahead`; not hot, no emergency; 7 Nov 2026 nightly review):
   IZ902 VAR -> TLV, AIZ902 LBSF-LLBG, left Varna westbound for Sofia, "121 deg away from TLV, 781 nm out". Cost: an arrival that turns
   back toward such a stop is not OFF_COURSE.
+  The route's direction is not learned in the departure routing out of an airport that is not one of its ends (within
+  `--off-course-min-dist` of `takeoff_pos`, or `CLIMB_OUT_S` after leaving Amman, `amm_dep`; 9 Nov 2026 nightly review): QTR79G, listed
+  EGLL-OTHH, left Amman (it had come down there as QTR79R) westbound, learned "bound for EGLL" climbing through FL110 and turned SE for
+  Doha: OFF_COURSE "148 deg away from it" twice on Telegram. Cost: a turn back during that climb-out is not a route-based OFF_COURSE.
   Neither within `--off-course-min-dist` of the far end (route data: an arrival's origin, a departure's
   destination): climbing out "away from" the destination and approach turns "back" (squawk replay: TO4755 out of
   Barcelona, AA2045 on approach to SFO "heading back to PHL, 2175 nm out").

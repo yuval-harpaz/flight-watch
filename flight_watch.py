@@ -4197,6 +4197,12 @@ class Monitor:
             # roughly toward the end it is closing on
             if min(d_dest, d_orig) < a.off_course_min_dist:
                 return
+            if (t.amm_dep and s.t - t.amm_dep <= CLIMB_OUT_S
+                    or t.takeoff_pos and haversine_nm(s.lat, s.lon, *t.takeoff_pos) < a.off_course_min_dist):
+                # nor in the departure routing out of an airport that is not one of its ends (a stop): QTR79G, listed
+                # EGLL-OTHH, left Amman westbound, learned "bound for EGLL" climbing through FL110, then turned SE for
+                # Doha - OFF_COURSE "148 deg away from it" twice on Telegram (8 Nov 2026)
+                return
             if (d_dest < was_dest - 5 and d_orig > was_orig
                     and heading_diff(s.track, bearing(s.lat, s.lon, dlat, dlon)) <= 60):
                 t.route_dir = 1

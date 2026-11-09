@@ -2098,6 +2098,19 @@ class RouteOffCourse(unittest.TestCase):
         self.assertTrue(hits)
         self.assertIn("bound for LTFM", hits[0]["message"])
 
+    def test_climbing_out_of_a_stop_does_not_teach_the_direction(self):
+        """QTR79G, listed EGLL-OTHH, left Amman (a stop) westbound, learned "bound for EGLL" climbing through FL110 and
+        turned SE for Doha: OFF_COURSE twice on Telegram (8 Nov 2026). The same climb and turn away from any airport
+        still teaches the direction and alerts."""
+        alts = [3000 + 420 * i for i in range(82)]
+        tracks = [300] * 24 + [300 - 20 * i for i in range(1, 10)] + [120] * 49
+        got = {}
+        for start in ((31.72, 35.98), (31.72, 38.6)):
+            mon, feed, clock, alerts = with_routes()
+            fly(mon, feed, clock, "06a063", path(*start, tracks, alts, gs=300), flight="UAE122", r="A7-BAI", t="B77W")
+            got[start] = "OFF_COURSE" in kinds(alerts)
+        self.assertEqual(got, {(31.72, 35.98): False, (31.72, 38.6): True})
+
     def test_route_stored_the_wrong_way_round_is_learned_from_the_flight(self):
         hits = self.run_track("UAE122")       # listed LTFM-OMDB, flown toward Istanbul
         self.assertTrue(hits)
