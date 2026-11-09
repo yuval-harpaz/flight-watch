@@ -2982,6 +2982,20 @@ class LandingWordsTests(unittest.TestCase):
             fly(mon, feed, clock, "738357", [dict(lat=self.IST[0], lon=self.IST[1], alt_baro="ground", gs=12, track=120)] * 4, **self.IDENT)
             self.assertNotIn("landing", self.diversion(alerts), dep)
 
+    def test_silent_at_runway_height_by_an_airport_names_it(self):
+        """BZ217 BUD -> TLV (8 Nov 2026): last heard at -500 ft 1 nm from Thessaloniki, "Probably landing elsewhere"."""
+        mon = make()[0]
+        t = fw.Track("4521bf")
+        t.samples.append(fw.Sample(t=1000.0, lat=40.52, lon=22.96, alt=-500, gs=140, track=100, vrate=-700, on_ground=False))
+        mon.args.icao, mon.args.airport = "LLBG", "TLV"
+        with mock.patch.object(mon, "other_end", return_value=("LHBP", 47.43, 19.26)), \
+                mock.patch.object(mon, "city", side_effect=lambda icao, default="": {"LGTS": "Thessaloniki"}.get(icao, icao)):
+            mon.standing.airfield_near = lambda lat, lon: ("LGTS", 1.0)
+            mon.standing.elev["LGTS"] = 22
+            self.assertEqual(mon.landing_words(t, "ARR", False)["at"], "Thessaloniki")
+            t.samples[-1].alt = 4000  # passing over it, coming down: not named from the full list
+            self.assertIsNone(mon.landing_words(t, "ARR", False)["at"])
+
     def test_coming_down_unheard_is_not_said_to_have_landed(self):
         ann = fw.Announcer(make()[0].args)
         rec = alert_rec("DIVERSION", "TLV arrival went silent descending through 1475 ft", alt=1475,

@@ -328,7 +328,7 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   **The words** (`landing_words`, `Monitor.diversion`; 4 Nov 2026, the owner: "Landed at Vienna; listed for Larnaca" looks good, presuming no sharp
   turns, going back 180 deg etc.): with no alert in this leg but `NOT_TROUBLE` (coverage and GPS), no emergency, no lone status report, and not
   `FLEW_BACK_NM` (50) back toward where it came from (`max_dist`, `orig_max`), the post reads "Landed at <city>; listed for <city>" (silent coming down:
-  "Probably landing at / elsewhere; listed for ..."). 17 of the 27 DIVERSIONs sent 18 Oct - 4 Nov were stops on a callsign flying on. The kind stays
+  "Probably landing at / elsewhere; listed for ..."). Silent within `SILENT_AT_NM` (3) of an airport of the local checkout at most `SILENT_AT_FT` (1,000) above its height names it (9 Nov 2026: BZ217 last heard at -500 ft 1 nm from Thessaloniki read "Probably landing elsewhere"); higher, coming down, only the region's list (the nearest of ~35,000 may be an airstrip it passes over). 17 of the 27 DIVERSIONs sent 18 Oct - 4 Nov were stops on a callsign flying on. The kind stays
   DIVERSION (cooldown, threads, follow-up, files, log; record `landing`), but links and summaries call it `LANDED_ELSEWHERE` (`Track.shown_kind`:
   the map's `a=`, the follow-up, the picture, the board's warnings). Cost: a real diversion with nothing else to show reads more mildly
   (LY353 at Athens), and a turn back near its origin that was too routine to alert does not change the words.

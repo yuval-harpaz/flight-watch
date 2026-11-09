@@ -321,6 +321,9 @@ CLIMB_OUT_S = 20 * 60  # an arrival on its way to its own origin, this soon afte
 GROUND_MAX_KT = 250
 # a landing elsewhere is at an airport: at most this far (nm) from one of the standing data
 LANDING_AIRPORT_NM = 5
+# Silent this close to an airport of the local checkout and this low above its height: named as where it is probably landing
+# (BZ217 BUD -> TLV, 8 Nov 2026, last heard at -500 ft pressure altitude 1 nm from Thessaloniki: "Probably landing elsewhere")
+SILENT_AT_NM, SILENT_AT_FT = 3, 1000
 # a landing or a silence this close (nm) to a confirmed spoofing point says nothing about the aircraft
 SPOOF_PLACE_NM = 30
 # TOWARD_ISRAEL does not count the southern tip: airways pass Taba / Aqaba a few km from Eilat and
@@ -4095,8 +4098,11 @@ class Monitor:
         if not listed:
             return None
         at = None
-        field = self.standing.airfield_near(s.lat, s.lon) if self.standing and landed else None
-        if field and field[1] <= LANDING_AIRPORT_NM:  # (not when only coming down: the nearest of ~35,000 may be an airstrip)
+        field = self.standing.airfield_near(s.lat, s.lon) if self.standing else None
+        if field and not landed and not (field[1] <= SILENT_AT_NM and (s.alt or 0) <= self.standing.elev.get(field[0], 0)
+                                         + SILENT_AT_FT):
+            field = None  # (only coming down: the nearest of ~35,000 may be an airstrip it is passing over)
+        if field and field[1] <= LANDING_AIRPORT_NM:
             try:
                 self.standing.airport(field[0])  # (its file, for the city: a local checkout, as `field` says, so no request)
             except requests.RequestException:
