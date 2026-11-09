@@ -3067,6 +3067,21 @@ class SquawkCaseTests(unittest.TestCase):
         fly(mon, feed, clock, "4d225c", states, flight="RYR6789", r="9H-QDD", t="B738")
         self.assertNotIn("HOLDING", kinds(alerts))
 
+    def test_circling_that_ends_level_on_the_way_down_is_not_holding(self):
+        """ETD5SM held over Jerusalem at 9,850 ft, then at its 30-min mark was level at 2,475 ft intercepting the glide
+        slope 11 nm from TLV: "circling for 30 min ... at 2475 ft" on Telegram (8 Nov 2026). Level there for long: alerted."""
+        got = {}
+        for down_at in (152, 100):
+            mon, feed, clock, alerts = with_routes()
+            mon.routes["ETD5SM"] = (clock(), "OMAA-LLBG")
+            states = racetrack(8, start=(31.9, 35.15), alt=9850, gs=200)
+            for i, st in enumerate(states):
+                st["alt_baro"] = max(2475, 9850 - 275 * max(0, i - down_at))
+                st["baro_rate"] = -1650 if down_at <= i < down_at + 27 else 0
+            fly(mon, feed, clock, "89669a", states, flight="ETD5SM", r="A6-AEN", t="A21N")
+            got[down_at] = "HOLDING" in kinds(alerts)
+        self.assertEqual(got, {152: False, 100: True})
+
 
 class FarEndTests(unittest.TestCase):
     """False alarms at the far end of TLV flights (19 Oct 2026): the board's airport over the route data, an

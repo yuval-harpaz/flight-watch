@@ -500,7 +500,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   circling below `HOLDING_LOCAL_ALT` (10,000 ft) with no board row nor route (circuits, training: RJA017, A321
   JY-AYV, 18 Oct 2026, 4,300 ft 15 nm east of Amman 2 h after taking off there; a flight that can't land is a
   scheduled one, holding higher). Nor circling that reaches its period descending below `HOLDING_LANDING_ALT`
-  (3,000 ft): the approach (FR6789 "circling for 30 min ... at 275 ft" on final at Venice, squawk replay).
+  (3,000 ft): the approach (FR6789 "circling for 30 min ... at 275 ft" on final at Venice, squawk replay). Descending means
+  its rate, or 500 ft lost in the 2 min before (9 Nov 2026 nightly review): ETD5SM held over Jerusalem at 9,850 ft and at its
+  30-min mark was level at 2,475 ft intercepting the glide slope 11 nm from TLV - on Telegram. Cost: none expected; a hold
+  that steps down below 3,000 ft at the mark is not reported then (the next period is).
 - **SHARP_TURN**: implied bank angle from the turn rate and speed >= `--max-bank` (35 deg),
   everywhere including near airports. Airliners stay below ~25-30; FZ1073's U-turn was a
   normal-rate turn (~25 deg), which is why reversals and sharpness are separate alerts.

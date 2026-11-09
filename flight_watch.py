@@ -3677,9 +3677,13 @@ class Monitor:
         periods = int(minutes // a.holding_minutes)
         if periods > t.hold_alerted:
             t.hold_alerted = periods
-            if (s.alt or 0) < HOLDING_LANDING_ALT and (s.vrate or 0) < 0:
+            back = t.sample_ago(120)
+            if (s.alt or 0) < HOLDING_LANDING_ALT and ((s.vrate or 0) < 0
+                                                       or back and (back.alt or 0) >= (s.alt or 0) + 500):
                 # on final: the circling is ending in a landing (FR6789, 17 Oct 2026, "circling for 30 min ...
-                # at 275 ft" on short final at Venice, in the AeroSignals squawk replay)
+                # at 275 ft" on short final at Venice, in the AeroSignals squawk replay). Or level a moment on the way
+                # down (500 ft lost in 2 min): ETD5SM held over Jerusalem at 9,850 ft, then at the period was level at
+                # 2,475 ft intercepting the glide slope 11 nm from TLV - "circling for 30 min" on Telegram (8 Nov 2026)
                 log.info("%s circled %.0f min, now descending through %s ft: landing - not alerted as holding",
                          t.label(), minutes, s.alt)
                 return
