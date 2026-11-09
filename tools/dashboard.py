@@ -485,7 +485,6 @@ $("mk").onclick = async () => {
   refresh();
 };
 $("power").onclick = async () => {
-  if (RUNNING && !confirm("Stop the monitor? The Telegram channel will be told.")) return;
   $("power").disabled = true;
   $("note").textContent = (await api(RUNNING ? "/api/stop" : "/api/start", {})).result; refresh();
 };
