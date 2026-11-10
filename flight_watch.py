@@ -190,7 +190,7 @@ HOLDING_LANDING_ALT = 3000  # circling that reaches its period descending below 
 # from unseen), both after the restart of 24 Oct 2026 21:45 IDT
 STATE_FIELDS = ("callsign", "reg", "actype", "category", "military", "last_msg", "followed", "follow_why", "was_airborne",
                 "max_dist", "max_alt", "alerted", "squawk", "status_at", "status_seen", "hot_until", "israeli", "route_dir",
-                "leg_start", "amm_dep", "takeoff", "left_at", "takeoff_pos", "climb_peak",
+                "leg_start", "amm_dep", "region_dep", "takeoff", "left_at", "takeoff_pos", "climb_peak",
                 "flown_cs", "elsewhere_at", "feed", "left_home", "rose_home", "orig_first", "orig_max", "orig_left", "came_from", "sent",
                 "stop_wait")
 TG_RETRY_S = 3  # a Telegram message that failed to connect is sent once more after this
@@ -223,6 +223,10 @@ TURN_KINDS = {"COURSE_CHANGE", "SHARP_TURN"}
 # "unless for some extreme circumstances". FALL: a fall at --vrate or faster, or contact lost during one.
 EXTREME = {"EMERGENCY", "MEDICAL_FLIGHT", "FALL", "SQUAWK_CLEARED"}  # (the last: the reply to an EMERGENCY sent)
 PUBLISH = {"military": EXTREME, "private": EXTREME}
+# ... and no VERTICAL_RATE fall on such a flight whose altitude stepped up this much within a minute in the last
+# ALT_JUMP_SPAN_S (Track.alt_jump_up): bad altitude data. BEDLM21 (military B703, MLAT) orbiting at 23,600 ft read
+# 54,500 ft, then "-27,447 ft/min at 1,100 ft" 12 min later and 23,600 again 90 s after: a FALL on Telegram (9 Nov 2026)
+ALT_JUMP_UP_FT, ALT_JUMP_SPAN_S = 10000, 1800
 # ... and one VERTICAL_RATE fall in this long on such a flight, whatever its severity (CHLE1B, CHLE1D: Jordanian PC21
 # trainers at -16,000 to -18,800 ft/min in aerobatics, 18 Oct and 2 Nov 2026). Its lost contact while falling still goes.
 QUIET_FALL_S = 7200
@@ -968,6 +972,7 @@ class Track:
     leg_start: float = 0.0   # data time its callsign last changed: course checks use only what came after
     nic_bad: Sample | None = None  # its last NIC-0 report dropped as out of reach (see integrity)
     amm_dep: float = 0.0     # data time it was last on the ground at Amman / first heard climbing out of it
+    region_dep: tuple | None = None  # (data time, IATA) the same at any non-Israeli airport of REGION_AIRPORTS
     amm_near: float = 0.0    # data time since which it has stayed within AMM_LOCAL_NM of Amman
     ground_far: tuple | None = None  # (lat, lon): our departure first heard on the ground > AWAY_CLIMB_NM out
     takeoff: float = 0.0     # data time of its take-off (left the ground, or first heard climbing low)
@@ -1078,6 +1083,19 @@ class Track:
         lon = sum(x.lon for x in recent) / len(recent)
         radius = max(haversine_nm(lat, lon, x.lat, x.lon) for x in recent)
         return radius if radius <= 25 else None
+
+    def alt_jump_up(self, now: float, span: float = ALT_JUMP_SPAN_S) -> tuple | None:
+        """(feet, seconds, data time) of a step up of ALT_JUMP_UP_FT within a minute in the last `span`: no aircraft
+        climbs like that, so its altitude data is bad (see ALT_JUMP_UP_FT)."""
+        prev = None
+        for x in self.samples:
+            if x.on_ground or x.alt is None:
+                prev = None
+                continue
+            if prev is not None and 0 < x.t - prev.t <= 60 and x.alt - prev.alt >= ALT_JUMP_UP_FT and now - x.t <= span:
+                return x.alt - prev.alt, x.t - prev.t, x.t
+            prev = x
+        return None
 
     def computed_vrate(self, span: float = 30) -> float | None:
         now, old = self.last, self.sample_ago(span)
@@ -2573,6 +2591,11 @@ class Monitor:
         if (s.on_ground and amm < 5) or (len(t.samples) <= 2 and amm < 15 and (s.alt or 0) < 8000
                                          and (s.vrate or 0) > 300):
             t.amm_dep = s.t  # (first heard climbing out: the ground at Amman is often not covered)
+        if s.on_ground or (len(t.samples) <= 2 and (s.alt or 0) < 8000 and (s.vrate or 0) > 300):
+            for code, (alat, alon, israeli) in REGION_AIRPORTS.items():
+                if not israeli and haversine_nm(s.lat, s.lon, alat, alon) < (5 if s.on_ground else 15):
+                    t.region_dep = (s.t, code)
+                    break
         t.amm_near = (t.amm_near or s.t) if amm <= AMM_LOCAL_NM else 0.0
         if s.on_ground and (s.gs is None or s.gs < 50):
             t.takeoff = 0.0
@@ -3148,6 +3171,14 @@ class Monitor:
                 and not (t.callsign and self.routes.get(t.callsign, (0, None))[1])):
             return "climbing out of Amman"  # nothing names its ends, any height: RJA874 (A20N, no route) 11 min out of
             #                                  Amman turned 221 -> 348 deg at FL295 over the Negev onto its way west (6 Nov 2026)
+        dep = t.region_dep
+        if (dep and s.t - dep[0] <= CLIMB_OUT_S and (s.vrate or 0) > -500 and not t.sched
+                and not (t.callsign and self.routes.get(t.callsign, (0, None))[1]) and s.track is not None
+                and heading_diff(s.track, bearing(s.lat, s.lon, *REGION_AIRPORTS[dep[1]][:2])) > 90):
+            return f"climbing out of {dep[1]}"  # the same out of the region's other airports, not descending (it levels
+            #   off in the turn), its new track not back toward it: PER002 (SU-CBY, CRJ9, no route) 15 min out of Beirut
+            #   westbound, 276 -> 204 deg at FL290 114 nm NW of TLV onto its way to Egypt (9 Nov 2026). A turn back
+            #   toward Beirut is still reported
         if self.zones.expected(s.lat, s.lon, s.track):
             return "a route corner"  # seen on many flights
         return None
@@ -4244,6 +4275,15 @@ class Monitor:
                 self.note(t, "route", f"flies away from both ends of its listed route ({self.routes[t.callsign][1]}) - "
                           f"another flight on that callsign, not alerted", every=1800)
                 return
+            if self.classify(t)[0] == "OVR" and not (self.hot(t) or self.in_emergency(t)):
+                apt = self.heading_for_region(t, [(olat, olon), (dlat, dlon)])
+                if apt:  # an over-flight pointing at another of the region's airports, before its descent there would
+                    #      begin: wait for it. BAW4TH (A20N, listed EGLL-HECA) came down over Sinai, turned NE at Aqaba at
+                    #      FL370 and landed at Amman (BA's London - Amman), OFF_COURSE "104 deg away" 135 nm out, 2 min
+                    #      before its descent (9 Nov 2026)
+                    self.note(t, "route", f"leaves its listed route ({self.routes[t.callsign][1]}) heading for {apt}, "
+                              f"not yet descending - waiting for its descent", every=1800)
+                    return
             self.alert(t, "OFF_COURSE", f"bound for {dst} (route {self.routes[t.callsign][1]}) but heading "
                        f"{s.track:.0f} deg, {devs[-1]:.0f} deg away from it for {s.t - old.t:.0f}s, "
                        f"{d_dest:.0f} nm out and opening ({was_dest:.0f} -> {d_dest:.0f} nm)")
@@ -4289,6 +4329,21 @@ class Monitor:
             return None
         for code, (lat, lon, _) in REGION_AIRPORTS.items():
             if (10 < haversine_nm(s.lat, s.lon, lat, lon) <= 150
+                    and heading_diff(s.track, bearing(s.lat, s.lon, lat, lon)) <= self.args.toward_dest_tol):
+                return code
+        return None
+
+    def heading_for_region(self, t: Track, ends: list) -> str | None:
+        """A non-Israeli airport of the region ahead (within --toward-dest-tol), not within 30 nm of one of the route's
+        `ends` [(lat, lon)], too far for the flight to have begun its descent there (3 nm a 1,000 ft + 10) and <= 200 nm:
+        wait for that descent (descending_toward), as level flight on past it is a turn back after all."""
+        s = t.last
+        if s.track is None:
+            return None
+        far = 3 * (s.alt or 0) / 1000 + 10
+        for code, (lat, lon, israeli) in REGION_AIRPORTS.items():
+            if (not israeli and all(haversine_nm(lat, lon, *e) > 30 for e in ends)
+                    and far < haversine_nm(s.lat, s.lon, lat, lon) <= 200
                     and heading_diff(s.track, bearing(s.lat, s.lon, lat, lon)) <= self.args.toward_dest_tol):
                 return code
         return None
@@ -4826,6 +4881,12 @@ class Monitor:
                     or kind == "LOST_CONTACT" and "falling" in msg)
             if ("FALL" if fall else kind) not in PUBLISH[cls] or (kind == "VERTICAL_RATE" and now - last_t < QUIET_FALL_S):
                 log.info("%s %s - %s aircraft, not alerted: %s", t.label(), kind, cls, msg)
+                return False
+            jump = t.alt_jump_up(now) if kind == "VERTICAL_RATE" else None
+            if jump:
+                log.info("%s %s - %s aircraft, not alerted: %s; its altitude stepped up %d ft in %.0fs at %s UTC: bad "
+                         "altitude data", t.label(), kind, cls, msg, jump[0], jump[1],
+                         time.strftime("%H:%M:%S", time.gmtime(jump[2])))
                 return False
         if a.airport_traffic_only and traffic not in AIRPORT_TRAFFIC:
             return False

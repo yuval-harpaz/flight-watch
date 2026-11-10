@@ -1960,6 +1960,21 @@ class AmmanAndEilatTests(unittest.TestCase):
             got[new] = "COURSE_CHANGE" in kinds(alerts, "4d2427")
         self.assertEqual(got, {15: False, 115: True})
 
+    def test_regional_departure_with_no_route_turning_in_its_climb_out(self):
+        """PER002 (SU-CBY, CRJ9, no route) first heard climbing out of Beirut westbound, levelled at FL290 and 15 min out
+        turned 276 -> 204 deg 114 nm NW of TLV onto its way to Egypt: a COURSE_CHANGE on Telegram (9 Nov 2026). The same
+        turn back toward Beirut still alerts."""
+        got = {}
+        for new in (200, 95):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            alts = [4000 + 300 * i for i in range(84)] + [29200] * 36
+            turn = (new - 276 + 180) % 360 - 180
+            tracks = [276] * 90 + [276 + turn * i / 8 for i in range(1, 9)] + [new] * 22
+            fly(mon, feed, clock, "010169", path(33.73, 35.40, tracks, alts, gs=380), flight="PER002", r="SU-CBY",
+                t="CRJ9")
+            got[new] = "COURSE_CHANGE" in kinds(alerts, "010169")
+        self.assertEqual(got, {200: False, 95: True})
+
 
 class MlatSpeedTests(unittest.TestCase):
     def descent(self, mlat_gs, **ident):
@@ -2154,6 +2169,26 @@ class RouteOffCourse(unittest.TestCase):
                 mon.classify = lambda t: ("VIA", None)
             fly(mon, feed, clock, "896121", path(35.0, 48.5, tracks, [37000] * len(tracks)), flight="UAE121", r="A6-EUA")
             self.assertEqual("OFF_COURSE" in kinds(alerts), expected, kinds(alerts))
+
+    def test_over_flight_heading_for_a_regional_airport_waits_for_its_descent(self):
+        """BAW4TH (A20N, listed EGLL-HECA) flew SE over Sinai, turned NE at Aqaba at FL370 for Amman (BA's London - Amman)
+        and began its descent 2 min after OFF_COURSE "104 deg away" went out, 135 nm out (9 Nov 2026). Flying on level past
+        where its descent would begin, it still alerts."""
+        got = {}
+        for name in ("descends", "level"):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            mon.routes["BAW4TH"] = (clock(), "EGLL-HECA")
+            mon.route_ends = lambda t: [("EGLL", 51.47, -0.46), ("HECA", 30.12, 31.41)]
+            ident = dict(flight="BAW4TH", r="G-TTSG", t="A20N")
+            fly(mon, feed, clock, "40822e", path(29.40, 34.30, [115] * 3, [37000] * 3, gs=480), **ident)
+            mon.tracks["40822e"].route_dir = 1  # (learned "bound for HECA" on its way down from the Mediterranean)
+            st = feed.aircraft["40822e"]
+            turn = [115 - 4 * i for i in range(1, 25)] + [18] * 30  # (97 deg in 4 min: no reversal)
+            n = len(turn)
+            alts = [37000] * 38 + ([37000 - 160 * i for i in range(1, n - 37)] if name == "descends" else [37000] * (n - 38))
+            fly(mon, feed, clock, "40822e", path(st["lat"], st["lon"], turn, alts, gs=480), **ident)
+            got[name] = "OFF_COURSE" in kinds(alerts, "40822e")
+        self.assertEqual(got, {"descends": False, "level": True})
 
     def test_no_alert_while_flying_the_route(self):
         mon, feed, clock, alerts = with_routes()
@@ -2667,6 +2702,20 @@ class Run18OctTests(unittest.TestCase):
             fly(mon, feed, clock, "743593", path(32.4, 36.2, [270] * 50, [12000 + 80 * i for i in range(50)], gs=250),
                 **ident)
         self.assertEqual(kinds(alerts), ["VERTICAL_RATE"])
+
+    def test_military_fall_after_an_altitude_step_up_is_bad_data(self):
+        """BEDLM21 (military B703, MLAT) at 23,600 ft read 54,500 ft for a moment, then 12 min later fell to 1,100 ft in
+        27 s ("-27,447 ft/min") and read 23,600 again 90 s after: a FALL on Telegram (9 Nov 2026). The same fall with no
+        step up before it is still sent."""
+        got = {}
+        for step in (True, False):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            alts = [23600] * 20 + ([54500] if step else [23600]) + [23600] * 70 + [23600 - 5600 * i for i in range(1, 5)]
+            alts += [1100] * 6
+            fly(mon, feed, clock, "738a01", path(32.1, 34.5, [300] * len(alts), alts, gs=330), flight="BEDLM21",
+                r="272", t="B703", dbFlags=1)
+            got[step] = kinds(alerts, "738a01")
+        self.assertEqual(got, {True: [], False: ["VERTICAL_RATE"]})
 
     def test_routing_corners_added_by_hand(self):
         """The heatmaps that taught turn_zones.json are refused since 31 Oct 2026. Where each turn was reported / began."""

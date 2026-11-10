@@ -398,6 +398,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   3 Nov), the jump plane's one check-in dive (16 Oct; 4XDAN still sent 4 dives with follow-ups on 31 Oct, cause not looked for, gone
   with it), and the survey-line rule (14 Oct; no such flight left to reach it). Cost: an accident on such a flight that shows only as
   a turn, a normal descent or a TOWARD_ISRAEL, with no squawk, is only logged, and the alerts no longer show that the monitor sees them.
+  No FALL on such a flight whose altitude stepped up >= `ALT_JUMP_UP_FT` (10,000 ft) within a minute in the last 30 min
+  (`Track.alt_jump_up`: bad altitude data; 10 Nov 2026 nightly review): BEDLM21 (military B703, MLAT) orbiting at 23,600 ft read
+  54,500 ft, 12 min later "-27,447 ft/min at 1,100 ft" and 23,600 again 90 s after, on Telegram. Cost: a real fall soon after
+  such a glitch is only logged (its silence while falling still alerts).
   `LARGE_TYPES` names Embraer's airliners only (E120 - E195, E75L / E75S, E2s; 7 Nov 2026 nightly review): its `E[0-9]{2}[05LS]` also took
   the business jets E35L (Legacy 600 / 650), E545 / E550 (Legacy 450 / 500), now in `BIZJET_TYPES`. H5763 (VistaJet D-AAHO, E35L, no
   route) was an "airliner" and its approach turn at Malta, FL111 descending, went out as a course reversal.
@@ -469,6 +473,11 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   when the held new track is > 90 deg from the way back to us (judged when reported; 8 Nov 2026 nightly review): WZZ46KE (A21N, Wizz's
   alphanumeric callsign, no route) 13 min out of TLV turned 295 -> 18 deg at FL285 65 nm NW onto its way north. Cost: a real reversal of
   such a departure that does not head back toward TLV is only logged while it still climbs.
+  The same out of any non-Israeli airport of `REGION_AIRPORTS` (`Track.region_dep`: on the ground within 5 nm, or first heard
+  climbing below 8,000 ft within 15 nm), within `CLIMB_OUT_S`, not descending (it levels off in the turn), the new track > 90 deg
+  from the way back (judged when the turn starts; 10 Nov 2026 nightly review): PER002 (SU-CBY, CRJ9, no route) 15 min out of
+  Beirut, 276 -> 204 deg at FL290 114 nm NW of TLV onto its way to Egypt. Cost: a real reversal of such a departure that does
+  not head back is only logged for 20 min after take-off.
   `routine_turn_place` judges these when the turn starts; when it is reported, 2 min later, the destination is judged
   again (ETD238, OMAA-VOBL, began its approach turn at Bangalore just over 35 nm out and was reported at 17 nm, 22 Oct
   2026) - not the origin: AA1009 (ORD -> LAX, 6 Oct 2026) turning back to Chicago ended its turn within 35 nm of it,
@@ -549,6 +558,11 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   of its route (> 90 deg from the origin too, opening): the route is another flight's. RJA6501 (E290, OJAQ-LOWL, learned
   "bound for OJAQ") flew SE into Saudi Arabia at FL350, OFF_COURSE on Telegram (29 Oct 2026; the owner's choice). A turn
   back heads for the origin (FZ1073) and still alerts.
+  Nor, while it is not yet where its descent would begin (3 nm a 1,000 ft + 10), an over-flight pointing at a non-Israeli
+  airport of the region <= 200 nm ahead, not within 30 nm of its route's ends, not hot, no emergency (`heading_for_region`;
+  10 Nov 2026 nightly review): BAW4TH (A20N, listed EGLL-HECA, BA's London - Amman) turned NE at Aqaba at FL370, OFF_COURSE
+  "104 deg away" 135 nm from Amman, 2 min before its descent (then `descending_toward`). Level on past that point it alerts.
+  Cost: a real turn back at cruise that happens to point at a regional airport alerts up to a few minutes later.
   Nor an arrival below `STOP_APPROACH_ALT` (10,000 ft) within `STOP_APPROACH_NM` (30) of an airfield, on its way and in time for a stop
   there (`approaching_stop`, `stop_in_time`, as `early_stop`; not when hot; 4 Nov 2026 nightly review): IB1873 MAD -> TLV 15 nm from Athens
   at 5,275 ft heading 337 deg, "637 nm out and opening", 7 min before its nightly stop, on Telegram. Needs the local checkout's airports.
