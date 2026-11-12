@@ -2665,6 +2665,26 @@ class Run18OctTests(unittest.TestCase):
                 got[hours] = ("TURNING_BACK" in kinds(alerts), mon.tracks["4d2405"].sched is None)
         self.assertEqual(got, {-5: (False, True), -1: (True, False)})
 
+    def test_departure_first_heard_heading_home_after_its_leg_could_be_flown(self):
+        """W46404 (9H-WAV, TLV -> MXP due 19:03 IST, 1,461 nm: 3.5 h at STOP_KT) first found at 22:56 at FL350 over the
+        Adriatic heading 62 deg, 6 min before leg_over: TURNING_BACK "1,130 nm out and closing" (11 Nov 2026). Heading
+        away from TLV then, or squawking 7700, it is still ours."""
+        got = {}
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "airports", "schema-01", "L"))
+            with open(os.path.join(d, "airports", "schema-01", "L", "LI.csv"), "w") as f:
+                f.write("Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                        "LIMC,Malpensa,LIMC,MXP,Milan,IT,45.6306,8.7281,768\n")
+            for name, track, squawk in (("home", 62, "1225"), ("away", 300, "1225"), ("7700", 62, "7700")):
+                mon, feed, clock, alerts = with_board([board_row("W4", "6404", "D", local_time(mon_clock(), -3.87),
+                                                                 "MXP")])
+                mon.standing = fw.StandingData(mon.http, d)
+                fly(mon, feed, clock, "4d242a", [{**st, "squawk": squawk} for st in
+                                                 path(43.0, 15.2, [track] * 30, [35000] * 30, gs=470)],
+                    flight="WMT6404", r="9H-WAV", t="A320")
+                got[name] = mon.tracks["4d242a"].sched is None
+        self.assertEqual(got, {"home": True, "away": False, "7700": False})
+
     def test_departure_first_heard_on_the_ground_far_away_takes_off_after_its_leg(self):
         """W46404 (9H-WBB, TLV -> MXP due 18:58 IST) first heard on the ground at Rome at 22:29, out at 22:34 heading NE:
         TURNING_BACK "1,212 nm out and closing" (6 Nov 2026), 22 min before leg_over. The leg's flight at STOP_KT is
@@ -3738,6 +3758,18 @@ class LegEndAndLightAircraftTests(unittest.TestCase):
             mon.alert = lambda t, kind, *a, **k: (raised.append(kind), alert(t, kind, *a, **k))[1]
             fly(mon, feed, clock, "738a4a", path(32.1, 34.5, [343] * 6 + [313, 283, 253] + [253] * 8, [37000] * 17, gs=gs),
                 flight="679", r="", t="GLF5", category="A3", dbFlags=1)
+            self.assertEqual("SHARP_TURN" in raised, expected, (gs, raised))
+
+    def test_speed_a_turboprop_cannot_fly_is_no_sharp_turn(self):
+        """HFA951 (4X-IHB, AT76) "291 -> 336 deg in 29 s at 620 kt (~41 deg bank)" at 7,725 ft in GPS jamming, 11 Nov
+        2026; at a speed an ATR flies, the same turn is raised."""
+        for gs, expected in ((620, False), (280, True)):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            raised, alert = [], mon.alert
+            mon.alert = lambda t, kind, *a, **k: (raised.append(kind), alert(t, kind, *a, **k))[1]
+            turn = [291] * 6 + [306, 321, 336] + [336] * 8 if gs > 450 else [291] * 6 + [231, 171, 111] + [111] * 8
+            fly(mon, feed, clock, "739601", path(32.8, 34.5, turn, [7725] * 17, gs=gs), flight="HFA951", r="4X-IHB",
+                t="AT76", category="A2")
             self.assertEqual("SHARP_TURN" in raised, expected, (gs, raised))
 
     def test_a_jump_plane_is_private(self):

@@ -315,6 +315,10 @@ BIZJET_TYPES = re.compile(r"GLF[2-6]|GA[5-8]C|GLEX|GL[5-8]T|CL[36]0|CL35|H25[ABC
                           r"C25[ABCM]|C5[0-6][0-9X]|C680|C68A|C700|C750|LJ[2-7][0-9]|E5[05]P|E35L|E545|E550|G150|G280|"
                           r"GALX|ASTR|PRM1")
 BIZJET_MAX_KT = 560
+# Turboprop airliners (ATR, Dash 8) cruise at ~250-300 kt TAS; faster than this over the ground is a bad speed for the bank.
+# HFA951 (4X-IHB, AT76) "291 -> 336 deg in 29 s at 620 kt (~41 deg bank)" at 7,725 ft in GPS jamming / spoofing, 11 Nov 2026
+TURBOPROP_TYPES = re.compile(r"AT[4-7][0-9]|DH8[A-D]|SF34|SB20|D328|J328|AT[4-7]T|F50|JS41|BE20|B350|PC12")
+TURBOPROP_MAX_KT = 450
 # A SHARP_TURN waits this long (s, data time) for a report back on its old course where it would have been without
 # the turn - a velocity / position glitch (settle_turn); sent when a trusted report after it is not, or nothing is
 # heard for TURN_HOLD_MAX_S
@@ -2562,12 +2566,14 @@ class Monitor:
                 or len(t.samples) <= 2 and d < 30 and (s.alt or 0) < 10000 and (s.vrate or 0) > 300):
             t.left_home = True  # (or first heard climbing out: RYR6VV at 5,600 ft 6 nm from Nador)
         elif (len(t.samples) <= 2 and not t.left_home and d > AWAY_CLIMB_NM and self.classify(t)[0] == "DEP"
-              and (not s.on_ground and (s.alt or 0) < 25000 and (s.vrate or 0) > 300 or self.leg_over(t, s))):
+              and (not s.on_ground and (s.alt or 0) < 25000 and (s.vrate or 0) > 300 or self.leg_over(t, s)
+                   or self.heard_heading_home(t, s, ac))):
             # first heard climbing far from our airport: it took off there, another leg on our departure's callsign.
             # W46404 (9H-WZR, board TLV -> MXP) first heard after a restart climbing out near Rome at FL197, flying on
             # to Romania: two TURNING_BACK "1,223 nm out and closing" (26 Oct 2026). (At cruise it may be ours: the
             # squawk replay's departures are often first heard far out at cruise, SWA512 362 nm from Honolulu)
-            how = "after its board leg should have landed" if self.leg_over(t, s) else "climbing"
+            how = ("after its board leg should have landed" if self.leg_over(t, s) else
+                   "heading back after its board leg could have been flown" if self.heard_heading_home(t, s, ac) else "climbing")
             t.flown_cs, t.sched = t.callsign, None
             t.takeoff_pos = t.takeoff_pos or (s.lat, s.lon)
             log.info("%s first heard %s at %s ft %.0f nm from %s: another leg on our departure's callsign",
@@ -3735,6 +3741,7 @@ class Monitor:
         a, s = self.args, t.last
         if (s.on_ground or s.track is None or not s.gs or s.gs < 150 or (s.alt or 0) < 1500
                 or s.gs > (BIZJET_MAX_KT if BIZJET_TYPES.fullmatch(t.actype or "")
+                           else TURBOPROP_MAX_KT if TURBOPROP_TYPES.fullmatch(t.actype or "")
                            else a.max_gap_speed if t.large or t.military else SMALL_MAX_KT)):
             return  # (faster than any airliner flies: a bad speed - THY6219 "843 kt" at 8,700 ft, 14 Oct 2026;
             #          HEZ652, a Hawker 800 "at 728 kt" at FL190 in GPS jamming, 22 Oct 2026; 679, a GLF5 "at 599 kt")
@@ -4096,6 +4103,15 @@ class Monitor:
             return False
         far = self.other_end(t, "DEP")
         return bool(far) and s.t > t.sched.ts + haversine_nm(self.args.lat, self.args.lon, far[1], far[2]) / STOP_KT * 3600 + extra
+
+    def heard_heading_home(self, t: Track, s: Sample, ac: dict) -> bool:
+        """First heard flying toward our airport (within --turn-back) once its whole board leg could have been flown at
+        STOP_KT, no emergency: another leg. W46404 (9H-WAV, TLV -> MXP due 19:03 IST, 1,461 nm) first found at 22:56
+        at FL350 over the Adriatic heading 62 deg, 6 min before leg_over: TURNING_BACK "1,130 nm out and closing" (11
+        Nov 2026)."""
+        return (not s.on_ground and s.track is not None and not self.in_emergency(t) and self.leg_over(t, s, 0)
+                and str(ac.get("squawk") or "") not in EMERGENCY_SQUAWKS
+                and heading_diff(s.track, bearing(s.lat, s.lon, self.args.lat, self.args.lon)) <= self.args.turn_back)
 
     def diversion(self, t: Track, kind: str, msg: str, landed: bool = True) -> bool:
         """A DIVERSION, worded as a plain fact when nothing else was wrong with the flight (`landing_words`)."""

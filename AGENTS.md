@@ -302,6 +302,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   (`Track.ground_far`, `leg_over(.., 0)`; 7 Nov 2026 nightly review): W46404 (9H-WBB, due 18:58 IST) on the ground at Rome at 22:29, out
   at 22:34 heading NE, TURNING_BACK at 22:44, 12 min before `leg_over`. Cost: a departure that diverted unseen, first heard on the ground
   there and flying back to TLV after that time, is not TURNING_BACK.
+  So is one first heard in the air that far out flying toward our airport (within `--turn-back`) once its whole board leg could have
+  been flown at `STOP_KT`, no emergency squawk (`heard_heading_home`; 12 Nov 2026 nightly review): W46404 (9H-WAV, due 19:03 IST, TLV -
+  MXP 1,461 nm) first found at 22:56 at FL350 over the Adriatic heading 62 deg, TURNING_BACK at 23:01, a minute before `leg_over`. Cost: a
+  departure that diverted unseen and is first heard flying back toward TLV after that time, with no squawk, is not TURNING_BACK.
   A landing within `DIVERTED_NM` of a stop listed in the route data (`planned_stop`: an airport between the ends,
   when the route's far end agrees with the board) is logged, not a DIVERSION: KLM461 AMS -> TLV is EHAM-LCLK-LLBG
   and "went silent ... probably landing at LCA" (20 Oct 2026). 113 routes through TLV list stops (crowd-sourced,
@@ -530,6 +534,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   `BIZJET_MAX_KT` (560) over the ground has a bad speed too (29 Oct 2026, the owner's choice - by type, not size): 679, a
   military GLF5 (cruise ~510 kt TAS), "343 -> 305 deg in 28 s at 599 kt (~37 deg bank)" at FL370, no report back on its
   old course for the 40 s hold below to catch.
+  A turboprop type (`TURBOPROP_TYPES`: ATR, Dash 8, Saab 340 ...) faster than `TURBOPROP_MAX_KT` (450) over the ground has a bad speed
+  too (12 Nov 2026 nightly review): HFA951 (4X-IHB, AT76) "291 -> 336 deg in 29 s at 620 kt (~41 deg bank)" at 7,725 ft in GPS jamming /
+  spoofing off Haifa. Cost: none expected (an ATR cruises at ~275 kt TAS; 450 leaves ~170 kt of tailwind).
   A SHARP_TURN makes no flight hot (see Hot flights).
   A turning aircraft draws an arc; a velocity / position glitch zig-zags back. So a SHARP_TURN waits `TURN_HOLD_S` (40 s)
   for a report - trusted or not - back on its old course (30 deg) where it would have been without the turn (1.5 nm, or
