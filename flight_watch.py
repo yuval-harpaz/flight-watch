@@ -211,6 +211,10 @@ STOP_APPROACH_ALT, STOP_APPROACH_NM = 10000, 30  # below this, this near an airf
 DEST_TURN_TOL, DEST_TURN_GAIN = 35, 30  # a board departure's reversal to within this of its destination, this much nearer it
 APPROACH_NM, APPROACH_ALT = 20, 15000  # a descent here, into its own destination, is judged by its altitude history
 STOP_FRESH_S = 300  # "still at its stop" needs a report this recent (s): ground coverage is thin
+# A departure that has flown this share of the way and is this near its destination is not TURNING_BACK (check_destination):
+# ENT369 (SP-ENG, TLV -> KTW) holding at FL240 ~67 nm E of Katowice, its inbound leg "heading back to TLV, 1,248 nm out
+# and closing" (12 Nov 2026)
+NEAR_DEST_SHARE, NEAR_DEST_NM = 0.9, 100
 DIVERTED_NM = 30  # a departure on the ground this far from its destination landed elsewhere (check_landing)
 BLIND_S = 180  # no answered local poll for this long after an aircraft's last report: we did not see it go
 TAKEOFF_MAX_GAP_S, TAKEOFF_MAX_ALT = 180, 10000  # a take-off is seen: ground, then airborne within 3 min, low
@@ -4246,6 +4250,13 @@ class Monitor:
                        f"{devs[-1]:.0f} deg away from {a.airport} for {s.t - old.t:.0f}s, "
                        f"{d:.0f} nm out and opening ({was:.0f} -> {d:.0f} nm)")
         elif kind == "DEP" and max(devs) <= a.turn_back and d < was - 5:
+            if (far and not self.in_emergency(t) and haversine_nm(s.lat, s.lon, far[1], far[2]) <= NEAR_DEST_NM
+                    and d >= NEAR_DEST_SHARE * haversine_nm(a.lat, a.lon, far[1], far[2])):
+                # nearly there: a hold or its arrival routing (ENT369 holding 67 nm E of Katowice, 12 Nov 2026); a flight
+                # in trouble this near its destination lands there or nearby, a DIVERSION if elsewhere
+                self.note(t, "route", f"{haversine_nm(s.lat, s.lon, far[1], far[2]):.0f} nm from its destination "
+                          f"{far[0]}, heading {s.track:.0f} deg: not turning back", every=1800)
+                return
             self.alert(t, "TURNING_BACK", f"{a.airport} departure heading back to {a.airport} "
                        f"(track {s.track:.0f} deg) for {s.t - old.t:.0f}s, {d:.0f} nm out and "
                        f"closing ({was:.0f} -> {d:.0f} nm)")

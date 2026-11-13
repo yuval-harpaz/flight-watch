@@ -1563,6 +1563,20 @@ class DestinationTests(unittest.TestCase):
             got[case] = "TURNING_BACK" in kinds(alerts)
         self.assertEqual(got, {"cruise": True, "climbing far away": False})
 
+    def test_hold_near_the_destination_is_not_turning_back(self):
+        """ENT369 (SP-ENG, TLV -> KTW) held at FL240 ~67 nm E of Katowice; its inbound leg pointed at TLV: TURNING_BACK
+        "1,248 nm out and closing" (12 Nov 2026). Here ~70 nm E of Heathrow, a turn onto 105 deg. Under 7700 it still alerts."""
+        got = {}
+        for case in ("hold", "emergency"):
+            mon, feed, clock, alerts = with_board([board_row("LY", "315", "D", local_time(mon_clock(), -4), "LHR")])
+            tracks = [255] * 6 + [255 + 15 * i for i in range(1, 13)] + [105] * 24
+            mon.other_end = lambda t, kind: ("EGLL", 51.47, -0.46) if kind == "DEP" else None  # (board LHR, no standing data)
+            kw = {"squawk": "7700"} if case == "emergency" else {}
+            fly(mon, feed, clock, "738315", path(51.45, 1.4, tracks, [24000] * len(tracks), **kw), flight="ELY315",
+                r="4X-EDC")
+            got[case] = "TURNING_BACK" in kinds(alerts)
+        self.assertEqual(got, {"hold": False, "emergency": True})
+
 
 def mon_clock():
     return Clock()

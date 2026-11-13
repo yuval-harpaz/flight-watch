@@ -596,6 +596,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   Neither within `--off-course-min-dist` of the far end (route data: an arrival's origin, a departure's
   destination): climbing out "away from" the destination and approach turns "back" (squawk replay: TO4755 out of
   Barcelona, AA2045 on approach to SFO "heading back to PHL, 2175 nm out").
+  Nor TURNING_BACK for a departure that has flown `NEAR_DEST_SHARE` (90%) of the way and is within `NEAR_DEST_NM` (100) of its
+  destination, no emergency (13 Nov 2026, the owner's choice): ENT369 (SP-ENG, TLV -> KTW) holding at FL240 ~67 nm E of Katowice,
+  its inbound leg "heading back to TLV, 1,248 nm out and closing"; hot from it, two hold turns went out as course reversals.
+  Cost: a real turn back to TLV from near the destination (rare: it would land nearby, a DIVERSION) is not TURNING_BACK.
 - **TOWARD_ISRAEL**: the hijack scenario of a flight *not* bound for Israel turned toward it.
   Military aircraft (readsb dbFlags) are exempt: on 6 Oct 29 of 33 alerts were USAF KC-135
   tankers, a military Gulfstream (IRON) and a Canadian C-130 operating over Israel for hours.
