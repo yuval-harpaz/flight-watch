@@ -231,6 +231,7 @@ ALT_JUMP_UP_FT, ALT_JUMP_SPAN_S = 10000, 1800
 # trainers at -16,000 to -18,800 ft/min in aerobatics, 18 Oct and 2 Nov 2026). Its lost contact while falling still goes.
 QUIET_FALL_S = 7200
 STATUS_ONCE_S = 7200  # an ADS-B status alert: not again on this flight (Monitor.check_emergency)
+STATUS_CONSPICUITY_SQ = "1000"  # a status other than lifeguard held at this squawk (Europe's Mode S code) is only noted
 # An emergency squawk back to a normal code this soon (s, from our first report of it to our first of the normal code,
 # held STATUS_HOLD_S): SQUAWK_CLEARED, a reply to its EMERGENCY (Monitor.squawk_back). BDK27 (5 Nov 2026) squawked 7700,
 # then 7600, then 2245 within ~1-2 min. None of 259 AeroSignals cases went back within 2 min (trace squawk marks: shortest
@@ -2611,7 +2612,10 @@ class Monitor:
             # (on the ground before a gap in our polls and high after it: when it took off is unknown -
             # 18 Oct 2026, 11 EARLY_DESCENTs on arrivals descending into their destinations, "1-8 min after
             # take-off", after the API refused our polls for up to 2 h)
-            t.takeoff, t.climb_peak, t.left_at = s.t, s.alt or 0, s.t
+            # (the peak only as held on two reports, the first airborne one too: ELY5137 (4X-EKR, TLV -> PFO) was first
+            # heard in the air at "7,425 ft" and a minute later at 2,750 ft, -2,752 ft/min, then flew on to Paphos -
+            # EARLY_DESCENT "4,675 ft below the 7,425 ft it climbed to, 1 min after take-off" on Telegram, 12 Nov 2026)
+            t.takeoff, t.climb_peak, t.left_at = s.t, 0, s.t
             t.rose_home = d < 15
             t.takeoff_pos = (prev.lat, prev.lon) if prev is not None and prev.on_ground else (s.lat, s.lon)
         elif (not s.on_ground and not t.takeoff_pos and prev is not None and prev.on_ground
@@ -2840,6 +2844,11 @@ class Monitor:
                 if t.status_seen != em or now - t.status_at > STATUS_NOTE_S:
                     t.status_at, t.status_seen = now, em
                 log.info("%s ADS-B emergency status %s (%s)", t.label(), em, STATUS_NAMES.get(em, em))
+            elif em != "lifeguard" and t.squawk == STATUS_CONSPICUITY_SQ:
+                # held, but at Europe's Mode S conspicuity code: LY327 (B738, TLV -> CDG) "downed" at FL380, 425 kt
+                # over Geneva on two reports 40 s apart (12 Nov 2026), as the lone ones over Bavaria of 26 Oct - only noted
+                self.note(t, "status", f"ADS-B emergency status {em} held at squawk {t.squawk}: a bad status, not "
+                          "alerted (a real emergency squawks 7700 / 7600 / 7500)", every=STATUS_ONCE_S)
             elif now - t.em_since >= STATUS_HOLD_S:
                 since = time.strftime("%H:%M:%S", time.gmtime(t.em_since))
                 kind, key = ("MEDICAL_FLIGHT", "MEDICAL_FLIGHT") if em == "lifeguard" else ("EMERGENCY", f"EMERGENCY:{em}")
@@ -3870,6 +3879,16 @@ class Monitor:
                 log.info("%s on the ground at its origin %s, never seen leaving it: its previous flight, "
                          "not a diversion", t.label(), orig)
                 return
+            orig = self.other_end(t, "ARR")
+            if (orig and 0 <= t.orig_first and t.orig_max <= DIVERTED_NM and t.max_alt < RETURN_MIN_ALT
+                    and not self.in_emergency(t)):
+                # never farther than this from its origin nor up at 10,000 ft in this leg: it has not left yet. 6H762
+                # (OK-TST, PRG -> TLV) found by the board's callsign at Prague 3 h before its board time, one airborne
+                # report while it taxied out, then "Landed at Prague" on Telegram and its departure turn a reversal
+                # (12 Nov 2026)
+                log.info("%s on the ground at its origin %s, never more than %.0f nm from it nor at %d ft: not left "
+                         "yet, not a diversion", t.label(), orig[0], t.orig_max, RETURN_MIN_ALT)
+                return
             stop = self.planned_stop(t, s, kind)
             if stop:
                 log.info("%s on the ground at %s, a stop on its route - not a diversion", t.label(), stop)
@@ -4255,7 +4274,10 @@ class Monitor:
             if min(d_dest, d_orig) < a.off_course_min_dist:
                 return
             if (t.amm_dep and s.t - t.amm_dep <= CLIMB_OUT_S
+                    or t.region_dep and s.t - t.region_dep[0] <= CLIMB_OUT_S
                     or t.takeoff_pos and haversine_nm(s.lat, s.lon, *t.takeoff_pos) < a.off_course_min_dist):
+                # (out of any of the region's airports too: QTR9L, listed LSZH-OTHH, is Beirut - Doha; it climbed out
+                # of Beirut westbound, learned "bound for LSZH" and OFF_COURSE "164 deg away" twice on Telegram, 12 Nov)
                 # nor in the departure routing out of an airport that is not one of its ends (a stop): QTR79G, listed
                 # EGLL-OTHH, left Amman westbound, learned "bound for EGLL" climbing through FL110, then turned SE for
                 # Doha - OFF_COURSE "148 deg away from it" twice on Telegram (8 Nov 2026)

@@ -278,6 +278,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   farther, and never on the ground before take-off or climbing near it (`at_own_origin`; 9A-BTH changed ISR193 -> ISR182 in the air and "went
   silent probably landing elsewhere" on approach to Madrid, 19 Oct 2026). Squawk replay: the real returns (SWA512 to Honolulu,
   LAN454 to Buenos Aires, first heard 46 nm out with its departure unseen) still alert.
+  An arrival on the ground at its origin never more than `DIVERTED_NM` from it nor up at `RETURN_MIN_ALT` in this leg, no emergency,
+  has not left yet (13 Nov 2026 nightly review): 6H762 (OK-TST, PRG -> TLV) found taxiing at Prague 3.5 h before its board time, one
+  airborne report, then "Landed at Prague" and its departure turn (hot) a course reversal on Telegram. Cost: an arrival that returns
+  to its origin from within 30 nm below 10,000 ft with no squawk is only logged.
   Its own landing there does not count as "seen leaving" (4X-ABT, 20 Oct 2026: TLV -> Madrid as 6H183, then Madrid
   -> Malaga already as ISR152, 6H152 AGP -> TLV on time: OFF_COURSE "heading away from TLV, 1,928 nm out" and
   DIVERSION on the ground at Malaga). Such an arrival flying toward its origin is not OFF_COURSE either. Both need
@@ -421,6 +425,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   below 2,000 ft; 18 Oct 2026: on the ground before hours of refused polls and descending into its destination
   after them was "1-8 min after take-off", 11 EARLY_DESCENTs). AS1282 01:14:24, 13 min before
   RETURNED; of 184 large-aircraft take-offs the nearest was a 400 ft step by an E75L at 9.6 min.
+  The first airborne report's altitude is held like any other (13 Nov 2026 nightly review): ELY5137 (4X-EKR, TLV -> PFO) was first
+  heard in the air at "7,425 ft", a minute later at 2,750 ft (-2,752 ft/min), and flew on to Paphos: EARLY_DESCENT "1 min after
+  take-off" on Telegram. Cost: a real early descent whose peak was heard on one report only is not alerted.
   The rate limit was +-500 ft/min until 5 Nov 2026 (nightly review): ET404 (ET-BAL, B38M) levelling off at 10,000 ft 36 nm E of TLV, slowing to
   250 kt, went 150 ft up and down at +-640 ft/min and landed normally: "JT610, ET302 before their crashes" on Telegram. Now 700: FZ1073, the
   lowest real one, reached -768 / +832. The 150 ft leg stays, as ET302 reaches 3 reversals only at that. Cost: a real wobble that stays under
@@ -438,7 +445,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   TLV -> Rotterdam) "lifeguard" 25 Oct, ELY323 (B788, TLV -> CDG) and BEL1UG (A20N, TLV -> BRU) "nordo" 26 Oct, both on
   Telegram as EMERGENCY. A real emergency squawks 7700 / 7600 / 7500, alerted at once, and that sets the status itself.
   A lone report is not alerted, but noted with its time on the flight's other alerts for `STATUS_NOTE_S` (6 h, until it
-  lands): `[<status> status at <UTC>]`, first in the post's detail ("⚕️ ADS-B lifeguard (medical) status at HH:MM",
+  lands): `[<status> status at <UTC>]`, (A status other than lifeguard held while squawking 1000 is only noted, `STATUS_CONSPICUITY_SQ`;
+  13 Nov 2026 nightly review: LY327 (B738, TLV -> CDG) "downed" at FL380, 425 kt over Geneva on two reports 40 s apart, on Telegram.
+  Cost: a real emergency status at 1000 with no emergency squawk is only noted.) first in the post's detail ("⚕️ ADS-B lifeguard (medical) status at HH:MM",
   "ADS-B nordo (radio failure) status, one unconfirmed report at HH:MM") - the owner: "if anything else happens like
   divert alert, it should be reported too".
   An emergency squawk back to a normal code within `SQUAWK_BRIEF_S` (90 s, our first report of the code to our first of the
@@ -582,6 +591,8 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   `--off-course-min-dist` of `takeoff_pos`, or `CLIMB_OUT_S` after leaving Amman, `amm_dep`; 9 Nov 2026 nightly review): QTR79G, listed
   EGLL-OTHH, left Amman (it had come down there as QTR79R) westbound, learned "bound for EGLL" climbing through FL110 and turned SE for
   Doha: OFF_COURSE "148 deg away from it" twice on Telegram. Cost: a turn back during that climb-out is not a route-based OFF_COURSE.
+  Nor within `CLIMB_OUT_S` of leaving any non-Israeli airport of the region (`region_dep`; 13 Nov 2026 nightly review): QTR9L, listed
+  LSZH-OTHH, is Beirut - Doha; out of Beirut westbound it learned "bound for LSZH", OFF_COURSE "164 deg away" twice on Telegram.
   Neither within `--off-course-min-dist` of the far end (route data: an arrival's origin, a departure's
   destination): climbing out "away from" the destination and approach turns "back" (squawk replay: TO4755 out of
   Barcelona, AA2045 on approach to SFO "heading back to PHL, 2175 nm out").

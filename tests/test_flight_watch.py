@@ -1348,6 +1348,18 @@ class EmergencyStatusTests(unittest.TestCase):
             got[case] = kinds(alerts, "490d0b")
         self.assertEqual(got, {"held": ["MEDICAL_FLIGHT"], "lone": [], "nordo": [], "nordo held": ["EMERGENCY"]})
 
+    def test_status_held_at_squawk_1000_is_not_alerted(self):
+        """LY327 (B738, TLV -> CDG) "downed" at FL380, 425 kt over Geneva on two reports 40 s apart, squawk 1000 (Europe's
+        Mode S conspicuity code): EMERGENCY on Telegram (12 Nov 2026). At another code it still alerts; lifeguard too."""
+        got = {}
+        for em, sq in (("downed", "1000"), ("downed", "2245"), ("lifeguard", "1000")):
+            mon, feed, clock, alerts = make()
+            states = [dict(st, emergency=em, squawk=sq) for st in path(32.3, 34.3, [300] * 10, [38000] * 10)]
+            fly(mon, feed, clock, "738058", states, flight="ELY327", r="4X-EKU", t="B738")
+            got[(em, sq)] = kinds(alerts, "738058")
+        self.assertEqual(got, {("downed", "1000"): [], ("downed", "2245"): ["EMERGENCY"],
+                               ("lifeguard", "1000"): ["MEDICAL_FLIGHT"]})
+
 
 class RestartStateTests(unittest.TestCase):
     """The restart of 24 Oct 2026 21:45 IDT: KL463 on the ground at Bucharest (its stop) climbed out after it and its
@@ -2147,6 +2159,16 @@ class RouteOffCourse(unittest.TestCase):
             got[start] = "OFF_COURSE" in kinds(alerts)
         self.assertEqual(got, {(31.72, 35.98): False, (31.72, 38.6): True})
 
+    def test_climbing_out_of_a_regional_airport_does_not_teach_the_direction(self):
+        """QTR9L, listed LSZH-OTHH, is Qatar's Beirut - Doha: out of Beirut westbound it learned "bound for LSZH" and
+        turned SE for Doha, OFF_COURSE "164 deg away" twice on Telegram (12 Nov 2026). As QTR79G out of Amman."""
+        alts = [3000 + 420 * i for i in range(82)]
+        tracks = [300] * 24 + [300 - 20 * i for i in range(1, 10)] + [120] * 49
+        mon, feed, clock, alerts = with_routes()
+        fly(mon, feed, clock, "06a0c1", path(33.80, 35.45, tracks, alts, gs=300), flight="UAE122", r="A7-BDC", t="B788")
+        self.assertNotIn("OFF_COURSE", kinds(alerts))
+        self.assertEqual(mon.tracks["06a0c1"].region_dep[1], "BEY")
+
     def test_route_stored_the_wrong_way_round_is_learned_from_the_flight(self):
         hits = self.run_track("UAE122")       # listed LTFM-OMDB, flown toward Istanbul
         self.assertTrue(hits)
@@ -2567,6 +2589,24 @@ class Run18OctTests(unittest.TestCase):
             **ident)
         self.assertNotIn("EARLY_DESCENT", kinds(alerts))
         self.assertEqual(mon.tracks["738070"].takeoff, 0)
+
+    def test_first_airborne_altitude_is_no_climb_peak(self):
+        """ELY5137 (4X-EKR, B738, TLV -> PFO) was first heard in the air at "7,425 ft", a minute later at 2,750 ft
+        (-2,752 ft/min), then climbed on to Paphos: EARLY_DESCENT "4,675 ft below the 7,425 ft it climbed to, 1 min after
+        take-off" on Telegram (12 Nov 2026). The peak counts only held on two reports; a climb to 7,425 ft held, then
+        down, still alerts."""
+        got = {}
+        for case in ("first", "held"):
+            mon, feed, clock, alerts = with_routes()
+            mon.routes["ELY5137"] = (clock(), "LLBG-LHBP")
+            ident = dict(flight="ELY5137", r="4X-EKR", t="B738", category="A3")
+            fly(mon, feed, clock, "738062", [dict(lat=32.0114, lon=34.8867, alt_baro="ground", gs=10, track=315)] * 3,
+                **ident)
+            alts = ([7425] + [2750 + 300 * i for i in range(20)] if case == "first"
+                    else [1000 + 600 * i for i in range(12)] + [7425 - 400 * i for i in range(12)])
+            fly(mon, feed, clock, "738062", path(32.0114, 34.8867, [315] * len(alts), alts, gs=220), **ident)
+            got[case] = "EARLY_DESCENT" in kinds(alerts)
+        self.assertEqual(got, {"first": False, "held": True})
 
     def test_early_descent_only_on_the_board_or_toward_its_route_destination(self):
         """AYT253 (Ayeet E145, no route, 25 Oct 2026) descended into Ramon AB 9 min after take-off; 6H999 (A332, off the
@@ -3201,6 +3241,8 @@ class FarEndTests(unittest.TestCase):
                                        "LEMG,Malaga,LEMG,AGP,Malaga,ES,36.6749,-4.4991,53\n",
         "airports/schema-01/L/LB.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
                                        "LBSF,Sofia,LBSF,SOF,Sofia,BG,42.6967,23.4114,1742\n",
+        "airports/schema-01/L/LK.csv": "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+                                       "LKPR,Prague-Ruzyne,LKPR,PRG,Prague,CZ,50.1008,14.26,1247\n",
     }
 
     def setup(self, rows):
@@ -3208,7 +3250,7 @@ class FarEndTests(unittest.TestCase):
         feed.files = {**ROUTE_FILES, **self.AIRPORTS, "routes/schema-01/E/ELY-5.csv":
                       "Callsign,Code,Number,AirlineCode,AirportCodes\nELY5417,ELY,5417,ELY,LLBG-LCLK\n"}
         mon.schedule.load(rows, datetime.fromtimestamp(clock(), mon.schedule.tz))
-        for icao in ("UGTB", "LEMD", "LBSF"):  # (a local checkout has them all: StandingData.all_fields)
+        for icao in ("UGTB", "LEMD", "LBSF", "LKPR"):  # (a local checkout has them all: StandingData.all_fields)
             mon.standing.airport(icao)
             clock.t += 10
         feed.local = {"999999"}
@@ -3358,6 +3400,32 @@ class FarEndTests(unittest.TestCase):
         for _ in range(60):
             step(mon, clock)
         return kinds(alerts, "501d0a")
+
+    def test_airborne_blip_while_taxiing_at_its_origin_is_no_landing(self):
+        """6H762 (OK-TST, PRG -> TLV) found by the board's callsign taxiing at Prague 3.5 h before its board time (too late for `early_stop`): one
+        airborne report, then "Landed at Prague; listed for Tel Aviv" on Telegram and its departure turn a course
+        reversal (12 Nov 2026). Up at 12,000 ft and back down there (a return, as AS1282's), still a DIVERSION."""
+        got = {}
+        prg = (50.1008, 14.26)
+        for case in ("taxi", "return"):
+            mon, feed, clock, alerts = self.setup([board_row("6H", "762", "A", local_time(Clock(), 2), "PRG")])
+            ident = dict(flight="ISR762", r="OK-TST", t="B738")
+            taxi = [dict(lat=prg[0], lon=prg[1], alt_baro="ground", gs=13, track=214)] * 3
+            fly(mon, feed, clock, "49d403", taxi, local=False, **ident)
+            if case == "taxi":
+                fly(mon, feed, clock, "49d403", [dict(lat=prg[0], lon=prg[1] + 0.002, alt_baro=400, gs=13, track=214)] * 4,
+                    local=False, **ident)  # (one follow report)
+            else:
+                up = path(*prg, [214] * 40, [1000 + 300 * i for i in range(40)], gs=200)
+                fly(mon, feed, clock, "49d403", up, local=False, **ident)
+                last = mon.tracks["49d403"].last
+                brg = fw.bearing(last.lat, last.lon, *prg)
+                n = int((fw.haversine_nm(last.lat, last.lon, *prg) - 1) / (200 * 10 / 3600))
+                back = path(last.lat, last.lon, [brg] * n, [max(12000 - 300 * i, 1000) for i in range(n)], gs=200)
+                fly(mon, feed, clock, "49d403", back, local=False, **ident)
+            fly(mon, feed, clock, "49d403", taxi * 4, local=False, **ident)
+            got[case] = "DIVERSION" in kinds(alerts, "49d403")
+        self.assertEqual(got, {"taxi": False, "return": True})
 
     def test_return_first_heard_on_its_way_back_is_a_diversion(self):
         """SWA512 (HNL -> SAN, 7700) watched from San Diego: first heard at FL360 362 nm out, flying back to Honolulu.
