@@ -3039,6 +3039,29 @@ class LandingWordsTests(unittest.TestCase):
         self.assertNotIn("on the ground", text)
         self.assertIn(f"{rec['landing']['nm']:.0f} nm from London", text)
 
+    def test_back_where_its_arrival_came_from_is_its_rotation(self):
+        """AIZ301 (LZ-EAG, 13 Nov 2026) came in as IZ302 KTW -> TLV, left as AIZ301 (listed LLBG-EGFF, off the board) and
+        landed at Katowice: "Landed at Katowice; listed for Cardiff" on Telegram."""
+        mon, feed, clock, alerts = self.setup()
+        mon.routes["ELY358"] = (clock(), "LTFM-LLBG")
+        ident = {**self.IDENT, "flight": "ELY358"}
+        fly(mon, feed, clock, "738357", path(32.1, 34.82, [150] * 6, [3000 - 400 * i for i in range(6)], gs=150), **ident)
+        fly(mon, feed, clock, "738357", [dict(lat=self.TLV[0], lon=self.TLV[1], alt_baro="ground", gs=12, track=270)] * 4,
+            **ident)
+        self.assertEqual(mon.tracks["738357"].prev_from[0], "LTFM")
+        clock.t += 3600
+        self.leave(mon, feed, clock)
+        with self.assertLogs(fw.log, "INFO") as logs:
+            self.land(mon, feed, clock)
+        self.assertNotIn("DIVERSION", kinds(alerts))
+        self.assertTrue(any("where its arrival at TLV came from" in m for m in logs.output), logs.output)
+        # elsewhere, it is one
+        mon, feed, clock, alerts = self.setup()
+        self.leave(mon, feed, clock)
+        mon.tracks["738357"].prev_from = ("EPKT", 50.4743, 19.08)
+        self.land(mon, feed, clock)
+        self.diversion(alerts)
+
     def test_an_arrival_is_listed_for_our_airport(self):
         mon, feed, clock, alerts = self.setup("LHBP-LLBG")
         mon.standing.airport("LLBG")

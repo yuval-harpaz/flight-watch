@@ -192,7 +192,7 @@ STATE_FIELDS = ("callsign", "reg", "actype", "category", "military", "last_msg",
                 "max_dist", "max_alt", "alerted", "squawk", "status_at", "status_seen", "hot_until", "israeli", "route_dir",
                 "leg_start", "amm_dep", "region_dep", "takeoff", "left_at", "takeoff_pos", "climb_peak",
                 "flown_cs", "elsewhere_at", "feed", "left_home", "rose_home", "orig_first", "orig_max", "orig_left", "came_from", "sent",
-                "stop_wait")
+                "stop_wait", "prev_from")
 TG_RETRY_S = 3  # a Telegram message that failed to connect is sent once more after this
 LEG_OVER_S = 1800  # a board departure heard far away this long after it should have landed: another leg (leg_over)
 OWN_TURN_NM = 50  # below FL250 a reversal this near the flight's own far origin / destination is routing (routine_turn_place)
@@ -1003,6 +1003,7 @@ class Track:
     came_from: bool = False   # where it came from is seen: on the ground away from its origin before take-off, or
                               # its callsign changed in the air (the previous flight's) - at_own_origin / positioning
     sent: deque = field(default_factory=lambda: deque(maxlen=MAP_ALERTS))  # (kind, data time) of its alerts, for map links
+    prev_from: tuple | None = None  # (ICAO, lat, lon): the origin of its last arrival at our airport (end_leg)
 
     @property
     def last(self) -> Sample | None:
@@ -2431,6 +2432,8 @@ class Monitor:
         from our airport (an arrival at it) has flown: the same callsign later is its next flight -
         ELY353 (TLV -> MUC, 18 Oct 2026) climbed out of Munich still as ELY353 and was "heading back to TLV"."""
         kind = self.classify(t)[0]
+        if kind == "ARR" and d <= 15:  # (where its next flight may well go back to: back_to_prev)
+            t.prev_from = self.other_end(t, "ARR")
         if kind in ("DEP", "ARR") and (kind == "DEP") == (d > 15):
             t.flown_cs, t.sched = t.callsign, None  # (the board row, or the route data's direction)
         t.was_airborne, t.max_dist, t.route_dir, t.max_alt, t.left_home = False, 0.0, 0, 0, d < 15
@@ -3921,6 +3924,9 @@ class Monitor:
                 if place is not None and self.beyond_leg(t, s, dest):
                     log.info("%s on the ground %.0f nm from %s, long after that leg should have ended: another leg on "
                              "its callsign, not a diversion", t.label(), haversine_nm(s.lat, s.lon, dest[1], dest[2]), dest[0])
+                elif place is not None and self.back_to_prev(t, s):
+                    log.info("%s on the ground at %s, where its arrival at %s came from, off the board: the route data's %s "
+                             "is stale - not a diversion", t.label(), t.prev_from[0], self.args.airport, dest[0])
                 elif place is not None:
                     self.diversion(t, "DEP", f"{self.args.airport} departure bound for {dest[0]} on the ground "
                                f"{haversine_nm(s.lat, s.lon, dest[1], dest[2]):.0f} nm from it at "
@@ -3961,6 +3967,14 @@ class Monitor:
     def destination(self, t: Track) -> tuple[str, float, float] | None:
         """(ICAO, lat, lon) of a departure's destination, from the route data when it starts at our airport."""
         return self.other_end(t, "DEP")
+
+    def back_to_prev(self, t: Track, s: Sample) -> bool:
+        """A departure off the board (route data only) on the ground within DIVERTED_NM of where the aircraft's last
+        arrival at our airport came from, not hot, no emergency: the rotation home. AIZ301 (LZ-EAG, 13 Nov 2026 nightly
+        review) came in as IZ302 KTW -> TLV, left as AIZ301 (listed LLBG-EGFF; the board's IZ301 is to Lodz) and landed
+        at Katowice: "Landed at Katowice; listed for Cardiff" on Telegram."""
+        return bool(t.prev_from and not t.sched and not self.hot(t) and not self.in_emergency(t)
+                    and haversine_nm(s.lat, s.lon, t.prev_from[1], t.prev_from[2]) <= DIVERTED_NM)
 
     def other_end(self, t: Track, kind: str) -> tuple[str, float, float] | None:
         """(ICAO, lat, lon) of the far end of our airport's flight - a departure's destination ("DEP"), an

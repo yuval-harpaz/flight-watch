@@ -274,6 +274,11 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   flown leg and found again by the board's callsign on its way on to Amsterdam - DIVERSION "bound for LROP" at EHAM.
   The far end comes from the board's airport first (`Monitor.other_end`, IATA -> ICAO by `StandingData.airport_by_iata`), the
   route data only where it agrees: ELY5417 TLV -> TBS, listed LLBG-LCLK, landed at Tbilisi as "bound for LCLK" (19 Oct 2026).
+  A departure off the board (route data only) landing within `DIVERTED_NM` of where the aircraft's last arrival at our airport
+  came from (`Track.prev_from`, set by `end_leg`; `back_to_prev`), not hot, no emergency, is its rotation home, only logged (14 Nov
+  2026 nightly review): LZ-EAG came in as IZ302 KTW -> TLV, left as AIZ301 (listed LLBG-EGFF; the board's IZ301 is to Lodz) and
+  "Landed at Katowice; listed for Cardiff" on Telegram. Cost: a real diversion back to the previous origin by such a flight, with
+  nothing else to show, is only logged.
   An arrival coming down at its own origin is its previous flight, not a DIVERSION, when it was first heard > 60 nm from it, never
   farther, and never on the ground before take-off or climbing near it (`at_own_origin`; 9A-BTH changed ISR193 -> ISR182 in the air and "went
   silent probably landing elsewhere" on approach to Madrid, 19 Oct 2026). Squawk replay: the real returns (SWA512 to Honolulu,
