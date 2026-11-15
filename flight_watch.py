@@ -208,6 +208,7 @@ TAG_DETOUR = 1.25  # a board tag stop counts when on the way: origin -> stop -> 
 TAG_STOP_TOL = 30  # deg: an arrival heading for the route data's tag stop (tag_stop_ahead) is not OFF_COURSE
 STOP_KT, STOP_TURN_S = 420, 1200  # an arrival's time from a stop on its way: block speed, and on the ground there
 STOP_APPROACH_ALT, STOP_APPROACH_NM = 10000, 30  # below this, this near an airfield: on approach to a stop (approaching_stop)
+STOP_DESCENT_ALT = 25000  # descending below this near an airfield (STOP_APPROACH_NM), in time: its arrival to a stop too
 DEST_TURN_TOL, DEST_TURN_GAIN = 35, 30  # a board departure's reversal to within this of its destination, this much nearer it
 APPROACH_NM, APPROACH_ALT = 20, 15000  # a descent here, into its own destination, is judged by its altitude history
 STOP_FRESH_S = 300  # "still at its stop" needs a report this recent (s): ground coverage is thin
@@ -3156,6 +3157,9 @@ class Monitor:
         35 nm of it, 12 min before squawking 7700 (squawk replay)."""
         a = self.args
         near = a.terminal_radius + 5
+        stop = self.approaching_stop(t, s)
+        if stop:
+            return f"a stop at {stop}"  # an arrival coming down on its way, in time for a stop (IB1873 at Athens, 14 Nov 2026)
         if done:
             if (t.rose_home and t.takeoff and s.t - t.takeoff <= CLIMB_OUT_S + a.turn_confirm
                     and (s.vrate or 0) >= 500 and not t.sched
@@ -4109,8 +4113,12 @@ class Monitor:
         """The airfield an arrival is low near, on its way and in time for a stop there (`stop_in_time`): IB1873 MAD ->
         TLV on its approach to Athens, 15 nm out at 5,275 ft heading 337 deg, was OFF_COURSE "637 nm out and opening",
         7 min before it landed for its nightly stop (3 Nov 2026). Needs the local checkout's airports."""
-        if (s.alt or 0) >= STOP_APPROACH_ALT or not self.standing or not self.stop_in_time(t, s):
-            return None
+        back = t.sample_ago(120)
+        descending = (s.vrate or 0) <= -500 or bool(back and (back.alt or 0) >= (s.alt or 0) + 1000)
+        if ((s.alt or 0) >= (STOP_DESCENT_ALT if descending else STOP_APPROACH_ALT) or not self.standing
+                or not self.stop_in_time(t, s)):
+            return None  # higher while coming down (STOP_DESCENT_ALT): IB1873 turned 114 -> 31 -> 243 deg onto Athens's
+            #              arrival at 16,025 ft ~50 nm out and was a course reversal and OFF_COURSE on Telegram (14 Nov 2026)
         field = self.standing.airfield_near(s.lat, s.lon)
         return field[0] if field and field[1] <= STOP_APPROACH_NM else None
 

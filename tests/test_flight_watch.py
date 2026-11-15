@@ -3631,6 +3631,27 @@ class FarEndTests(unittest.TestCase):
             got[case] = "OFF_COURSE" in kinds(alerts, "48418c")
         self.assertEqual(got, {"stop": False, "too late": True, "high": True, "no field": True})
 
+    def test_descent_onto_a_stop_on_its_way_is_not_a_reversal(self):
+        """IB1873 MAD -> TLV turned 114 -> 31 -> 243 deg onto Athens's arrival at 16,025 ft ~50 nm out, coming down for its
+        nightly stop: COURSE_CHANGE and OFF_COURSE on Telegram (14 Nov 2026). Level at that height, or past its time for a
+        stop: still alerted."""
+        got = {}
+        for case, due, rate in (("descending", 5, -100), ("level", 5, 0), ("too late", 1, -100)):
+            mon, feed, clock, alerts = self.setup([board_row("KL", "463", "A", local_time(Clock(), due), "AMS")])
+            feed.files.update(self.KLM_FILES)
+            feed.files["routes/schema-01/K/KLM-all.csv"] = ("Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                                           "KLM463,KLM,463,KLM,EHAM-LLBG\n")
+            for icao in ("EHAM", "LROP"):
+                mon.standing.airport(icao)
+            mon.standing.airfield_near = lambda lat, lon: ("LROP", 15.0)
+            tracks = [114] * 20 + [114 - 83 * i / 8 for i in range(1, 9)] + [31 - 91 * i / 10 for i in range(1, 11)] + [300] * 30
+            alts = [17000 + rate * i for i in range(len(tracks))]
+            fly(mon, feed, clock, "48418c", path(44.0, 27.0, tracks, alts, gs=260), local=False,
+                flight="KLM463", r="PH-BXR", t="B739")
+            got[case] = sorted({k for k in kinds(alerts, "48418c") if k in ("COURSE_CHANGE", "OFF_COURSE")})
+        self.assertEqual(got, {"descending": [], "level": ["COURSE_CHANGE", "OFF_COURSE"],
+                               "too late": ["COURSE_CHANGE", "OFF_COURSE"]})
+
     def test_departure_turned_nearer_its_destination_is_not_a_reversal(self):
         """EY608 TLV -> AUH at FL277 over Jordan, 180 -> 78 deg with Abu Dhabi at 109, on Telegram (3 Nov 2026).
         The same turn the other way, away from its destination, still alerts."""
