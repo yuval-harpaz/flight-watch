@@ -174,6 +174,12 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   behind: dives raised at 08:55:25, 09:37:34 (from the trace, during refusals), 10:17:54, 10:58:04
   (live: none, 09:37:47, none, 10:58:38); ~1 trace request a minute. Trace 16 s behind: 09:37:47.
   **Answering again since 2 Nov 2026** (last 403 at 09:07 IST, read from 13:11; 3 Nov from here and through the worker: `trace_recent`, `trace_full`, `/globe_history`, no browser check; `globe.adsb.lol` only redirects to `adsb.lol`). Why it stopped is not known and it may return.
+  **Blocked again since 11 Nov 2026** (403 to the monitor and the worker; to curl from here an "access blocked" page: "This network is
+  blocked from adsb.lol because it was used for automated scraping ... Automated clients belong on the keyed API"). The owner is asking adsb.lol
+  for a key (16 Nov). Until adsb.lol allows it, `monitor.sh`'s `ADSBLOL_TRACES` (default `off`) passes `--trace-url ''` and no
+  `--telegram-images`, and `tools/read_trace.py` asks nothing (it reads that default): no backfill, no pictures, no trace for the nightly review,
+  which then does not implement a fix for an alert it judged false from the log alone (`[needs owner]` instead; the owner, 16 Nov 2026).
+  The pause after a 403 (30 min doubling to 6 h) restarted at 30 min after each restart, so the block was asked ~5 times a day. Not to be worked around.
   **Refused 18 Oct - 2 Nov 2026**: adsb.lol answered its trace files (`/data/traces/*` and
   `/globe_history/*`) with HTTP 403 and a browser check ("Verification", a proof-of-work page; not to be
   worked around). The fallback then asked 3 a poll, ~1,000 an hour, while the API refused our polls. After a

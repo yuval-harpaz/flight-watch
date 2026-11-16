@@ -13,6 +13,7 @@ checks are as they are; do not undo a choice it records.
    correct sanity alert), **false** (a routine flight we misread - say what misled us), or **unclear**.
    Use the log lines of that aircraft (grep its hex) and AGENTS.md. When the log does not settle it, or before changing a check for it, read
    the track, as a command of its own: `{ROOT}/.venv/bin/python tools/read_trace.py <hex> --around <UTC YYYY-MM-DDTHH:MM> --minutes 20`.
+   When it gives no track (off in monitor.sh, refused, or none), say so in the verdict: it rests on the log alone.
    Each start in the digest names the code it ran
    (`code <commit>[+changes] (flight_watch.py <sha256 8>)`): judge an alert by the code that raised it, and do not
    report as new a false alarm that a later commit (`git log`) already fixed. Note also anything alerted that the
@@ -20,7 +21,9 @@ checks are as they are; do not undo a choice it records.
    gaps, refused polls, errors).
 2. End by implementing your recommendations (the owner's decision, 3 Nov 2026): for every open issue in ISSUES.md not marked
    `[needs owner]`, and everything new you found, choose the option you recommend and do it, the most Telegram messages first,
-   with the time you have (stop by ~35 min; what is left stays open with your recommendation). Keep each change as narrow as
+   with the time you have (stop by ~35 min; what is left stays open with your recommendation). A fix for an alert judged **false**
+   from the log alone (no track read) is not implemented (the owner, 16 Nov 2026): add it to ISSUES.md marked `[needs owner]`
+   with the case, the options and your recommendation, saying the verdict rests on the log alone. Keep each change as narrow as
    the case allows and record its cost. Each fix gets a unit test in tests/ (the scenario that misled us), a line in AGENTS.md (date,
    case, why), and a commit on this branch (`git add <files>`, never `-A`). Before committing run
    `{ROOT}/.venv/bin/python -m unittest discover -s tests` (all must pass) and, when alert logic changed, the squawk

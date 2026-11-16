@@ -5,6 +5,7 @@
 
 Reads adsb.lol's trace files and nothing else, one request, and keeps nothing. adsb.lol's coverage is thinner than what the
 monitor received (AGENTS.md); a 401 / 403 (its browser check, 18 Oct - 2 Nov 2026) is reported, not to be worked around.
+Asks nothing while monitor.sh's ADSBLOL_TRACES is off (16 Nov 2026: adsb.lol blocks this network from its trace files).
 """
 from __future__ import annotations
 
@@ -16,8 +17,19 @@ import re
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 URL = "https://adsb.lol/data/traces/{xx}/trace_full_{hex}.json"
+MONITOR_SH = Path(__file__).resolve().parent.parent / "monitor.sh"
+
+
+def traces_on(monitor_sh: Path = MONITOR_SH) -> bool:
+    """monitor.sh's switch (ADSBLOL_TRACES, default on / off): one place for the monitor and this tool."""
+    try:
+        m = re.search(r"^ADSBLOL_TRACES=\$\{ADSBLOL_TRACES:-(\w+)\}", monitor_sh.read_text(), re.M)
+    except OSError:
+        return True
+    return not m or m.group(1) == "on"
 
 
 def trace_url(icao: str) -> str:
@@ -50,6 +62,9 @@ def main(argv: list[str] | None = None) -> int:
     around = None
     if a.around:
         around = dt.datetime.fromisoformat(a.around).replace(tzinfo=dt.timezone.utc).timestamp()
+    if not traces_on():
+        print("no trace: adsb.lol trace reads are off (monitor.sh ADSBLOL_TRACES): judge from the log alone")
+        return 2
     req = urllib.request.Request(trace_url(a.hex), headers={"User-Agent": "flight-watch/0.3", "Accept-Encoding": "gzip"})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:

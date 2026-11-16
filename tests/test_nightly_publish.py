@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
@@ -183,6 +184,14 @@ class ReadTraceTests(unittest.TestCase):
         for bad in ("../../etc", "89667", "896678/../x", "zzzzzz"):
             with self.assertRaises(ValueError):
                 read_trace.trace_url(bad)
+
+    def test_switch_in_monitor_sh(self):
+        with tempfile.TemporaryDirectory() as d:
+            sh = Path(d) / "monitor.sh"
+            for text, on in (("ADSBLOL_TRACES=${ADSBLOL_TRACES:-off}\n", False), ("ADSBLOL_TRACES=${ADSBLOL_TRACES:-on}\n", True),
+                             ("exec python flight_watch.py\n", True)):
+                sh.write_text(text)
+                self.assertEqual(read_trace.traces_on(sh), on)
 
     def test_rows_in_the_window(self):
         tr = {"timestamp": 1000.0, "trace": [[0, 31.0, 35.0, 20000, 400.0, 90.0, 0, 500, {"flight": "ETD608  ", "squawk": "0763"}],
