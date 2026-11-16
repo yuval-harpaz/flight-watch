@@ -4577,6 +4577,13 @@ class Monitor:
                         log.info("%s silent low at %.4f,%.4f during %s - a fake place, not taken as a landing",
                                  t.label(), s.lat, s.lon, fake)
                         continue
+                    if (s.gs or 0) > a.max_gap_speed:
+                        # OS83 (A321, VIE -> TLV) "went silent descending through -50 ft" at 975 kt in Jordan, 41 nm
+                        # S of the Amman spoofing point after its episode had ended; it landed at TLV (16 Nov 2026)
+                        t.lost_alerted = False
+                        log.info("%s silent low at %.4f,%.4f, last reported at %.0f kt - a fake position, not taken "
+                                 "as a landing", t.label(), s.lat, s.lon, s.gs)
+                        continue
                     near = f", {ad:.0f} nm from {apt}" if ad <= 30 else ""
                     self.diversion(t, "ARR", f"{a.airport} arrival went silent descending through "
                                f"{s.alt} ft, {d:.0f} nm from {a.airport} at {s.lat:.4f},{s.lon:.4f}"
@@ -4959,6 +4966,13 @@ class Monitor:
                          "altitude data", t.label(), kind, cls, msg, jump[0], jump[1],
                          time.strftime("%H:%M:%S", time.gmtime(jump[2])))
                 return False
+        if (kind == "COURSE_CHANGE" and not (t.callsign or "").strip("@ ") and t.sched is None and not route
+                and now - last_t < QUIET_FALL_S and not self.in_emergency(t)):
+            # 9XR-WR (B738, no flight ID, squawk 1104) climbed to FL410 and down over southern Jordan for an hour
+            # before landing at Amman, probably a check flight: 5 reversals on Telegram (15 Nov 2026 nightly review)
+            log.info("%s %s - no flight ID, reversed already at %s UTC: a pattern (check / training flight), not "
+                     "alerted: %s", t.label(), kind, time.strftime("%H:%M", time.gmtime(last_t)), msg)
+            return False
         if a.airport_traffic_only and traffic not in AIRPORT_TRAFFIC:
             return False
         recent = sorted({k.split(":")[0] for k, (tt, _) in t.alerted.items()

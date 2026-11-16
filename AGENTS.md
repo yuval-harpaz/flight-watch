@@ -358,6 +358,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   Amman at 15,750 ft; its GPS then gave the Amman point at 0.7 kt while MLAT had it over Israel). So no DIVERSION
   (on the ground, or silent low) for a flight in an episode or within `SPOOF_PLACE_NM` (30) of a confirmed spoofing
   point (`fake_place`); logged instead. Cost: a real landing at Amman during an episode is only logged.
+  Nor going silent low when the last report's ground speed is above `--max-gap-speed` (750 kt; 16 Nov 2026 nightly review): OS83
+  VIE -> TLV "went silent descending through -50 ft" at 975 kt 41 nm S of the Amman spoofing point after its episode ended, and
+  landed at TLV. Cost: none expected (nothing descends low at that speed).
 - **Callsign changes** (`Monitor.new_callsign`, 13 Oct 2026; 9 false alerts in the run of 11-12 Oct): a changed
   callsign is taken up after `CALLSIGN_HOLD` (120 s) and refused while another tracked aircraft sends it -
   adsb.lol gave 4X-ABG the callsign ISR723 for 55 s (4X-ABF's; ADS-B Exchange's trace never had it) and ISR050
@@ -468,7 +471,7 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   departure/arrival routings at Beirut, Amman, Damascus, TLV) nor at learned route corners
   (`turn_zones.json`: cells where >= 4 aircraft turned onto that heading, e.g. detours around
   closed airspace; two added by hand, 3 Nov 2026, the owner's choice, `by_hand`, kept only if a relearn keeps them: S of Amman
-  onto Sinai, MSR720 121 -> 220, RJA503, MSC942; W of TLV, AXY591R 215 -> 143; relearned 28 Oct 2026 from 26-27 Oct, >= 8 aircraft in the two days, the box widened to the Gulf: 5 of 9 reversals of 27 Oct were arrival routing - A3926 and T7STAR 60-75 nm NW of TLV, EY9702 x2 and ETD7QB onto Abu Dhabi's arrival at FL290. Called routine within 150 nm of TLV: 42% of place x heading (40% before; >= 4 in two days: 63%, too loose)) - unless the flight is already hot. Otherwise a reversal is reported only once
+  onto Sinai, MSR720 121 -> 220, RJA503, MSC942; W of TLV, AXY591R 215 -> 143; a third 16 Nov 2026 (nightly review): 115 nm W of TLV, southbound onto Egypt (~262 deg), VSV459 (B738, no route) 191 -> 264 at FL350 on Telegram, RRR9915 the same turn 11, 23, 26 Oct - cost: a real reversal onto ~262 deg there, not hot, is only logged; relearned 28 Oct 2026 from 26-27 Oct, >= 8 aircraft in the two days, the box widened to the Gulf: 5 of 9 reversals of 27 Oct were arrival routing - A3926 and T7STAR 60-75 nm NW of TLV, EY9702 x2 and ETD7QB onto Abu Dhabi's arrival at FL290. Called routine within 150 nm of TLV: 42% of place x heading (40% before; >= 4 in two days: 63%, too loose)) - unless the flight is already hot. Otherwise a reversal is reported only once
   the new track has held `--turn-confirm` (120 s): 4 of the 5 overnight alerts on 6 Oct 2026 were an
   S-turn (6H254, 148 -> 76 -> 175 deg, vectoring) and holding / delay orbits of three TLV arrivals at
   02:01-02:06 (BBG251 flew one 360). Dropped: turning back near the old course (also compared with
@@ -496,6 +499,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   from the way back (judged when the turn starts; 10 Nov 2026 nightly review): PER002 (SU-CBY, CRJ9, no route) 15 min out of
   Beirut, 276 -> 204 deg at FL290 114 nm NW of TLV onto its way to Egypt. Cost: a real reversal of such a departure that does
   not head back is only logged for 20 min after take-off.
+  A flight with no flight ID (callsign blank or `@@@@@@@@`), no board row nor route, sends one COURSE_CHANGE in `QUIET_FALL_S`
+  (2 h), hot or not, unless in an emergency (16 Nov 2026 nightly review): 9XR-WR (B738, squawk 1104) climbed to FL410 and down
+  to FL160 in patterns over southern Jordan for an hour, then landed at Amman (probably a check flight): 5 reversals on Telegram.
+  Cost: a second real reversal of such a flight within 2 h is only logged (the follow-up still lists it).
   `routine_turn_place` judges these when the turn starts; when it is reported, 2 min later, the destination is judged
   again (ETD238, OMAA-VOBL, began its approach turn at Bangalore just over 35 nm out and was reported at 17 nm, 22 Oct
   2026) - not the origin: AA1009 (ORD -> LAX, 6 Oct 2026) turning back to Chicago ended its turn within 35 nm of it,

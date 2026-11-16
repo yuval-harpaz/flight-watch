@@ -306,6 +306,19 @@ class AlertSimulation(unittest.TestCase):
             flight="ELY315", r="4X-EDC", t="B789")
         self.assertIn("COURSE_CHANGE", [a["kind"] for a in alerts])
 
+    def test_reversals_of_a_flight_with_no_flight_id_are_sent_once(self):
+        """9XR-WR (B738, callsign @@@@@@@@) flew patterns over southern Jordan for an hour, probably a check flight
+        out of Amman: 5 course reversals on Telegram (15 Nov 2026). A flight with a callsign still sends each."""
+        got = {}
+        for cs in ("@@@@@@@@", "ABC123"):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            tracks = [90] * 8 + ([200] * 30 + [90] * 30) * 2
+            fly(mon, feed, clock, "06e012", path(33.3, 34.0, tracks, [36000] * len(tracks), dt=15), dt=15,
+                flight=cs, r="9XR-WR", t="B738")
+            got[cs] = [a["kind"] for a in alerts].count("COURSE_CHANGE")
+        self.assertEqual(got["@@@@@@@@"], 1)
+        self.assertGreater(got["ABC123"], 1)
+
     def test_position_jump(self):
         mon, feed, clock, alerts = make(["--no-routes"])
         feed.local = {"738001"}
@@ -2795,7 +2808,8 @@ class Run18OctTests(unittest.TestCase):
         """The heatmaps that taught turn_zones.json are refused since 31 Oct 2026. Where each turn was reported / began."""
         zones = fw.TurnZones(os.path.join(os.path.dirname(fw.__file__), "turn_zones.json"))
         for name, lat, lon, track in (("MSR720", 30.34, 36.20, 229), ("MSR720", 29.82, 35.51, 229), ("RJA503", 30.13, 35.93, 229),
-                                      ("MSC942", 30.62, 36.71, 232), ("AXY591R", 32.60, 32.66, 135), ("AXY591R", 32.9, 32.9, 143)):
+                                      ("MSC942", 30.62, 36.71, 232), ("AXY591R", 32.60, 32.66, 135), ("AXY591R", 32.9, 32.9, 143),
+                                      ("VSV459", 32.18, 32.63, 264), ("RRR9915", 32.17, 32.49, 251), ("RRR9915", 31.99, 32.68, 253)):
             self.assertTrue(zones.expected(lat, lon, track), name)
         # another heading there is still a reversal: back north from the Amman corner, back west from the other
         self.assertFalse(zones.expected(30.3, 36.2, 45))
@@ -3509,6 +3523,28 @@ class FarEndTests(unittest.TestCase):
                 step(mon, clock)
             got[route] = "DIVERSION" in kinds(alerts, "48418c")
         self.assertEqual(got, {"EHAM-LCLK-LLBG": False, "EHAM-LLBG": True})
+
+    def test_silent_low_at_an_impossible_speed_is_not_a_diversion(self):
+        """OS83 VIE -> TLV "went silent descending through -50 ft" at 975 kt in Jordan, spoofed after an episode at
+        Amman had ended; it landed at TLV (16 Nov 2026). The same descent at its own speed is still a DIVERSION."""
+        got = {}
+        for gs in (220, 975):
+            mon, feed, clock, alerts = self.setup([board_row("KL", "461", "A", local_time(Clock(), 1), "AMS")])
+            feed.files.update({"routes/schema-01/K/KLM-all.csv": "Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                                                  "KLM461,KLM,461,KLM,EHAM-LLBG\n"})
+            ident = dict(flight="KLM461", r="PH-BXR", t="B739")
+            start = (35.55, 33.15)
+            brg = fw.bearing(*start, 34.8751, 33.6249)
+            approach = path(*start, [brg] * 120, [max(14000 - 150 * i, 1400) for i in range(120)], gs=220)
+            approach = approach[:next(i for i, st in enumerate(approach)
+                                      if fw.haversine_nm(st["lat"], st["lon"], 34.8751, 33.6249) < 5)]
+            approach[-4:] = [dict(st, gs=gs) for st in approach[-4:]]  # (followed: one report each 30 s)
+            fly(mon, feed, clock, "48418c", approach, local=False, **ident)
+            del feed.aircraft["48418c"]
+            for _ in range(60):
+                step(mon, clock)
+            got[gs] = "DIVERSION" in kinds(alerts, "48418c")
+        self.assertEqual(got, {220: True, 975: False})
 
     def test_board_tag_stop_is_not_a_diversion(self):
         """KL463 AMS -> TLV landed at Bucharest (DIVERSION, 24 Oct 2026): its route data is EHAM-LCLK-LLBG, but the
