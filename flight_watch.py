@@ -2542,6 +2542,7 @@ class Monitor:
             if moved / ((s.t - prev.t) / 3600) < MISSED_LANDING_KT or self.was_landing(t, prev):
                 log.info("%s heard again after %.0f min, %.0f nm on: it landed in between - a new leg",
                          t.label(), (s.t - prev.t) / 60, moved)
+                self.landed_unseen(t, prev, s)
                 self.end_leg(t, min(self.dist(prev), d), unseen=True)
         kind, route = self.classify(t)
         if kind == "ARR":
@@ -2925,6 +2926,12 @@ class Monitor:
             return  # nothing to back the reported rate yet (just heard, e.g. back from a spoofing
             #         gap - QTR94R "+12,224 ft/min" on 6 Oct): judged on the next reports
         c_angle = path_angle(computed, gs) if gs else 0.0
+        if computed * s.vrate <= 0:
+            # backed only by a history of the other sign: APX11 (military PC21) "-17,792 ft/min" 20 s after "+17,792",
+            # history +4,676, 425 ft lost in between (16 Nov 2026) - a sign-flipped value, a glitch
+            log.info("%s %+d ft/min at %s ft, history %+.0f ft/min the other way: a glitch",
+                     t.label(), s.vrate, s.alt, computed)
+            return
         if abs(computed) < 0.5 * a.vrate and abs(c_angle) < 0.5 * limit:
             return  # reported rate not backed by actual altitude change -> likely a glitch
         if 0 < s.vrate < a.vrate and angle is not None and abs(c_angle) < limit:
@@ -3148,7 +3155,7 @@ class Monitor:
         # as a reversal for a minute or two (6 Oct 2026: 4 of 5 alerts overnight).
         t.pending_turn = {"t": s.t, "old_t": old.t, "from": old.track, "msg": msg}
 
-    def routine_turn_place(self, t: Track, s: Sample, done: bool = False) -> str | None:
+    def routine_turn_place(self, t: Track, s: Sample, done: bool = False, began: float = 0.0) -> str | None:
         """Where turns are routine, so a reversal is not reported (unless hot): departure / arrival routing below
         FL250 near the region's airports, its own origin / destination, or where it took off in this leg, and
         learned route corners. Judged when the turn starts; when it is reported (`done`) only its destination is
@@ -3161,6 +3168,14 @@ class Monitor:
         if stop:
             return f"a stop at {stop}"  # an arrival coming down on its way, in time for a stop (IB1873 at Athens, 14 Nov 2026)
         if done:
+            if (t.takeoff and t.takeoff_pos and s.t - t.takeoff <= CLIMB_OUT_S + a.turn_confirm
+                    and (s.vrate or 0) >= 500 and s.track is not None):
+                lat0, lon0 = t.takeoff_pos
+                origin = self.own_airport_near(t, Sample(s.t, lat0, lon0, None, None, None, None, True), near)
+                if origin and heading_diff(s.track, bearing(s.lat, s.lon, lat0, lon0)) > 90:
+                    return f"climbing out of {origin}"  # seen taking off at its own origin far away, any height, its new
+                    #   track not back toward it: UA167 (EWR -> TLV, B789) 176 -> 93 deg from 23,000 ft, reported at FL255
+                    #   ~55 nm SE of Newark onto its way over the Atlantic (17 Nov 2026). A turn back is still reported
             if (t.rose_home and t.takeoff and s.t - t.takeoff <= CLIMB_OUT_S + a.turn_confirm
                     and (s.vrate or 0) >= 500 and not t.sched
                     and not (t.callsign and self.routes.get(t.callsign, (0, None))[1])
@@ -3170,6 +3185,14 @@ class Monitor:
                 #   way north (7 Nov 2026). A turn back toward TLV is still reported
             if s.alt >= 25000:
                 return None
+            top = max((x.alt for x in t.samples if x.t >= began and x.alt is not None and not x.on_ground), default=None)
+            if (top is not None and top - s.alt >= 1000 and not t.sched and self.standing
+                    and not (t.callsign and self.routes.get(t.callsign, (0, None))[1])):
+                field = self.standing.airfield_near(s.lat, s.lon)
+                if field and field[1] <= near:
+                    return field[0]  # nothing names its ends: any airport, descending by the time the turn is reported
+                    #   (level when it began): TVF35KJ (B738, no route) 255 -> 330 deg from 12,000 ft to 10,600 ft
+                    #   ~21 nm SE of Lyon onto its arrival (17 Nov 2026)
             ends = self.route_ends(t)
             dest = (self.other_end(t, "DEP") if self.classify(t)[0] == "DEP" else None) or (
                 ends[-1] if len(ends) == 2 and t.route_dir >= 0 else None)
@@ -3230,7 +3253,7 @@ class Monitor:
             if dest:  # MEA312 Beirut - Amman, 16 Oct 2026: east past Damascus, then south to Amman
                 log.info("%s turned toward its destination %s, not alerted (%s)", t.label(), dest, p["msg"])
                 return
-            place = self.routine_turn_place(t, s, done=True)
+            place = self.routine_turn_place(t, s, done=True, began=p["old_t"])
             if place:
                 log.info("%s turn completed near %s, not alerted (%s)", t.label(), place, p["msg"])
                 return
@@ -4098,16 +4121,22 @@ class Monitor:
         the board and route data do not name (IB1873 MAD -> TLV on the ground at Athens 01:41, landed at TLV 04:16,
         due 04:30; 26 Oct 2026). Waits in `Track.stop_wait` until the board time itself (check_stops): the flight on at
         STOP_KT + STOP_TURN_S was too tight a deadline, IB1873 at Athens on 1-3 Nov 2026 left after it and landed early."""
-        if not self.stop_in_time(t, s):
-            return None
+        orig = self.other_end(t, "ARR")
+        if not (self.stop_in_time(t, s) or self.stop_in_time(t, s, flight_on=False) and not self.hot(t)
+                and not self.in_emergency(t) and orig and haversine_nm(s.lat, s.lon, orig[1], orig[2]) > DIVERTED_NM):
+            return None  # (or, not hot, no emergency, not back at its origin, before its board time at all: IB1873 landed
+            #             at Athens 17 min after "in time" at STOP_KT and was a DIVERSION on Telegram, 19 Nov 2026; it
+            #             waits now, judged at the board time all the same)
         t.stop_wait = (t.sched.ts, self.field_name(s), s.lat, s.lon, s.t)
         return t.stop_wait[1]
 
-    def stop_in_time(self, t: Track, s: Sample) -> bool:
-        """A board arrival at `s`, on its way, early enough to stop here and still land by its board time."""
+    def stop_in_time(self, t: Track, s: Sample, flight_on: bool = True) -> bool:
+        """A board arrival at `s`, on its way, early enough to stop here and still land by its board time (`flight_on`:
+        the flight on at STOP_KT + STOP_TURN_S; else only before the board time itself)."""
         far = self.other_end(t, "ARR")
+        need = self.dist(s) / STOP_KT * 3600 + STOP_TURN_S if flight_on else 0
         return bool(far and t.sched and t.sched.direction == "ARR" and t.sched.ts and self.on_the_way(s, far)
-                    and s.t <= t.sched.ts - self.dist(s) / STOP_KT * 3600 - STOP_TURN_S)
+                    and s.t <= t.sched.ts - need)
 
     def approaching_stop(self, t: Track, s: Sample) -> str | None:
         """The airfield an arrival is low near, on its way and in time for a stop there (`stop_in_time`): IB1873 MAD ->
@@ -4337,6 +4366,11 @@ class Monitor:
                 self.note(t, "route", f"leaves its listed route ({self.routes[t.callsign][1]}) descending toward "
                           f"{apt} - taken as landing there, the route data is not always right", every=1800)
                 return
+            apt = None if self.hot(t) or self.in_emergency(t) else self.route_stop_here(t, s, (olat, olon), (dst, dlat, dlon))
+            if apt:
+                self.note(t, "route", f"leaves its listed route ({self.routes[t.callsign][1]}) at {apt}, on its way: "
+                          f"a stop, not alerted", every=1800)
+                return
             if (self.classify(t)[0] == "OVR"
                     and haversine_nm(s.lat, s.lon, olat, olon) > haversine_nm(old.lat, old.lon, olat, olon) + 3
                     and min(heading_diff(x.track, bearing(x.lat, x.lon, olat, olon)) for x in window) > 90):
@@ -4358,6 +4392,39 @@ class Monitor:
             self.alert(t, "OFF_COURSE", f"bound for {dst} (route {self.routes[t.callsign][1]}) but heading "
                        f"{s.track:.0f} deg, {devs[-1]:.0f} deg away from it for {s.t - old.t:.0f}s, "
                        f"{d_dest:.0f} nm out and opening ({was_dest:.0f} -> {d_dest:.0f} nm)")
+
+    def route_stop_here(self, t: Track, s: Sample, orig: tuple, far: tuple) -> str | None:
+        """A stop on the way between a route's ends (`orig` lat, lon; `far` ICAO, lat, lon, in its learned direction):
+        - coming down (rate <= -500 ft/min or 1,000 ft lost in 2 min) below FL250 within the routine-turn radius of a
+          regional airport on the way (TAG_DETOUR): QTR79R, listed EGLL-OTHH, flies Doha -> Amman; on its downwind 30 nm
+          SE of Amman at FL216 it was OFF_COURSE "bound for EGLL ... 108 deg away", hot, and its turn onto final a
+          course reversal (17 Nov 2026);
+        - heading (within TAG_STOP_TOL) for a stop the route lists, nearer than its far end: UAE17K (B77W, OMDB-LCLK-LMML)
+          at FL320 105 nm S of Larnaca heading for it, OFF_COURSE "bound for LMML ... 121 deg away" (18 Nov 2026)."""
+        back = t.sample_ago(120)
+        descending = (s.vrate or 0) <= -500 or bool(back and (back.alt or 0) >= (s.alt or 0) + 1000)
+        if descending and (s.alt or 0) < 25000:
+            apt, ad = nearest_airport(s.lat, s.lon)
+            if ad <= self.args.terminal_radius + 5:
+                lat, lon = REGION_AIRPORTS[apt][:2]
+                straight = haversine_nm(*orig, far[1], far[2])
+                if straight and (haversine_nm(*orig, lat, lon) + haversine_nm(lat, lon, far[1], far[2])
+                                 <= TAG_DETOUR * straight):
+                    return apt
+        route = self.routes.get(t.callsign, (0, None))[1] if t.callsign != t.flown_cs else None
+        parts = route.split("-") if route else []
+        if len(parts) < 3 or s.track is None or not self.standing:
+            return None
+        d_far = haversine_nm(s.lat, s.lon, far[1], far[2])
+        for icao in parts[1:-1]:
+            try:
+                pos = self.standing.airport(icao)
+            except requests.RequestException:
+                pos = None
+            if (pos and haversine_nm(s.lat, s.lon, *pos) < d_far
+                    and heading_diff(s.track, bearing(s.lat, s.lon, *pos)) <= TAG_STOP_TOL):
+                return icao
+        return None
 
     def turned_to_destination(self, t: Track) -> str | None:
         """ICAO of the route's destination when the flight now points at it (--toward-dest-tol): a
@@ -4588,6 +4655,10 @@ class Monitor:
                     self.diversion(t, "ARR", f"{a.airport} arrival went silent descending through "
                                f"{s.alt} ft, {d:.0f} nm from {a.airport} at {s.lat:.4f},{s.lon:.4f}"
                                f"{near} - probably landing {'at ' + apt if near else 'elsewhere'}", landed=False)
+                elif (t.followed and d > 30 and (s.vrate or 0) <= 0 and kind == "DEP"
+                        and silent >= 3 * a.lost_after):
+                    t.lost = True
+                    t.lost_alerted = self.silent_low_departure(t, s)
                 continue
             if remote:
                 if not t.followed:
@@ -4662,6 +4733,64 @@ class Monitor:
             # (not alerted - e.g. part of a spoofing episode - means no "restored" later either)
             also = "; the feed's own trace ends there too" if heard is False else ""
             t.lost_alerted = self.alert(t, "LOST_CONTACT", f"silent {silent:.0f}s; {where}{also}")
+
+    def departure_away(self, t: Track, s: Sample, what: str) -> tuple | None:
+        """(destination, nm from it, airport, nm from that) for a departure of ours (the board's, or seen leaving) coming
+        down at `s` more than DIVERTED_NM from its destination, near an airport (the local checkout's, else the region's;
+        30 nm), and none of: a stop on its route, a fake place, a fake speed, another leg, the rotation home. Else None
+        (logged, as `what`)."""
+        a = self.args
+        dest = self.destination(t) if (t.sched or t.left_home) else None
+        if not dest:
+            return None
+        dd = haversine_nm(s.lat, s.lon, dest[1], dest[2])
+        if dd <= DIVERTED_NM:
+            return None
+        field = self.standing.airfield_near(s.lat, s.lon) if self.standing else None
+        apt, ad = field if field else nearest_airport(s.lat, s.lon, exclude=(a.airport,))
+        why = ("a stop on its route" if self.planned_stop(t, s, "DEP") else
+               f"during {self.fake_place(t, s)}, a fake place" if self.fake_place(t, s) else
+               f"last reported at {s.gs:.0f} kt, a fake position" if (s.gs or 0) > a.max_gap_speed else
+               "long after that leg should have ended: another leg" if self.beyond_leg(t, s, dest) else
+               "where its arrival came from: the rotation home" if self.back_to_prev(t, s) else
+               f"{ad:.0f} nm from the nearest airport" if ad > 30 else "")
+        if why:
+            log.info("%s %s %.0f nm from its destination %s at %.4f,%.4f - %s, not a diversion",
+                     t.label(), what, dd, dest[0], s.lat, s.lon, why)
+            return None
+        return dest, dd, apt, ad
+
+    def silent_low_departure(self, t: Track, s: Sample) -> bool:
+        """A departure of ours silent low and descending far from its destination, near an airport: probably landing
+        there (low-altitude coverage is poor), as for an arrival. LY221 (4X-EKP, TLV -> CDG) turned back near Turin and
+        was last heard at 1,325 ft 300 nm short of Paris, an emergency landing in Italy; Telegram had only its turns and
+        an update "last heard at 1,325 ft" (18 Nov 2026)."""
+        far = self.departure_away(t, s, f"silent descending through {s.alt} ft")
+        if not far:
+            return False
+        dest, dd, apt, ad = far
+        return self.diversion(t, "DEP", f"{self.args.airport} departure bound for {dest[0]} went silent descending "
+                              f"through {s.alt} ft, {dd:.0f} nm from it at {s.lat:.4f},{s.lon:.4f}, {ad:.0f} nm from "
+                              f"{apt} - probably landing at {apt}", landed=False)
+
+    def landed_unseen(self, t: Track, prev: Sample, s: Sample) -> None:
+        """A departure of ours heard again near where it went silent coming down (within DIVERTED_NM, below 10,000 ft),
+        after a landing we did not see, far from its destination: a DIVERSION there, unless this leg already had one
+        (`silent_low_departure`). LY221 near Turin, heard again 100 min later 3 nm on (18 Nov 2026). Heard again far
+        from where it went silent tells nothing of where it landed (HYS236 TLV -> OTP, 18 Oct 2026, unheard 3.7 h)."""
+        if (self.classify(t)[0] != "DEP" or (prev.alt or 0) >= 10000 or (prev.vrate or 0) > 0
+                or haversine_nm(prev.lat, prev.lon, s.lat, s.lon) > DIVERTED_NM
+                or any(k.startswith("DIVERSION") and at >= max(t.left_at, prev.t - 6 * 3600)
+                       for k, (at, _) in t.alerted.items())):
+            return
+        far = self.departure_away(t, prev, f"landed unseen near {prev.lat:.4f},{prev.lon:.4f}")
+        if not far:
+            return
+        dest, dd, apt, ad = far
+        self.diversion(t, "DEP", f"{self.args.airport} departure bound for {dest[0]} heard again after "
+                       f"{(s.t - prev.t) / 60:.0f} min {haversine_nm(prev.lat, prev.lon, s.lat, s.lon):.0f} nm from where "
+                       f"it went silent at {prev.alt} ft, {ad:.0f} nm from {apt}, {dd:.0f} nm from {dest[0]}: it "
+                       f"landed in between, probably at {apt}", landed=s.on_ground)
 
     def plunging(self, t: Track) -> bool:
         """Last heard falling at --vrate or faster, backed by the altitude lost since the report before:

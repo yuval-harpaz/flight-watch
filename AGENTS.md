@@ -253,6 +253,13 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   must be seen leaving (`Track.left_home`: on the ground or low within 8 nm, or first heard climbing within 30 nm;
   kept across a callsign change in the air - LOT6ME -> LOT6212) or be on the board: today's routes on 2023
   callsigns made four "PDX departures" land at Seattle in the QX2059 replay.
+  So is such a departure going silent below `--lost-min-alt`, descending, more than `DIVERTED_NM` from its destination and within
+  30 nm of an airport (the local checkout's; without it the region's) - "probably landing at <apt>", as for arrivals
+  (`silent_low_departure`) - or heard again within `DIVERTED_NM` of where it went silent coming down below 10,000 ft, after a
+  landing we did not see (`landed_unseen`; none if this leg had a DIVERSION). The same exceptions as on the ground (`departure_away`:
+  a listed stop, a fake place or speed, `beyond_leg`, `back_to_prev`). LY221 (4X-EKP, TLV -> CDG) turned back near Turin, last heard
+  at 1,325 ft 300 nm short of Paris: an emergency landing in Italy, and Telegram had only its turns and an update "last heard at
+  1,325 ft" (18 Nov 2026; the owner). Squawk replay: 0 of 354 changed (its cases are rarely watched as our departures).
   Found with the AeroSignals squawk cases (19 Oct 2026): of 251 replayed, 74 had only EMERGENCY; 15 diversions and
   2 returns among them, now alerted. The other 54: 53 landed at their destination (nothing to see beyond the
   squawk; descents <= ~5,500 ft/min) and one left coverage at cruise.
@@ -341,6 +348,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   a DIVERSION on Telegram on 1, 2 and 3 Nov (the owner's choice; neither the board nor the route data names this stop, so it holds for
   every early stop). Cost: a real diversion to an airport on the way is alerted up to its board time late, not at all when unheard
   on the ground by then.
+  Since 20 Nov 2026 (the owner's choice) any arrival on the ground on its way before its board time waits, not only one in time
+  to fly on at `STOP_KT`, unless hot, in an emergency or back within `DIVERTED_NM` of its origin: IB1873 landed at Athens 17 min
+  after that deadline (03:25 IST, board 05:00) and was "Landed at Athens; listed for Tel Aviv" on Telegram (19 Nov).
   A new callsign during the wait ends it (`new_callsign`; 2 Nov 2026 nightly review): IB1873 became IBS18AB on the ground at
   Athens, a new leg with no board row, and the old row's deadline still gave DIVERSION "too late to land by its scheduled ?", then
   its departure turn (hot) and a follow-up. Cost: a real diversion that takes a new callsign there is not alerted.
@@ -401,6 +411,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   (`approaching`; 3 Nov 2026, the owner's choice): RB516 DXB -> DAM "-10.9 deg" at 10,000 ft 12 nm out, history ~7 deg. Cost: a
   sudden steep descent there, before the history shows it, is alerted only once it does. MFO692 (military BE20, no destination,
   -10.1 deg at 1,425 ft, 1 Nov) is not covered.
+  A rate backed only by a history of the other sign is a glitch (20 Nov 2026, the owner's choice): APX11 (military PC21) "-17,792
+  ft/min at 15,425 ft (history: +4,676)" 20 s after +17,792, 425 ft lower, on Telegram (16 Nov). Cost: none expected (a real dive
+  makes the 30 s history negative).
   An MLAT report's speed is the receivers' estimate: the military GLF5 "684", 12 Oct 2026, descending
   5,115 ft/min at ~455 kt (6.4 deg) was given 257 kt on one poll and alerted at 11.1 deg. For MLAT reports
   `trusted_gs` takes the last speed the aircraft itself reported (<= 5 min), else the speed between its
@@ -490,9 +503,16 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   WMT3PH into Milan; 35 nm until 31 Oct 2026: THY6DW onto Istanbul's arrival 35.4 nm out. Not our airport: the region's
   radius stays. Squawk replay: AA1009's turn back to Chicago is now routine when watched from elsewhere, still alerted from ORD),
   nor within 35 nm of where it took off in this leg (`Track.takeoff_pos`; ISR178 out of Budapest, above),
+  nor, for a flight seen taking off at its own origin far away (`takeoff_pos` within 35 nm of it), climbing within `CLIMB_OUT_S`
+  (+ the 2 min hold) of take-off at any height, when the held new track is > 90 deg from the way back (judged when reported; 20 Nov
+  2026, the owner's choice): UA167 (EWR -> TLV) 176 -> 93 deg from 23,000 ft, reported at FL255 ~55 nm SE of Newark. Cost: a real
+  reversal there that does not head back is only logged while it climbs,
   nor, for a flight with no board row nor route, descending (<= -500 ft/min) within 40 nm of any airport of the
   standing data (`airfield_near`; 30 Oct 2026, the owner's choice: RJ872, E290 `DEP?`, onto Sabiha Gokcen's arrival at
   FL168 26 nm out; cost: a real reversal descending near any airport on such a flight is only logged),
+  nor, for such a flight, 1,000 ft lower by the time the turn is reported than at its start (level when it began; 20 Nov 2026, the
+  owner's choice): TVF35KJ (B738) 255 -> 330 deg from 12,000 ft to 10,600 ft ~21 nm SE of Lyon onto its arrival. Cost: a real
+  reversal of such a flight that starts descending within 2 min near an airport is only logged,
   nor, for such a flight, climbing (>= 500 ft/min) at any height within `CLIMB_OUT_S` (20 min) of leaving Amman (`Track.amm_dep`; 7 Nov 2026
   nightly review: RJA874, A20N, 221 -> 348 deg at FL295 over the Negev 11 min out of Amman, its way west over Israel; cost: a real
   reversal on such a departure while it still climbs is only logged).
@@ -609,6 +629,13 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   ends at our airport - the tag stop `planned_stop` already knows (`tag_stop_ahead`; not hot, no emergency; 7 Nov 2026 nightly review):
   IZ902 VAR -> TLV, AIZ902 LBSF-LLBG, left Varna westbound for Sofia, "121 deg away from TLV, 781 nm out". Cost: an arrival that turns
   back toward such a stop is not OFF_COURSE.
+  Nor a route-based OFF_COURSE at a stop on the route's way (`route_stop_here`; not hot, no emergency; 20 Nov 2026, the owner's
+  choice): coming down (rate <= -500 ft/min or 1,000 ft lost in 2 min) below FL250 within 35 nm of a regional airport on the way
+  between the route's ends (`TAG_DETOUR`) - QTR79R, listed EGLL-OTHH, flies Doha -> Amman, on its downwind SE of Amman at FL216
+  "bound for EGLL ... 108 deg away", hot, and its turn onto final a course reversal (17 Nov); or heading (within `TAG_STOP_TOL`) for
+  a stop the route lists, nearer than its far end - UAE17K (OMDB-LCLK-LMML) at FL320 105 nm S of Larnaca, "bound for LMML ... 121
+  deg away" (18 Nov). Cost: a real turn-away descending near such an airport, or a turn back that points at a listed stop, is not
+  OFF_COURSE.
   The route's direction is not learned in the departure routing out of an airport that is not one of its ends (within
   `--off-course-min-dist` of `takeoff_pos`, or `CLIMB_OUT_S` after leaving Amman, `amm_dep`; 9 Nov 2026 nightly review): QTR79G, listed
   EGLL-OTHH, left Amman (it had come down there as QTR79R) westbound, learned "bound for EGLL" climbing through FL110 and turned SE for

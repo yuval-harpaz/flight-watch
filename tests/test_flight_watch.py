@@ -186,6 +186,25 @@ class AlertSimulation(unittest.TestCase):
             step(mon, clock)
         self.assertNotIn("VERTICAL_RATE", [a["kind"] for a in alerts])
 
+    def test_vertical_rate_backed_only_by_the_other_sign_is_a_glitch(self):
+        """APX11 (PC21) "DESCENT -17,792 ft/min at 15,425 ft (history: +4,676 ft/min)", 20 s after +17,792 and 425 ft
+        lower (16 Nov 2026). A dive of that rate, its altitude falling, still alerts."""
+        got = {}
+        for case in ("flipped", "dive"):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            feed.local = {"738001"}
+            alt = 14000
+            for i in range(8):  # climbing ~+4,200 ft/min
+                feed.aircraft["738001"] = airborne(32.5, 34.5, alt, rate=4200)
+                step(mon, clock)
+                alt += 700
+            for i in range(3):
+                alt -= 200 if case == "flipped" else 3000
+                feed.aircraft["738001"] = airborne(32.5, 34.5, alt, rate=-17792)
+                step(mon, clock)
+            got[case] = "VERTICAL_RATE" in kinds(alerts)
+        self.assertEqual(got, {"flipped": False, "dive": True})
+
     def test_emergency_squawk(self):
         mon, feed, clock, alerts = make(["--no-routes"])
         feed.local = {"738001"}
@@ -2239,6 +2258,35 @@ class RouteOffCourse(unittest.TestCase):
             got[name] = "OFF_COURSE" in kinds(alerts, "40822e")
         self.assertEqual(got, {"descends": False, "level": True})
 
+    def test_route_stop_on_the_way_is_not_off_course(self):
+        """QTR79R (A35K, listed EGLL-OTHH, flies Doha -> Amman) on its downwind 30 nm SE of Amman at FL216, descending,
+        heading 65 deg: OFF_COURSE "bound for EGLL ... 108 deg away" (17 Nov 2026). UAE17K (B77W, OMDB-LCLK-LMML) at FL320
+        105 nm S of Larnaca heading for it: OFF_COURSE "bound for LMML ... 121 deg away" (18 Nov 2026). Level there, or with
+        no stop listed, they still alert."""
+        got = {}
+        for name in ("QTR79R descends", "QTR79R level", "UAE17K stop", "UAE17K no stop"):
+            mon, feed, clock, alerts = make([])
+            if name.startswith("QTR"):
+                cs, route, start, trk, ends, rdir = ("QTR79R", "EGLL-OTHH", (31.40, 36.20), 65,
+                                                     [("EGLL", 51.47, -0.46), ("OTHH", 25.27, 51.61)], -1)
+            else:
+                cs, route, start, trk, ends, rdir = ("UAE17K", "OMDB-LCLK-LMML" if "no" not in name else "OMDB-LMML",
+                                                     fw.destination(33.24, 32.85, 226, 20), 46, [("OMDB", 25.25, 55.36), ("LMML", 35.857, 14.477)], 1)
+            mon.routes[cs] = (clock(), route)
+            mon.route_ends = lambda t, ends=ends: ends
+            mon.heading_for_region = lambda t, e: None  # (UAE17K points at Latakia too: that rule is tested above)
+            mon.standing.airport = lambda icao: (34.8751, 33.6249) if icao == "LCLK" else None
+            ident = dict(flight=cs, r="A7-ANP", t="A35K")
+            alts = ([21600 - 250 * i for i in range(30)] if name == "QTR79R descends" else
+                    [21600] * 30 if name.startswith("QTR") else [32000] * 30)
+            fly(mon, feed, clock, "06a1e1", path(*start, [trk] * 3, alts[:3], gs=300), **ident)
+            mon.tracks["06a1e1"].route_dir = rdir
+            st = feed.aircraft["06a1e1"]
+            fly(mon, feed, clock, "06a1e1", path(st["lat"], st["lon"], [trk] * 27, alts[3:], gs=300), **ident)
+            got[name] = "OFF_COURSE" in kinds(alerts, "06a1e1")
+        self.assertEqual(got, {"QTR79R descends": False, "QTR79R level": True, "UAE17K stop": False,
+                               "UAE17K no stop": True})
+
     def test_no_alert_while_flying_the_route(self):
         mon, feed, clock, alerts = with_routes()
         fly(mon, feed, clock, "896121", path(33.0, 43.0, [315] * 60, [37000] * 60),
@@ -2667,6 +2715,21 @@ class Run18OctTests(unittest.TestCase):
                 flight="RJA872", r="JY-RED", t="E290")
             got[rate] = "COURSE_CHANGE" in kinds(alerts, "740123")
         self.assertEqual(got, {-1000: False, 0: True})
+
+    def test_reversal_descending_by_the_time_it_is_reported_without_route(self):
+        """TVF35KJ (B738, no board row nor route) turned 255 -> 330 deg ~21 nm SE of Lyon from 12,000 ft, reported at
+        10,600 ft, onto its arrival (17 Nov 2026): level when the turn began. Level all through, it still alerts."""
+        got = {}
+        for case in ("descends after", "level"):
+            mon, feed, clock, alerts = make([])
+            mon.standing.fields = [(33.10, 33.45, "LFLL")]  # (a local checkout's list; moved into our circle)
+            mon.standing.all_fields = lambda: mon.standing.fields
+            tracks = [14] * 8 + [14 + 29 * i for i in range(1, 9)] + [246] * 16
+            alts = [12000] * 16 + ([12000 - 100 * i for i in range(1, 17)] if case == "descends after" else [12000] * 16)
+            fly(mon, feed, clock, "39e6a1", path(32.90, 33.90, tracks, alts, gs=300), flight="TVF35KJ", r="F-GZHX",
+                t="B738")
+            got[case] = "COURSE_CHANGE" in kinds(alerts, "39e6a1")
+        self.assertEqual(got, {"descends after": False, "level": True})
 
     def test_reversal_on_its_own_far_airports_routing_within_50_nm(self):
         """THY6DW (OLBA-LTFM) turned 351 -> 281 deg at 9,025 ft 35.4 nm from Istanbul, onto its arrival (30 Oct 2026):
@@ -3524,6 +3587,35 @@ class FarEndTests(unittest.TestCase):
             got[route] = "DIVERSION" in kinds(alerts, "48418c")
         self.assertEqual(got, {"EHAM-LCLK-LLBG": False, "EHAM-LLBG": True})
 
+    def test_departure_coming_down_far_from_its_destination_is_a_diversion(self):
+        """LY221 TLV -> CDG turned back near Turin and was last heard at 1,325 ft 300 nm short of Paris, an emergency
+        landing in Italy; heard again 100 min later 3 nm on. Telegram had its turns and "last heard at 1,325 ft" only
+        (18 Nov 2026). Here TLV -> TBS coming down to Batumi: silent low, a DIVERSION (once, also when heard again);
+        silent higher, a DIVERSION when heard again on the ground there; the same at Tbilisi, its destination: none."""
+        batumi, tbilisi = (41.6103, 41.5997), (41.6692, 44.9547)
+        got = {}
+        for case in ("low", "higher", "destination"):
+            mon, feed, clock, alerts = self.setup([board_row("LY", "5419", "D", local_time(Clock(), -1), "TBS")])
+            mon.standing.fields = [(*batumi, "UGSB"), (*tbilisi, "UGTB")]  # (a local checkout's list)
+            mon.standing.all_fields = lambda: mon.standing.fields
+            ident = dict(flight="ELY5419", r="4X-EKP", t="B738")
+            field = tbilisi if case == "destination" else batumi
+            start = fw.destination(*field, 270, 30)
+            floor = 6000 if case == "higher" else 1300
+            approach = path(*start, [90] * 120, [max(8000 - 150 * i, floor) for i in range(120)], gs=220)
+            approach = approach[:next(i for i, st in enumerate(approach)
+                                      if fw.haversine_nm(st["lat"], st["lon"], *field) < 5)]
+            fly(mon, feed, clock, "73806a", approach, local=False, **ident)
+            del feed.aircraft["73806a"]
+            for _ in range(90):
+                step(mon, clock)
+            before = kinds(alerts, "73806a").count("DIVERSION")
+            clock.t += 100 * 60
+            fly(mon, feed, clock, "73806a", [dict(lat=field[0], lon=field[1] + 0.05, alt_baro="ground", gs=10,
+                                                  track=90)] * 3, local=False, **ident)
+            got[case] = (before, kinds(alerts, "73806a").count("DIVERSION"))
+        self.assertEqual(got, {"low": (1, 1), "higher": (0, 1), "destination": (0, 0)})
+
     def test_silent_low_at_an_impossible_speed_is_not_a_diversion(self):
         """OS83 VIE -> TLV "went silent descending through -50 ft" at 975 kt in Jordan, spoofed after an episode at
         Amman had ended; it landed at TLV (16 Nov 2026). The same descent at its own speed is still a DIVERSION."""
@@ -3580,6 +3672,9 @@ class FarEndTests(unittest.TestCase):
                                       if fw.haversine_nm(st["lat"], st["lon"], 44.5711, 26.0850) < 5)]
             fly(mon, feed, clock, "48418c", approach, local=False, **ident)
             fly(mon, feed, clock, "48418c", [dict(lat=44.5711, lon=26.0850, alt_baro="ground", gs=10, track=90)] * 4,
+                local=False, **ident)
+            clock.t += 2.5 * 3600  # (a landing on its way before its board time waits for it: IB1873, 19 Nov 2026)
+            fly(mon, feed, clock, "48418c", [dict(lat=44.5711, lon=26.0850, alt_baro="ground", gs=0, track=90)] * 2,
                 local=False, **ident)
             got[case] = (mon.schedule.by_callsign["KLM463"].stop, "DIVERSION" in kinds(alerts, "48418c"))
         self.assertEqual(got, {"tag": ("OTP", False), "inbound": ("", True), "off the way": ("LIS", True)})
@@ -3647,7 +3742,8 @@ class FarEndTests(unittest.TestCase):
                 if hours == 2 and case == "stays":
                     self.assertNotIn("DIVERSION", kinds(alerts, "48418c"))
             got[case] = (first, "DIVERSION" in kinds(alerts, "48418c"))
-        self.assertEqual(got, {"flies on": (False, False), "stays": (False, True), "due soon": (True, True)})
+        # due soon: too late to fly on by its board time, it waits all the same (IB1873 at Athens, 19 Nov 2026)
+        self.assertEqual(got, {"flies on": (False, False), "stays": (False, True), "due soon": (False, True)})
 
     def test_approach_to_a_stop_on_its_way_is_not_off_course(self):
         """IB1873 MAD -> TLV, 15 nm from Athens at 5,275 ft heading 337 deg: OFF_COURSE "637 nm out and opening", 7 min
@@ -3779,6 +3875,9 @@ class FarEndTests(unittest.TestCase):
             fly(mon, feed, clock, "4d21e6", approach, local=False, **ident)
             fly(mon, feed, clock, "4d21e6", [dict(lat=41.8003, lon=12.2389, alt_baro="ground", gs=10, track=90)] * 4,
                 local=False, **ident)
+            clock.t += 2.5 * 3600  # (a landing on its way before its board time waits for it: IB1873, 19 Nov 2026)
+            fly(mon, feed, clock, "4d21e6", [dict(lat=41.8003, lon=12.2389, alt_baro="ground", gs=0, track=90)] * 2,
+                local=False, **ident)
             got[origin] = "DIVERSION" in kinds(alerts, "4d21e6")
         self.assertEqual(got, {"LIRF": False, "LIME": True})
 
@@ -3842,6 +3941,27 @@ class FarEndTests(unittest.TestCase):
         for _ in range(30):
             step(mon, clock)
         self.assertNotIn("LOST_CONTACT", kinds(alerts, "738447"))
+
+    def test_turn_climbing_out_of_its_origin_beyond_50_nm(self):
+        """UA167 (EWR -> TLV, B789) turned 176 -> 93 deg from 23,000 ft, reported at FL255 ~55 nm SE of Newark, onto its
+        way over the Atlantic (17 Nov 2026): beyond OWN_TURN_NM, above FL250 when reported. Here out of Sofia south-west,
+        turning north-west 52 nm out. First heard in the air (its take-off unseen), the same turn still alerts."""
+        sofia = (42.6967, 23.4114)
+        got = {}
+        for case in ("take-off seen", "first heard high"):
+            mon, feed, clock, alerts = self.setup([board_row("LY", "552", "A", local_time(Clock(), 3), "SOF")])
+            ident = dict(flight="ELY552", r="4X-EHI", t="B739")
+            if case == "take-off seen":
+                fly(mon, feed, clock, "738057", [dict(lat=sofia[0], lon=sofia[1], alt_baro="ground", gs=10,
+                                                      track=230)] * 3, local=False, **ident)
+                start, alt0, n = sofia, 500, 78
+            else:
+                start, alt0, n = fw.destination(*sofia, 230, 20), 12000, 48
+            tracks = [230] * n + [230 + 10 * i for i in range(1, 9)] + [310] * 16
+            alts = [min(alt0 + 290 * i, 30000) for i in range(len(tracks))]
+            fly(mon, feed, clock, "738057", path(*start, tracks, alts, gs=240), local=False, **ident)
+            got[case] = "COURSE_CHANGE" in kinds(alerts, "738057")
+        self.assertEqual(got, {"take-off seen": False, "first heard high": True})
 
     def test_turn_climbing_out_of_its_origin_far_away(self):
         """ELY552 SOF -> TLV, 19 Oct 2026: "track 359 -> 126 deg" at 17,825 ft, 10 nm from Sofia. Here it ends on 90 deg:
