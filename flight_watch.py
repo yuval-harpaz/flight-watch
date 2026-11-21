@@ -333,6 +333,7 @@ TURN_HOLD_MAX_S = 120
 CLIMB_OUT_S = 20 * 60  # an arrival on its way to its own origin, this soon after take-off: in its departure routing
 # no aircraft rolls on the ground faster (kt): AIZ282 "on the ground" at 575 kt, 11 Oct 2026
 GROUND_MAX_KT = 250
+ROLLOUT_KT = 100  # a large aircraft slower than this over the ground is on the ground (silent-low DIVERSION)
 # a landing elsewhere is at an airport: at most this far (nm) from one of the standing data
 LANDING_AIRPORT_NM = 5
 # Silent this close to an airport of the local checkout and this low above its height: named as where it is probably landing
@@ -4651,6 +4652,11 @@ class Monitor:
                         log.info("%s silent low at %.4f,%.4f, last reported at %.0f kt - a fake position, not taken "
                                  "as a landing", t.label(), s.lat, s.lon, s.gs)
                         continue
+                    slow = self.rollout_away(t, s)
+                    if slow:
+                        t.lost_alerted = False
+                        log.info("%s silent low at %.4f,%.4f - %s", t.label(), s.lat, s.lon, slow)
+                        continue
                     near = f", {ad:.0f} nm from {apt}" if ad <= 30 else ""
                     self.diversion(t, "ARR", f"{a.airport} arrival went silent descending through "
                                f"{s.alt} ft, {d:.0f} nm from {a.airport} at {s.lat:.4f},{s.lon:.4f}"
@@ -4751,6 +4757,7 @@ class Monitor:
         why = ("a stop on its route" if self.planned_stop(t, s, "DEP") else
                f"during {self.fake_place(t, s)}, a fake place" if self.fake_place(t, s) else
                f"last reported at {s.gs:.0f} kt, a fake position" if (s.gs or 0) > a.max_gap_speed else
+               self.rollout_away(t, s) if self.rollout_away(t, s) else
                "long after that leg should have ended: another leg" if self.beyond_leg(t, s, dest) else
                "where its arrival came from: the rotation home" if self.back_to_prev(t, s) else
                f"{ad:.0f} nm from the nearest airport" if ad > 30 else "")
@@ -4759,6 +4766,25 @@ class Monitor:
                      t.label(), what, dd, dest[0], s.lat, s.lon, why)
             return None
         return dest, dd, apt, ad
+
+    def rollout_away(self, t: Track, s: Sample) -> str:
+        """For a large aircraft last heard below ROLLOUT_KT: it is on the ground (no airliner flies that slow), so a place more
+        than LANDING_AIRPORT_NM from any airfield of the local checkout is a fake one - a reason, else "". Without the checkout
+        (replays, the map), as `landing_place`: only during a GPS episode, by the region's list (U28099 back at Gatwick at
+        -150 ft, squawk replay, is no airport of the region's).
+        ETD75C (A6-BLX, B789, TLV -> AUH) "went silent descending through 100 ft, 67 nm from OMAA" at 48 kt over the sea in a
+        GPS episode, a ground report 4 min before dropped as out of reach: its rollout at Abu Dhabi (20 Nov 2026), the twin of
+        the --max-gap-speed rule (OS83)."""
+        if not t.large or s.gs is None or s.gs >= ROLLOUT_KT:
+            return ""
+        field = self.standing.airfield_near(s.lat, s.lon) if self.standing else None
+        episode = ((t.spoof and s.t - t.spoof_last <= 1800) or (t.gps and s.t - t.gps_last <= 1800))
+        if not field and not episode:
+            return ""
+        apt, ad = field if field else nearest_airport(s.lat, s.lon)
+        if ad <= LANDING_AIRPORT_NM:
+            return ""
+        return f"last reported at {s.gs:.0f} kt, {ad:.0f} nm from the nearest airport ({apt}): a fake position"
 
     def silent_low_departure(self, t: Track, s: Sample) -> bool:
         """A departure of ours silent low and descending far from its destination, near an airport: probably landing

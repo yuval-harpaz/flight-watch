@@ -377,6 +377,11 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   Nor going silent low when the last report's ground speed is above `--max-gap-speed` (750 kt; 16 Nov 2026 nightly review): OS83
   VIE -> TLV "went silent descending through -50 ft" at 975 kt 41 nm S of the Amman spoofing point after its episode ended, and
   landed at TLV. Cost: none expected (nothing descends low at that speed).
+  Nor, for a large aircraft, when the last report is slower than `ROLLOUT_KT` (100 kt: on the ground) more than
+  `LANDING_AIRPORT_NM` from any airfield of the local checkout (without it: only in a GPS episode, by the region's list), arrival
+  or departure (`rollout_away`; 21 Nov 2026, the owner's choice): ETD75C (B789, TLV -> AUH) "went silent descending through 100
+  ft, 67 nm from OMAA ... probably landing at OMDB" at 48 kt over the sea in a GPS episode - its rollout at Abu Dhabi. Cost: none
+  expected. Squawk replay: 0 of 354 changed.
 - **Callsign changes** (`Monitor.new_callsign`, 13 Oct 2026; 9 false alerts in the run of 11-12 Oct): a changed
   callsign is taken up after `CALLSIGN_HOLD` (120 s) and refused while another tracked aircraft sends it -
   adsb.lol gave 4X-ABG the callsign ISR723 for 55 s (4X-ABF's; ADS-B Exchange's trace never had it) and ISR050

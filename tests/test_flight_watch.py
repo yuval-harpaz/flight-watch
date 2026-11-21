@@ -3638,6 +3638,31 @@ class FarEndTests(unittest.TestCase):
             got[gs] = "DIVERSION" in kinds(alerts, "48418c")
         self.assertEqual(got, {220: True, 975: False})
 
+    def test_silent_low_at_rollout_speed_away_from_an_airfield_is_not_a_diversion(self):
+        """ETD75C (B789, TLV -> AUH) "went silent descending through 100 ft, 67 nm from OMAA" at 48 kt over the sea, its GPS
+        spoofed: its rollout at Abu Dhabi (20 Nov 2026). An airliner that slow is on the ground, and away from any airfield
+        that place is fake. At its own speed, or that slow at an airfield, it is still a DIVERSION."""
+        batumi = (41.6103, 41.5997)
+        got = {}
+        for case in ("220 kt", "48 kt at sea", "48 kt at the airfield"):
+            mon, feed, clock, alerts = self.setup([board_row("LY", "5419", "D", local_time(Clock(), -1), "TBS")])
+            mon.standing.fields = [(*batumi, "UGSB"), (41.6692, 44.9547, "UGTB")]
+            mon.standing.all_fields = lambda: mon.standing.fields
+            ident = dict(flight="ELY5419", r="4X-EKP", t="B738")
+            start = fw.destination(*batumi, 270, 30)
+            approach = path(*start, [90] * 120, [max(4000 - 150 * i, 1300) for i in range(120)], gs=220)
+            stop = 1 if case.endswith("airfield") else 8
+            approach = approach[:next(i for i, st in enumerate(approach)
+                                      if fw.haversine_nm(st["lat"], st["lon"], *batumi) < stop)]
+            if case != "220 kt":
+                approach[-4:] = [dict(st, gs=48) for st in approach[-4:]]  # (followed: one report each 30 s)
+            fly(mon, feed, clock, "73806a", approach, local=False, **ident)
+            del feed.aircraft["73806a"]
+            for _ in range(90):
+                step(mon, clock)
+            got[case] = "DIVERSION" in kinds(alerts, "73806a")
+        self.assertEqual(got, {"220 kt": True, "48 kt at sea": False, "48 kt at the airfield": True})
+
     def test_board_tag_stop_is_not_a_diversion(self):
         """KL463 AMS -> TLV landed at Bucharest (DIVERSION, 24 Oct 2026): its route data is EHAM-LCLK-LLBG, but the
         board's KL464 leaves TLV for OTP an hour after it is due. Not when KLM flew in from Bucharest too (an ordinary
