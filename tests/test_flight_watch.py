@@ -4594,3 +4594,43 @@ class SingleInstanceTests(unittest.TestCase):
         self.assertIn(f"pid {os.getpid()}", str(e.exception.code))
         first.close()  # (the process ending)
         fw.single_instance(path).close()
+
+
+class FeederShadowTests(unittest.TestCase):
+    """The private feeder read in shadow (24 Nov 2026): it records what it heard that our feeds did not, and
+    changes no track nor alert."""
+
+    def shadow(self, feeder_acs, clock):
+        tmp = tempfile.NamedTemporaryFile("r", suffix=".jsonl", delete=False)
+        self.addCleanup(os.unlink, tmp.name)
+        env = {"FEEDER1_URL": "feeder.example", "FEEDER1_ID": "id", "FEEDER1_KEY": "key"}
+        with mock.patch.dict(os.environ, env):
+            sh = fw.FeederShadow(tmp.name, *TLV)
+        sh.session = types.SimpleNamespace(get=lambda url, timeout=None: FakeResponse(
+            200, {"now": clock(), "aircraft": feeder_acs()}, url=url))
+        return sh, tmp.name
+
+    def test_it_records_aircraft_missing_from_our_answer_and_alters_nothing(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        feed.aircraft["4x0001"] = airborne(32.1, 34.9, 3000, flight="ELY001")
+        feed.local = {"4x0001"}
+        low = dict(airborne(32.0, 34.85, 600, flight="ISR777"), hex="4x0002", seen_pos=1)
+        sh, path_ = self.shadow(lambda: [dict(feed.ac("4x0001"), hex="4x0001"), low], clock)
+        mon.shadow = sh
+        for _ in range(3):
+            mon.poll()
+            sh.tick(mon, True)
+            clock.t += 10
+        self.assertNotIn("4x0002", mon.tracks)  # shadow only
+        self.assertEqual(alerts, [])
+        sh.tick(mon, False)  # a poll of ours refused: the feeder still heard both
+        sh.close()
+        with open(path_) as f:
+            eps = {r["hex"]: r for r in map(json.loads, f)}
+        self.assertEqual(set(eps), {"4x0001", "4x0002"})
+        self.assertEqual((eps["4x0002"]["missing"], eps["4x0002"]["failed"], eps["4x0002"]["min_alt"]), (3, 1, 600))
+        self.assertEqual((eps["4x0001"]["missing"], eps["4x0001"]["failed"]), (0, 1))
+
+    def test_off_without_the_environment(self):
+        with mock.patch.dict(os.environ, {"FEEDER1_URL": ""}):
+            self.assertFalse(fw.FeederShadow("x.jsonl", *TLV).on)

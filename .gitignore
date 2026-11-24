@@ -17,3 +17,4 @@ archive_traces/
 reviews/
 /flight_watch_state.json*
 goarounds/
+/feeder_shadow*.jsonl

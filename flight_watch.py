@@ -932,6 +932,166 @@ class SchedFlight:
                 else f"{self.flight} {home}->{self.other}")
 
 
+class FeederShadow:
+    """A private receiver's own aircraft.json, read beside the aggregator in shadow: it changes no track and no
+    alert, and records only what it heard that our feeds did not (24 Nov 2026, the owner: see what it would have
+    rescued before it goes into production). A PiAware (dump1090-fa 10.2) ~7 nm SW of TLV behind Cloudflare
+    Access: range ~50 nm, down to the runways; no traces, no aircraft database. Host and keys come from the
+    environment only (FEEDER1_URL, a bare host; FEEDER1_ID / FEEDER1_KEY) and are never logged.
+
+    One line per aircraft episode in `path` (heard, then unheard by the feeder SHADOW_GONE_S), only when it added
+    something: `failed` polls of ours it was heard on (refused / no answer), `missing` from an answered local poll,
+    `fresher` (its position >= SHADOW_FRESHER_S newer than the aggregator's), `silent` (our track unheard >= 60 s),
+    `lost` (our track marked lost), `lead` (s it heard a new aircraft before our first report). And one line per
+    LOST_CONTACT / DIVERSION alert on an aircraft the feeder heard after our last report."""
+
+    FRESH_S = 15  # a feeder report older than this (seen_pos) is not counted
+    GONE_S = 300
+    FRESHER_S = 10
+    SILENT_S = 60
+    TIMEOUT_S = 3
+    REFUSED_S = 1800
+
+    def __init__(self, path: str, lat: float, lon: float):
+        host, cid, key = (os.environ.get(n, "").strip() for n in ("FEEDER1_URL", "FEEDER1_ID", "FEEDER1_KEY"))
+        self.path, self.lat, self.lon = path, lat, lon
+        self.on = bool(path and host and cid and key)
+        if not self.on:
+            if path:
+                log.info("feeder shadow off: FEEDER1_URL / FEEDER1_ID / FEEDER1_KEY not in the environment")
+            return
+        host = host.split("://")[-1].strip("/")
+        self.url = f"https://{host}/data/aircraft.json"
+        self.session = requests.Session()
+        self.session.headers.update({"CF-Access-Client-Id": cid, "CF-Access-Client-Secret": key})
+        self.eps: dict[str, dict] = {}     # hex -> episode
+        self.heard: dict[str, float] = {}  # hex -> feeder's last position time
+        self.paused_until = 0.0
+        self.hour = {"polls": 0, "errors": 0, "failed_polls": 0, "missing": 0, "fresher": 0, "silent": 0, "new": 0}
+        self.hour_at = time.time()
+        log.info("feeder shadow on (feeder 1), episodes in %s", path)
+
+    def _write(self, rec: dict) -> None:
+        try:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        except OSError as e:
+            log.warning("feeder shadow: %s", e)
+
+    def fetch(self) -> tuple[float, list] | None:
+        if time.time() < self.paused_until:
+            return None
+        try:
+            r = self.session.get(self.url, timeout=self.TIMEOUT_S)
+            if r.status_code in (401, 403):
+                self.paused_until = time.time() + self.REFUSED_S
+                log.warning("feeder shadow: HTTP %s, paused %d min", r.status_code, self.REFUSED_S // 60)
+                return None
+            r.raise_for_status()
+            d = r.json()
+        except (requests.RequestException, ValueError) as e:
+            self.hour["errors"] += 1
+            log.debug("feeder shadow: %s", type(e).__name__)
+            return None
+        return float(d.get("now") or time.time()), d.get("aircraft") or []
+
+    def tick(self, monitor: "Monitor", ok: bool) -> None:
+        """After each local poll of ours, answered (`ok`) or not. Never raises: the poll loop comes first."""
+        if not self.on:
+            return
+        try:
+            self._tick(monitor, ok)
+        except Exception as e:  # noqa: BLE001 (a shadow must not stop the monitor)
+            log.warning("feeder shadow: %s: %s", type(e).__name__, e)
+
+    def _tick(self, monitor: "Monitor", ok: bool) -> None:
+        got = self.fetch()
+        h = self.hour
+        if not ok:
+            h["failed_polls"] += 1
+        if got is not None:
+            h["polls"] += 1
+            now, acs = got
+            agg = monitor.local_seen if ok else {}
+            for ac in acs:
+                hexid, sp = (ac.get("hex") or "").lower(), ac.get("seen_pos")
+                if not hexid or hexid.startswith("~") or sp is None or float(sp) > self.FRESH_S or "lat" not in ac:
+                    continue
+                pos_t = now - float(sp)
+                self.heard[hexid] = pos_t
+                ep = self.eps.get(hexid)
+                t = monitor.tracks.get(hexid)
+                if ep is None:
+                    ep = self.eps[hexid] = {"hex": hexid, "first": pos_t, "polls": 0, "failed": 0, "missing": 0,
+                                            "fresher": 0, "fresher_max_s": 0, "silent": 0, "lost": 0,
+                                            "min_alt": None, "max_nm": 0.0,
+                                            "new": None if t is not None and t.samples else pos_t}
+                    if ep["new"] is not None:
+                        h["new"] += 1
+                ep["last"], ep["polls"] = pos_t, ep["polls"] + 1
+                ep["callsign"] = (ac.get("flight") or "").strip() or ep.get("callsign")
+                alt = 0 if ac.get("alt_baro") == "ground" else ac.get("alt_baro")
+                if isinstance(alt, (int, float)) and (ep["min_alt"] is None or alt < ep["min_alt"]):
+                    ep["min_alt"] = int(alt)
+                ep["max_nm"] = max(ep["max_nm"], round(haversine_nm(self.lat, self.lon, ac["lat"], ac["lon"]), 1))
+                if not ok:
+                    ep["failed"] += 1
+                elif hexid not in agg:
+                    ep["missing"] += 1
+                    h["missing"] += 1
+                elif pos_t - agg[hexid] >= self.FRESHER_S:
+                    ep["fresher"] += 1
+                    ep["fresher_max_s"] = max(ep["fresher_max_s"], round(pos_t - agg[hexid]))
+                    h["fresher"] += 1
+                if t is not None and t.samples:
+                    if pos_t - t.last_msg >= self.SILENT_S:
+                        ep["silent"] += 1
+                        h["silent"] += 1
+                    if t.lost:
+                        ep["lost"] += 1
+                    traffic, route = monitor.classify(t)
+                    ep["traffic"], ep["route"] = traffic, route or ep.get("route")
+                    if ep["new"] is not None and "lead_s" not in ep:
+                        ep["lead_s"] = round(t.samples[0].t - ep["new"])
+            for hexid, ep in list(self.eps.items()):
+                if now - ep["last"] >= self.GONE_S:
+                    self.flush(self.eps.pop(hexid))
+            self.heard = {k: v for k, v in self.heard.items() if now - v < 3 * 3600}
+        if time.time() - self.hour_at >= 3600:
+            log.info("feeder shadow, last hour: %d reads (%d failed), %d of our local polls failed; reports missing "
+                     "from our answer %d, fresher by >= %ds %d, of aircraft unheard by us >= %ds %d; %d aircraft "
+                     "heard before us", h["polls"], h["errors"], h["failed_polls"], h["missing"], self.FRESHER_S,
+                     h["fresher"], self.SILENT_S, h["silent"], h["new"])
+            self.hour, self.hour_at = dict.fromkeys(h, 0), time.time()
+
+    def flush(self, ep: dict) -> None:
+        if not (ep["failed"] or ep["missing"] or ep["fresher"] or ep["silent"] or ep["lost"]
+                or (ep.get("lead_s") or 0) > 0):
+            return
+        iso = lambda x: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(x))  # noqa: E731
+        self._write({"type": "episode", **ep, "first": iso(ep["first"]), "last": iso(ep["last"]),
+                     "new": iso(ep["new"]) if ep["new"] is not None else None})
+
+    def on_alert(self, t: "Track", kind: str, now: float) -> None:
+        """An alert of silence on an aircraft the feeder heard after our last report: it might not have been."""
+        if not self.on or kind not in ("LOST_CONTACT", "DIVERSION"):
+            return
+        heard = self.heard.get(t.hex)
+        if heard is not None and heard > t.last_msg + 1:
+            self._write({"type": "alert", "kind": kind, "hex": t.hex, "callsign": t.callsign,
+                         "alert": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
+                         "our_last": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t.last_msg)),
+                         "feeder_last": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(heard))})
+            log.info("feeder shadow: %s %s - the feeder heard it %.0fs after our last report",
+                     t.label(), kind, heard - t.last_msg)
+
+    def close(self) -> None:
+        if self.on:
+            for ep in self.eps.values():
+                self.flush(ep)
+            self.eps = {}
+
+
 @dataclass
 class Track:
     hex: str
@@ -1982,6 +2142,8 @@ class Monitor:
         self.noted: dict[tuple, float] = {}  # (hex, key) -> clock of the last log remark (see note)
         self.from_trace = False   # checks are running on reports read from a trace (alert() says so)
         self.gs_from = ""         # where trusted_gs took an MLAT report's speed from
+        self.local_seen: dict[str, float] = {}  # the last answered local poll: hex -> position time
+        self.shadow: FeederShadow | None = None  # set by main() (--feeder-shadow)
 
     # ---- remote queries
     def multi_supported(self, prov: str, kind: str, local: list) -> bool | None:
@@ -2339,6 +2501,10 @@ class Monitor:
         if feed != self.local_feed and feed == a.provider:
             log.info("local poll from %s again", feed)
         self.local_feed = feed
+        self.local_seen = {}  # hex -> position time in this answer (FeederShadow compares)
+        for ac in local:
+            if ac.get("lat") is not None and ac.get("hex"):
+                self.local_seen[ac["hex"].lower()] = server_now - float(ac.get("seen_pos", ac.get("seen", 0)) or 0)
         self.read_mil_list()
         batches = [(server_now, ac) for ac in local]
         local_hexes = {(ac.get("hex") or "").lower() for ac in local}
@@ -5182,6 +5348,8 @@ class Monitor:
             **(fields or {}),
         })
         t.sent.append((sent_kind(kind, key), now))
+        if self.shadow is not None:
+            self.shadow.on_alert(t, kind, now)
         return True
 
 
@@ -5212,6 +5380,9 @@ def parse_args(argv=None):
     g.add_argument("--trace-url", default=TRACE_RECENT,
                    help="an aircraft's recent reports ({xx}: last 2 hex digits), read to fill altitude "
                         "history and reports our polls missed; '' = never")
+    g.add_argument("--feeder-shadow", default="",
+                   help="read the private feeder (FEEDER1_URL / _ID / _KEY in the environment) after each local poll, "
+                        "in shadow: append what it heard that our feeds did not to this JSONL file; changes no alert")
     g.add_argument("--trace-per-cycle", type=int, default=3, help="at most this many trace requests per poll")
     g.add_argument("--standing-data",
                    help="VRS standing-data repository (URL or local checkout) for routes and airports "
@@ -5427,6 +5598,8 @@ def main(argv=None) -> None:
         schedule = Schedule(http, airline_map, args.schedule_refresh, args.schedule_window)
     monitor = Monitor(args, Notifier(args, http), http, schedule)
     monitor.load_state()
+    if args.feeder_shadow:
+        monitor.shadow = FeederShadow(args.feeder_shadow, args.lat, args.lon)
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     log.info("watching %s (%s) r=%.0fnm every %.0fs via %s, code %s",
@@ -5441,13 +5614,15 @@ def main(argv=None) -> None:
         run(args, monitor, http, local_host, telegram)
     finally:
         monitor.save_state()
+        if monitor.shadow:
+            monitor.shadow.close()
 
 
 def run(args, monitor: "Monitor", http: Http, local_host: str, telegram: str) -> None:
     """The poll loop (main)."""
     backoff, counted = 0.0, False
     while True:
-        started = time.monotonic()
+        started, ok = time.monotonic(), False
         wait = http.budget(local_host).cooling()
         if 0 < wait < args.interval / 2:  # cooldown ends just after this tick: wait, don't skip it
             time.sleep(wait)
@@ -5461,7 +5636,7 @@ def run(args, monitor: "Monitor", http: Http, local_host: str, telegram: str) ->
                 counted = True
                 print(f"{time.strftime('%H:%M:%S')}  watching {args.airport}: {st['local']} aircraft within "
                       f"{args.radius:.0f} nm, {st['scheduled']} scheduled flights; {telegram}", flush=True)
-            backoff = 0.0
+            backoff, ok = 0.0, True
             monitor.save_state(periodic=True)
         except Throttled as e:
             # Cooling down after a 429: skip this cycle's local poll but keep the --interval
@@ -5479,6 +5654,8 @@ def run(args, monitor: "Monitor", http: Http, local_host: str, telegram: str) ->
         except (requests.RequestException, ValueError) as e:
             backoff = min(max(backoff * 2, args.interval), 300)
             log.error("fetch failed: %s - backing off %.0fs", e, backoff)
+        if monitor.shadow:  # after the poll's own work: never delays an alert
+            monitor.shadow.tick(monitor, ok)
         if args.once:
             break
         time.sleep(max(0.0, args.interval - (time.monotonic() - started)) + backoff)

@@ -146,6 +146,16 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   so an aircraft's silence inside the circle is judged only on polls of the feed that last heard it
   (`Track.feed`; see LOST_CONTACT). No trace files there: backfill stays adsb.lol's (refused since 18 Oct).
   Tests and replays pin one feed (`--fallback-provider '' --remote-providers adsb.lol`).
+- **A private feeder, in shadow** (`FeederShadow`, `--feeder-shadow`, 24 Nov 2026, the owner: see what it would have rescued before
+  it goes into production). Someone's PiAware (dump1090-fa 10.2) ~7 nm SW of TLV behind Cloudflare Access; `FEEDER1_URL` (a bare
+  host) / `FEEDER1_ID` / `FEEDER1_KEY` from the environment, never logged nor committed. Only `data/aircraft.json` (1 s refresh),
+  `receiver.json`, `stats.json`, `history_0..119.json` (30 s snapshots, 1 h); no traces, no search, no `r` / `t` / `dbFlags`.
+  Heard FL320 at 117 nm, and down to 500 ft near TLV. Read after each local poll (answered or not), 3 s timeout, never raising;
+  changes no track nor alert. `monitor.sh` writes `feeder_shadow_<date>.jsonl` (git-ignored): one line per aircraft episode
+  only when it added something (missing from our answer, heard while our poll failed, fresher by >= 10 s, heard while our track
+  was silent / lost, heard first) and one per LOST_CONTACT / DIVERSION on an aircraft it heard after our last report; an hourly
+  summary in the log. `tools/feeder_shadow_report.py` sums the files. First read: Israeli 738xxx aircraft with no callsign at
+  ~10,000 ft 30-48 nm out, absent from adsb.lol's answer.
 - **airplanes.live** became feeder-only in 2026 and returns **HTTP 403**. Do not make it a
   default or add it as a provider unless the owner becomes a feeder.
 - **HTTP 401 / 403 from a provider** pauses its lookups `TRACE_REFUSED_S` (30 min), doubling up to 6 h while it goes on
