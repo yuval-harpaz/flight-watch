@@ -1610,6 +1610,127 @@ class DestinationTests(unittest.TestCase):
         self.assertEqual(got, {"hold": False, "emergency": True})
 
 
+class RotationTests(unittest.TestCase):
+    """EY599 AUH -> TLV flew as ETD3QF (A6-AEB, which had flown EY608 TLV -> AUH), turned back far out and returned to
+    Abu Dhabi: never searched, nothing alerted (24 Nov 2026). The aircraft of our departure is asked for by hex after it
+    lands there; a new callsign heading for TLV is the board's arrival from there."""
+    AUH = (24.433, 54.651)
+
+    def run_case(self, out_track):
+        mon, feed, clock, alerts = with_board([board_row("EY", "608", "D", local_time(mon_clock(), -3.2), "AUH"),
+                                               board_row("EY", "599", "A", local_time(mon_clock(), 3), "AUH")])
+        ident = dict(flight="ETD608", r="A6-AEB", t="A321")
+        # on final into Abu Dhabi, then down and taxiing (found by the board's callsign, followed by hex)
+        lat, lon = fw.destination(*self.AUH, 300, 12)
+        fly(mon, feed, clock, "8963aa", path(lat, lon, [120] * 9, [3000 - 300 * i for i in range(9)], gs=150),
+            local=False, **ident)
+        ground = [dict(lat=self.AUH[0], lon=self.AUH[1], alt_baro="ground", gs=10, track=120)] * 90
+        fly(mon, feed, clock, "8963aa", ground, local=False, **ident)
+        self.assertIn("8963aa", mon.rotations)
+        self.assertFalse(mon.tracks["8963aa"].followed)
+        # out again on a callsign of its own: climbing NW toward TLV, or E for Bangalore
+        ident["flight"] = "ETD3QF"
+        ground = [dict(lat=self.AUH[0], lon=self.AUH[1], alt_baro="ground", gs=10, track=out_track)] * 18
+        fly(mon, feed, clock, "8963aa", ground, local=False, **ident)
+        n = 60 if out_track == 305 else 140  # (elsewhere: past CLIMB_OUT_S)
+        climb = path(*self.AUH, [out_track] * n, [min(1000 + 400 * i, 29000) for i in range(n)])
+        fly(mon, feed, clock, "8963aa", climb, local=False, **ident)
+        t = mon.tracks["8963aa"]
+        if out_track != 305:
+            return mon, t, alerts
+        # 180 nm out it turns back to Abu Dhabi
+        lat, lon = climb[-1]["lat"], climb[-1]["lon"]
+        tracks = [305] * 60 + [305 - 15 * i for i in range(1, 12)] + [125] * 40
+        fly(mon, feed, clock, "8963aa", path(lat, lon, tracks, [29000] * len(tracks)), local=False, **ident)
+        return mon, t, alerts
+
+    def test_return_flight_found_by_its_aircraft(self):
+        mon, t, alerts = self.run_case(305)
+        self.assertEqual(t.sched.flight, "EY599")
+        self.assertTrue(t.followed)
+        self.assertNotIn("8963aa", mon.rotations)
+        self.assertEqual(mon.schedule.by_callsign["ETD3QF"].flight, "EY599")
+        self.assertEqual(mon.schedule.learned["EY599"][0], "ETD3QF")
+        self.assertIn("OFF_COURSE", kinds(alerts))
+
+    def test_flying_elsewhere_is_not_ours(self):
+        """A6-AEO flew EY596 TLV -> AUH, then ETD238 to Bangalore (22 Oct 2026): not an arrival of ours, no checks."""
+        mon, t, alerts = self.run_case(100)
+        self.assertIsNone(t.sched)
+        self.assertNotIn("8963aa", mon.rotations)
+        self.assertEqual(kinds(alerts), [])
+
+    def test_learned_callsign_kept_at_board_reload(self):
+        mon, feed, clock, alerts = with_board([board_row("EY", "599", "A", local_time(mon_clock(), 3), "AUH")])
+        mon.schedule.learned["EY599"] = ["ETD3QF", clock()]
+        mon.schedule.load([board_row("EY", "599", "A", local_time(clock, 3), "AUH")],
+                          datetime.fromtimestamp(clock(), mon.schedule.tz))
+        self.assertEqual(mon.schedule.by_callsign["ETD3QF"].flight, "EY599")
+        self.assertIn("ETD3QF", mon.schedule.search_order(clock(), set(), 3))
+
+
+class LearnAtHomeTests(unittest.TestCase):
+    """An arrival heard on a callsign the board does not give, landing when the board's one arrival of its airline did:
+    that callsign, learned when seen on two days (1 arrival in 5 was not found on its callsign, 24 Nov 2026)."""
+
+    def land(self, mon, feed, clock, hexid, cs):
+        lat, lon = fw.destination(*TLV, 270, 12)
+        fly(mon, feed, clock, hexid, path(lat, lon, [90] * 30, [4000 - 130 * i for i in range(30)], gs=150),
+            flight=cs, r="A6-" + hexid[-3:].upper(), t="A321")
+        ground = [dict(lat=TLV[0], lon=TLV[1], alt_baro="ground", gs=10, track=90)] * 6
+        fly(mon, feed, clock, hexid, ground, flight=cs, r="A6-" + hexid[-3:].upper(), t="A321")
+        feed.local.discard(hexid)
+
+    def day(self, mon, feed, clock, landings, rows):
+        """`landings` [(hex, callsign)] at TLV now; the board then shows `rows` [(airline, number)] landed now."""
+        t0 = clock()
+        for hexid, cs in landings:
+            self.land(mon, feed, clock, hexid, cs)
+        mon.schedule.load([dict(board_row(a, n, "A", datetime.fromtimestamp(t0 + 300, fw.ZoneInfo("Asia/Jerusalem"))
+                                          .strftime("%Y-%m-%dT%H:%M"), "AUH"), CHRMINE="LANDED") for a, n in rows],
+                          datetime.fromtimestamp(clock(), mon.schedule.tz))
+        with self.assertLogs(fw.log, "INFO") as got:
+            for _ in range(40):  # past LEARN_WAIT_S
+                step(mon, clock, 60)
+        return [m for m in got.output if "board arrival" in m]
+
+    def start(self):
+        mon, feed, clock, alerts = with_board([])
+        step(mon, clock)  # (watching from here)
+        clock.t += 600
+        return mon, feed, clock
+
+    def test_learned_on_the_second_day(self):
+        mon, feed, clock = self.start()
+        lines = self.day(mon, feed, clock, [("8963aa", "ETD3QF")], [("EY", "599")])
+        self.assertIn("seen once", lines[0])
+        self.assertNotIn("EY599", mon.schedule.learned)
+        clock.t += 24 * 3600
+        lines = self.day(mon, feed, clock, [("8963ab", "ETD3QF")], [("EY", "599")])
+        self.assertIn("learned ETD3QF", lines[0])
+        self.assertEqual(mon.schedule.learned["EY599"][0], "ETD3QF")
+        clock.t += 24 * 3600 - 3600  # the next day the board row carries it, and the landing is found
+        mon.schedule.load([board_row("EY", "599", "A", local_time(clock, 0.1), "AUH")],
+                          datetime.fromtimestamp(clock(), mon.schedule.tz))
+        lines = self.day(mon, feed, clock, [("8963ac", "ETD3QF")], [("EY", "599")])
+        self.assertIn("found as ETD3QF (learned callsign)", lines[0])
+
+    def test_board_callsign_found(self):
+        mon, feed, clock = self.start()
+        mon.schedule.load([board_row("EY", "599", "A", local_time(clock, 0.1), "AUH")],
+                          datetime.fromtimestamp(clock(), mon.schedule.tz))
+        lines = self.day(mon, feed, clock, [("8963aa", "ETD599")], [("EY", "599")])
+        self.assertIn("found as ETD599 (board callsign)", lines[0])
+
+    def test_two_of_an_airline_is_not_learned(self):
+        mon, feed, clock = self.start()
+        for _ in range(2):
+            lines = self.day(mon, feed, clock, [("8963aa", "ETD3QF"), ("8963ab", "ETD8SA")], [("EY", "599")])
+            clock.t += 24 * 3600
+        self.assertIn("2 unknown ETD landings", lines[0])
+        self.assertEqual(mon.schedule.learned, {})
+
+
 def mon_clock():
     return Clock()
 

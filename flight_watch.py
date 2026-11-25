@@ -331,6 +331,20 @@ TURBOPROP_MAX_KT = 450
 TURN_HOLD_S = 40
 TURN_HOLD_MAX_S = 120
 CLIMB_OUT_S = 20 * 60  # an arrival on its way to its own origin, this soon after take-off: in its departure routing
+# The aircraft of our departure, landed at its destination, is often the board's next arrival from there, on a callsign
+# the board's number does not give (Monitor.watch_rotation). EY599 AUH -> TLV flew as ETD3QF (A6-AEB, which had flown
+# EY608 TLV -> AUH), turned back twice far out and returned to Abu Dhabi, unseen: never searched (24 Nov 2026).
+ROTATION_WATCH_S = 12 * 3600  # asked for by hex this long after landing there (data time)
+ROTATION_ASK_S = 60           # every (s, monotonic)
+ROTATION_TOL = 45             # heading within this of the way to our airport, airborne above ROTATION_MIN_ALT
+ROTATION_MIN_ALT = 3000
+ROTATION_ETA_S = 3 * 3600     # its arrival at ROTATION_KT within this of the board row's time
+ROTATION_KT = 450
+# Learned at our airport too (Monitor.learn_at_home): an arrival heard on a callsign the board does not give, landing within
+# LEARN_TOL_S of the board's one landed arrival of its airline then, the only one of that airline: on two days, learned.
+LEARN_TOL_S = 10 * 60
+LEARN_WAIT_S = 25 * 60  # after the board's landing time: the board (refreshed every 10 min) and our landings around it are in
+LEARNED_KEEP_S = 14 * 24 * 3600  # a board flight's learned callsign (Schedule.learned) kept this long since it last flew it
 # no aircraft rolls on the ground faster (kt): AIZ282 "on the ground" at 575 kt, 11 Oct 2026
 GROUND_MAX_KT = 250
 ROLLOUT_KT = 100  # a large aircraft slower than this over the ground is on the ground (silent-low DIVERSION)
@@ -1323,6 +1337,11 @@ class Schedule:
         self.by_callsign: dict[str, SchedFlight] = {}
         self.flights: list[SchedFlight] = []
         self.resolve = None  # IATA airline code -> ICAO callsign prefix, for codes not in airline_map
+        # board flight -> [callsign, wall time]: learned from the aircraft's rotation (Monitor.rotation_match). They
+        # stick: ETD3QF was EY599 every night of 19-25 Nov 2026, on five aircraft. Searched with the board's own.
+        self.learned: dict[str, list] = {}
+        self.sightings: dict[str, list] = {}  # board flight -> [callsign, Israel date, wall time]: matched once (learn_at_home)
+        self.landed: list[SchedFlight] = []  # arrivals the board shows landed in the last 3 h
         self.fetched = -1e9
         self.tz = ZoneInfo("Asia/Jerusalem")
 
@@ -1369,19 +1388,21 @@ class Schedule:
             if g is None:
                 groups.append(g := [])
             g.append(r)
-        out, flights, unmapped = {}, [], set()
+        out, flights, unmapped, landed = {}, [], set(), []
         for rows in (g for groups in slots.values() for g in groups):
             r = rows[0]
             status = str(r.get("CHRMINE") or "").upper()
             direction = "ARR" if str(r.get("CHAORD", "")).upper().startswith("A") else "DEP"
-            if "CANCEL" in status or (direction == "ARR" and status == "LANDED"):
+            is_landed = direction == "ARR" and status == "LANDED"
+            if "CANCEL" in status:
                 continue
             try:
                 when = datetime.fromisoformat(str(r.get("CHPTOL") or r.get("CHSTOL")))
                 when = when if when.tzinfo else when.replace(tzinfo=self.tz)
             except ValueError:
                 continue
-            if not (now - self.window <= when <= now + self.window):
+            if not (now - (timedelta(hours=3) if is_landed else self.window) <= when
+                    <= (now if is_landed else now + self.window)):
                 continue
             numbers = []  # (iata, num, icao)
             for row in rows:
@@ -1411,14 +1432,45 @@ class Schedule:
                              codeshares=tuple(f"{n[0]}{n[1]}" for n in numbers[1:]),
                              callsigns=variants(numbers[0]),
                              alt_callsigns=tuple(cs for n in numbers[1:] for cs in variants(n)))
+            if is_landed:
+                landed.append(sf)
+                continue
             flights.append(sf)
             for cs in sf.callsigns + sf.alt_callsigns:
                 out[cs] = sf
+        for sf in flights:
+            cs = (self.learned.get(sf.flight) or [""])[0]
+            if cs and cs not in out:
+                sf.callsigns += (cs,)
+                out[cs] = sf
         self.tag_stops(records, flights)
-        self.by_callsign, self.flights = out, flights
+        self.by_callsign, self.flights, self.landed = out, flights, landed
         log.info("flight board: %d active flights (%d with codeshares, %d callsign variants)%s",
                  len(flights), sum(bool(f.codeshares) for f in flights), len(out),
                  f"; unmapped airlines: {', '.join(sorted(unmapped))}" if unmapped else "")
+
+    def learn(self, sf: SchedFlight, cs: str, when: float) -> None:
+        """`cs` flies board flight `sf`: searched and matched with its own callsigns, now and on the next days."""
+        self.learned[sf.flight] = [cs, when]
+        if cs not in sf.callsigns:
+            sf.callsigns += (cs,)
+        self.by_callsign[cs] = sf
+
+    def sighting(self, flight: str, cs: str, when: float) -> str:
+        """`cs` landed as board flight `flight` (Monitor.learn_at_home): learned when seen on two days."""
+        day = datetime.fromtimestamp(when, self.tz).date().isoformat()
+        got = self.sightings.get(flight)
+        if got and got[0] == cs and got[1] != day:
+            del self.sightings[flight]
+            self.learned[flight] = [cs, when]
+            for sf in self.flights:
+                if sf.flight == flight and cs not in sf.callsigns:
+                    sf.callsigns += (cs,)
+                    self.by_callsign.setdefault(cs, sf)
+            return f"learned {cs} (also seen {got[1]})"
+        if not (got and got[0] == cs):
+            self.sightings[flight] = [cs, day, when]
+        return f"{cs} landed then, seen once (learned on another day)"
 
     def tag_stops(self, records: list[dict], flights: list[SchedFlight]) -> None:
         """An arrival's next number leaving within 6 h for an airport the airline never flies in from names its
@@ -2136,6 +2188,11 @@ class Monitor:
         self.protect = args.protect == "israel"
         self.disc_queue: dict[str, list[str]] = {}  # discovery round in progress, per provider
         self.disc_round = -1e9
+        self.rotations: dict[str, dict] = {}  # hex -> its next flight from where our departure landed (watch_rotation)
+        self.rotation_at = -1e9
+        self.home_landings: list[dict] = []  # landings at our airport, for learn_at_home
+        self.landed_done: set[str] = set()   # board arrivals learn_at_home has judged
+        self.watch_from = 0.0                # data time of the first poll: board landings before it are not judged
         self.traces: dict[str, tuple[float, list]] = {}  # hex -> (clock, parsed recent trace)
         self.trace_left = 0       # trace requests still allowed this cycle
         self.trace_refused = (0.0, 0.0)  # (clock until which the trace host is not asked, last pause s)
@@ -2271,6 +2328,135 @@ class Monitor:
             done.append((now_r, g))
             self.refused.pop(prov, None)
         return out, done
+
+    def watch_rotation(self, t: Track) -> None:
+        """Our departure landed at its destination: its aircraft is asked for by hex (rotation_query) while the board
+        has an arrival of its airline from there that no aircraft has been found for. A6-AEB flew EY608 TLV -> AUH and
+        came back as EY599 on the callsign ETD3QF, which the board's number does not give (24 Nov 2026)."""
+        s = t.last
+        if not (s and t.callsign and airline_like(t) and self.schedule):
+            return
+        at = t.sched.other if t.sched and t.sched.direction == "DEP" else ""
+        try:
+            if not at:
+                end = self.destination(t)
+                at = ((self.standing.airport_info(end[0]) if end else None) or ("",))[0]
+            pos = self.standing.airport_by_iata(at) if self.standing else None
+        except requests.RequestException:
+            return
+        if not re.fullmatch(r"[A-Z0-9]{3}", at or "") or pos and haversine_nm(s.lat, s.lon, pos[1], pos[2]) > DIVERTED_NM:
+            return  # (landed elsewhere: its next flight is not the board's from there)
+        self.rotations[t.hex] = {"at": at, "airline": t.callsign[:3], "cs": t.callsign,
+                                 "until": s.t + ROTATION_WATCH_S, "up": 0.0}
+        log.info("%s landed at %s: watching its next flight for one of the board's arrivals from there", t.label(), at)
+
+    def learn_at_home(self, now: float) -> None:
+        """Each board arrival LEARN_WAIT_S after it landed: found on a callsign of the board's (or a learned one), else the one
+        landing of its airline within LEARN_TOL_S on a callsign of its own is its callsign - when it is the only one of that
+        airline either way (2 x LEARN_TOL_S), and the route data, if it lists one, has the board's origin. Seen on two days,
+        learned (Schedule.sighting). One line per arrival ("board arrival ..."): tools/callsign_coverage.py counts them."""
+        if not self.schedule:
+            return
+        self.watch_from = self.watch_from or now
+        self.home_landings = [p for p in self.home_landings if now - p["t"] <= 4 * 3600]
+        for sf in self.schedule.landed:
+            key = f"{sf.flight}@{sf.ts:.0f}"
+            if key in self.landed_done or now - sf.ts < LEARN_WAIT_S:
+                continue
+            self.landed_done.add(key)
+            if sf.ts < self.watch_from + LEARN_TOL_S:
+                continue  # (landed before we watched)
+            when = datetime.fromtimestamp(sf.ts, self.schedule.tz).strftime("%d %b %H:%M")
+            mine = [p for p in self.home_landings if p["flight"] == sf.flight and abs(p["t"] - sf.ts) <= 3 * LEARN_TOL_S]
+            if mine:
+                log.info("board arrival %s from %s, landed %s: found as %s (%s)", sf.flight, sf.other, when,
+                         mine[0]["cs"], "learned callsign" if mine[0]["learned"] else "board callsign")
+                continue
+            air = sf.callsigns[0][:3] if sf.callsigns else ""
+            near = [p for p in self.home_landings if not p["flight"] and p["cs"][:3] == air
+                    and abs(p["t"] - sf.ts) <= 2 * LEARN_TOL_S]
+            rows = [x for x in self.schedule.landed if x.callsigns and x.callsigns[0][:3] == air
+                    and abs(x.ts - sf.ts) <= 2 * LEARN_TOL_S]
+            try:
+                board_origin = (self.standing.airport_by_iata(sf.other) or ("",))[0] if self.standing else ""
+            except requests.RequestException:
+                board_origin = ""
+            if len(near) == 1 and len(rows) == 1 and abs(near[0]["t"] - sf.ts) <= LEARN_TOL_S:
+                p = near[0]
+                if p["origin"] and board_origin and p["origin"] != board_origin:
+                    how = f"{p['cs']} landed then, listed from {p['origin']}: not learned"
+                else:
+                    how = self.schedule.sighting(sf.flight, p["cs"], sf.ts)
+            else:
+                how = (f"{len(near)} unknown {air} landings and {len(rows)} board arrivals of it then: not learned"
+                       if near else "no landing of its airline heard then")
+            log.info("board arrival %s from %s, landed %s: not found on its callsign; %s", sf.flight, sf.other, when, how)
+
+    def rotation_flights(self, r: dict, now: float) -> list:
+        """The board's arrivals of `r`'s airline from its airport, due soon, that no aircraft has been found for."""
+        if not self.schedule:
+            return []
+        found = {id(t.sched) for t in self.tracks.values() if t.sched}
+        return [sf for sf in self.schedule.flights
+                if sf.direction == "ARR" and sf.other == r["at"] and sf.callsigns and sf.callsigns[0][:3] == r["airline"]
+                and id(sf) not in found and -3600 <= sf.ts - now <= ROTATION_WATCH_S]
+
+    def rotation_query(self, local_hexes: set, local: list) -> list:
+        """One hex request every ROTATION_ASK_S for the aircraft of watch_rotation that may fly an arrival of ours."""
+        now = self.wall()
+        for h in [h for h, r in self.rotations.items() if now > r["until"]]:
+            log.debug("%s: rotation watch over", h)
+            del self.rotations[h]
+        if not self.rotations or self.clock() - self.rotation_at < ROTATION_ASK_S:
+            return []
+        ids = [h for h, r in self.rotations.items() if h not in local_hexes
+               and not (h in self.tracks and self.tracks[h].followed) and self.rotation_flights(r, now)]
+        if not ids:
+            return []
+        self.rotation_at = self.clock()
+        for prov in self.args.remote_providers:
+            got, done = self.remote_query(prov, "hex", ids, local, 1)
+            if done:
+                return got
+        return []
+
+    def rotation_match(self, t: Track, s: Sample) -> None:
+        """A watched aircraft (watch_rotation) in the air on a new callsign, listed to our airport or heading for it:
+        the board's arrival of its airline from there due nearest its arrival time. The callsign is learned for that
+        board flight (Schedule.learn). Listed elsewhere, or not heading here within CLIMB_OUT_S: another flight."""
+        r, a = self.rotations[t.hex], self.args
+        cs = t.callsign
+        if not cs or cs == r["cs"] or s.on_ground:
+            return
+        if t.sched or (self.schedule and cs in self.schedule.by_callsign):
+            del self.rotations[t.hex]  # the board's own callsign: found as usual
+            return
+        try:
+            route = self.standing.route(cs) if self.standing else None
+        except requests.RequestException:
+            route = None
+        r["up"] = r["up"] or s.t
+        if route and route[-1] not in (a.airport, a.icao):
+            log.info("%s left %s listed %s: not our arrival", t.label(), r["at"], "-".join(route))
+            del self.rotations[t.hex]
+            return
+        toward = s.track is not None and (s.alt or 0) >= ROTATION_MIN_ALT and heading_diff(
+            s.track, bearing(s.lat, s.lon, a.lat, a.lon)) <= ROTATION_TOL
+        if not (route or toward):
+            if s.t - r["up"] > CLIMB_OUT_S:
+                log.info("%s left %s not heading for %s: not our arrival", t.label(), r["at"], a.airport)
+                del self.rotations[t.hex]
+            return
+        eta = s.t + self.dist(s) / ROTATION_KT * 3600
+        cands = sorted(self.rotation_flights(r, s.t), key=lambda sf: abs(sf.ts - eta))
+        if not cands or abs(cands[0].ts - eta) > ROTATION_ETA_S:
+            return
+        sf = cands[0]
+        self.schedule.learn(sf, cs, self.wall())
+        t.sched = sf
+        del self.rotations[t.hex]
+        log.info("%s is %s: the aircraft of %s, back on a callsign of its own (%s)", t.label(), sf.route(a.airport),
+                 r["cs"], "listed to " + a.airport if route else f"heading {s.track:.0f} deg, toward {a.airport}")
 
     def follow(self, local_hexes: set, local: list) -> list:
         """One combined hex request per --follow-interval for followed flights not in the local circle.
@@ -2514,6 +2700,7 @@ class Monitor:
         # Remote layers may ask several networks: coverage differs a lot outside Israel.
         batches += self.follow(local_hexes, local)
         batches += self.discover(local)
+        batches += self.rotation_query(local_hexes, local)  # our departures' aircraft, for their way back
         batches += self.aerosignals(local)  # a squawk reported on Bluesky: its aircraft
         batches += self.squawk_search(local_hexes)  # a squawk anywhere, from the feeds themselves
         batches += self.squawkalert(local, local_hexes)  # a squawk reported on Mastodon: its aircraft, if ours
@@ -2539,6 +2726,11 @@ class Monitor:
             t.last_msg = max(t.last_msg, msg_t)
             if self.schedule and t.callsign in self.schedule.by_callsign:
                 t.sched = None if t.callsign == t.flown_cs else self.schedule.by_callsign[t.callsign]
+                got = self.schedule.learned.get(t.sched.flight) if t.sched else None
+                if got and got[0] == t.callsign:
+                    got[1] = self.wall()  # (still flying it: kept LEARNED_KEEP_S from now)
+            if hexid in self.rotations:
+                self.rotation_match(t, sample)
             prev = t.last
             # GPS and barometric altitude differ by hundreds of feet (4XDAN, 10 Oct 2026: +500-600):
             # a GPS value among barometric ones is a fake step. Converted with this aircraft's offset.
@@ -2561,10 +2753,13 @@ class Monitor:
                        and not t.lost and self.clock() - self.traces.get(t.hex, (-1e9,))[0] >= 30])
 
         for t, prev, ac, spoofed in updated:
+            if t.hex in self.rotations and not t.followed and t.hex not in local_hexes:
+                continue  # asked for only to see its next callsign: no checks on a flight that may not be ours
             self.check_track(t, prev, ac, spoofed, server_now)
         self.aero_alerts()
         self.squawkalert_alerts()
         self.check_stops(server_now)
+        self.learn_at_home(server_now)
         for t in self.tracks.values():
             if t.turn_held and server_now - t.turn_held[1].t > TURN_HOLD_MAX_S:
                 self.settle_turn(t, None, "")  # nothing heard since: sent
@@ -2600,6 +2795,15 @@ class Monitor:
         from our airport (an arrival at it) has flown: the same callsign later is its next flight -
         ELY353 (TLV -> MUC, 18 Oct 2026) climbed out of Munich still as ELY353 and was "heading back to TLV"."""
         kind = self.classify(t)[0]
+        if kind == "DEP" and d > 15:
+            self.watch_rotation(t)
+        if d <= 15 and kind not in ("DEP", "DEP?") and t.callsign and t.last and airline_like(t):
+            sf = t.sched if t.sched and t.sched.direction == "ARR" else None
+            route = self.routes.get(t.callsign, (0, None))[1] if t.callsign != t.flown_cs else None
+            self.home_landings.append({
+                "cs": t.callsign, "t": t.last.t, "flight": sf.flight if sf else "",
+                "learned": bool(sf and self.schedule and (self.schedule.learned.get(sf.flight) or [""])[0] == t.callsign),
+                "origin": route.split("-")[0] if route else ""})
         if kind == "ARR" and d <= 15:  # (where its next flight may well go back to: back_to_prev)
             t.prev_from = self.other_end(t, "ARR")
         if kind in ("DEP", "ARR") and (kind == "DEP") == (d > 15):
@@ -3488,7 +3692,11 @@ class Monitor:
         try:
             tmp = self.args.state + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"saved": now, "tracks": tracks}, f)
+                json.dump({"saved": now, "tracks": tracks, "rotations": self.rotations,
+                           "learned": {k: v for k, v in (self.schedule.learned if self.schedule else {}).items()
+                                       if now - v[1] <= LEARNED_KEEP_S},
+                           "sightings": {k: v for k, v in (self.schedule.sightings if self.schedule else {}).items()
+                                         if now - v[2] <= LEARNED_KEEP_S}}, f)
             os.replace(tmp, self.args.state)
             log.debug("state of %d aircraft written to %s", len(tracks), self.args.state)
         except OSError as e:
@@ -3518,6 +3726,12 @@ class Monitor:
                 t.lost = True
                 self.tracks[h] = t
                 n += 1
+            self.rotations.update(data.get("rotations", {}))
+            if self.schedule:
+                self.schedule.learned.update({k: v for k, v in data.get("learned", {}).items()
+                                              if now - v[1] <= LEARNED_KEEP_S})
+                self.schedule.sightings.update({k: v for k, v in data.get("sightings", {}).items()
+                                                if now - v[2] <= LEARNED_KEEP_S})
             log.info("state of %d aircraft read from %s (saved %.0f min ago)", n, self.args.state,
                      (now - data.get("saved", now)) / 60)
         except (OSError, ValueError, TypeError, KeyError) as e:

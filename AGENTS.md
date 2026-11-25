@@ -78,6 +78,27 @@ ADS-B carries no origin/destination. Arrival/departure comes from the flight boa
 then the callsign's route in the VRS standing data, then a heuristic near the airport
 (`ARR?` / `DEP?`).
 
+**Rotations** (`Monitor.watch_rotation`, `rotation_query`, `rotation_match`; 25 Nov 2026, the owner's choice): about 1 board
+flight in 5 is never heard on a callsign its number gives (24 Nov 2026: 28 of 131 arrivals - Wizz, Transavia, Eurowings,
+Etihad, Swiss ...), so discovery cannot search it. EY599 AUH -> TLV flew as ETD3QF (A6-AEB, which had flown EY608 TLV -> AUH),
+turned back twice 180 nm and more out of Abu Dhabi and landed there again: unseen, nothing alerted. Now our departure landing
+within `DIVERTED_NM` of its destination has its aircraft asked for by hex (one request every `ROTATION_ASK_S`, LOW, only while
+the board has an arrival of that airline from there that no aircraft was found for; `ROTATION_WATCH_S` 12 h). Not checked
+meanwhile (it may not be ours). Airborne on a new callsign listed to our airport, or heading within `ROTATION_TOL` (45 deg) of
+it above 3,000 ft, it is the board's arrival due nearest its time at 450 kt (within 3 h); listed elsewhere, or not heading here
+`CLIMB_OUT_S` after take-off, it is dropped (A6-AEO: EY596 TLV -> AUH, then ETD238 to Bangalore). The callsign is learned for
+that board flight (`Schedule.learned`, in `--state`, kept `LEARNED_KEEP_S` 14 days since last flown) and searched with the
+board's own: they stick (ETD3QF was EY599 every night of 19-25 Nov 2026, on five aircraft). Cost: one that left on its
+departure routing toward TLV and flies elsewhere, with no route data, is taken for the arrival and its turn away is an
+OFF_COURSE.
+**Learned at TLV too** (`Monitor.learn_at_home`, `Schedule.sighting`; the owner's choice, 25 Nov 2026: in the git-ignored state
+file, no worker): `LEARN_WAIT_S` (25 min) after a board arrival landed (the board keeps 3 h of landed rows, `Schedule.landed`), an
+airline-callsign aircraft that landed here within `LEARN_TOL_S` (10 min) on a callsign of its own is that flight's, when it is the
+only such landing of that airline and the only landed board arrival of it within 20 min, and the route data, if it lists the
+callsign, has the board's origin. Learned when seen so on two days (a wrong pair would carry the wrong origin every night).
+Each board arrival logs one line, "board arrival <flight> from <IATA>, landed ..: found as <cs> (board | learned callsign)" or
+"not found on its callsign; ..": `tools/callsign_coverage.py` counts them per day (before: ~1 in 5 not found).
+
 **The flight of an alert** (`flight_map.html?hex=..&t=<unix time>`, `alertView`): the owner wants links that
 show the same flight whenever they are opened, live while it flies and a replay afterwards (11 Oct 2026). The page
 reads the aircraft's trace (`/data/traces` reaches back about a day; older: adsb.lol's free
