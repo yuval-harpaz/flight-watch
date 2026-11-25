@@ -18,3 +18,4 @@ reviews/
 /flight_watch_state.json*
 goarounds/
 /feeder_shadow*.jsonl
+/health_state.json*

@@ -16,7 +16,14 @@ position jumps, diversions. Speed of warning matters more than completeness of d
   `alerts.jsonl` with **links to existing sites** (FR24, ADS-B Exchange, airplanes.live), and
   one announcement in `posts.jsonl`.
 - Report findings and proposals **before** large changes; deliver changes as pull requests.
-  The unattended nightly review is the exception (3 Nov 2026): it implements its recommendations and they are pushed, see below.
+  The unattended nightly review (3 Nov 2026: it implemented its recommendations, pushed) was **stopped on 25 Nov 2026**: false
+  alarms are acceptable. What stays: the 03:00 UTC restart (new day's files) and `tools/health_check.py` every 15 min (systemd
+  timer, `tools/nightly.sh health`), which tells the owner's private chat (`TELEGRAM_CHAT_ID`) only when something is badly
+  wrong - the monitor stopped or its log silent, no local poll answered, empty answers, the board unread, adsb.lol gone from the
+  local poll for 6 h, a feed refusing us, route data off, the squawk search or AeroSignals / Squawk Alert / the relay / Telegram /
+  the private feeder failing for hours, repeated restarts, a full disk. Told when it starts, every 12 h while it lasts, once when
+  over (`health_state.json`, git-ignored). It reads only the log and the process list. Add a check there when a new source or
+  failure mode appears.
 - Never commit secrets (ntfy topic, Telegram token) or `alerts.jsonl` / `posts.jsonl`; they come from CLI
   args or environment variables.
 
