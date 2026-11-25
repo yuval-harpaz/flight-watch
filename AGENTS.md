@@ -291,6 +291,13 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   a listed stop, a fake place or speed, `beyond_leg`, `back_to_prev`). LY221 (4X-EKP, TLV -> CDG) turned back near Turin, last heard
   at 1,325 ft 300 nm short of Paris: an emergency landing in Italy, and Telegram had only its turns and an update "last heard at
   1,325 ft" (18 Nov 2026; the owner). Squawk replay: 0 of 354 changed (its cases are rarely watched as our departures).
+  Not `landed_unseen` when the silence began below 15,000 ft within 50 nm of its destination (logged "probably landing there";
+  25 Nov 2026, the owner): 6H55 and IZ807 TLV -> Ramon, silent 40-44 nm out and heard again 60-80 min later on their way back,
+  were "Probably landing at VDA" (22, 24 Nov). Cost: an unseen diversion to an airport that near its destination is only logged.
+  Nor any DIVERSION of a cargo airline's departure off the board, route data only (`CARGO_AIRLINES`, `Monitor.diversion`; not hot,
+  no emergency; 25 Nov 2026, the owner): MFX674 listed for Tashkent at Ostrava, FDX4393 listed for Cologne at CDG, DHL's BCS995
+  listed for Brussels at Leipzig (21-23 Nov), MFX676 at Jebel Ali (12 Nov). Cost: a real diversion of such a freighter, with no
+  squawk, is only logged.
   Found with the AeroSignals squawk cases (19 Oct 2026): of 251 replayed, 74 had only EMERGENCY; 15 diversions and
   2 returns among them, now alerted. The other 54: 53 landed at their destination (nothing to see beyond the
   squawk; descents <= ~5,500 ft/min) and one left coverage at cruise.
@@ -446,7 +453,9 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   So does a descent under `--vrate` within `APPROACH_NM` (20) of the flight's own destination below `APPROACH_ALT` (FL150)
   (`approaching`; 3 Nov 2026, the owner's choice): RB516 DXB -> DAM "-10.9 deg" at 10,000 ft 12 nm out, history ~7 deg. Cost: a
   sudden steep descent there, before the history shows it, is alerted only once it does. MFO692 (military BE20, no destination,
-  -10.1 deg at 1,425 ft, 1 Nov) is not covered.
+  -10.1 deg at 1,425 ft, 1 Nov) was not covered.
+  Nor for a flight with no board row nor route within `APPROACH_NM` of an airfield of the local checkout (`unknown_near_field`; 25 Nov
+  2026, the owner): AYT1260 (Ayeet E145) "-10.3 deg" at 3,875 ft near Hatzor AB, history ~5 deg (23 Nov). Cost: as above.
   A rate backed only by a history of the other sign is a glitch (20 Nov 2026, the owner's choice): APX11 (military PC21) "-17,792
   ft/min at 15,425 ft (history: +4,676)" 20 s after +17,792, 425 ft lower, on Telegram (16 Nov). Cost: none expected (a real dive
   makes the 30 s history negative).
@@ -678,6 +687,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   Doha: OFF_COURSE "148 deg away from it" twice on Telegram. Cost: a turn back during that climb-out is not a route-based OFF_COURSE.
   Nor within `CLIMB_OUT_S` of leaving any non-Israeli airport of the region (`region_dep`; 13 Nov 2026 nightly review): QTR9L, listed
   LSZH-OTHH, is Beirut - Doha; out of Beirut westbound it learned "bound for LSZH", OFF_COURSE "164 deg away" twice on Telegram.
+  Nor backwards (closing on the listed origin) while a stop the route lists is nearer than that origin (`nearer_stop`; 25 Nov 2026,
+  the owner): LH8290 (GEC8290, EDDF-LLBG-HECA) left TLV westbound for Cairo and learned "bound for EDDF", OFF_COURSE 171 nm W of
+  TLV; UAE110 (LMML-LCLK-OMDB) Larnaca -> Dubai learned "bound for LMML", 3 OFF_COURSE (22 Nov). Each learned direction is logged
+  ("learned its route ..."). Cost: a route stored backwards with stops is learned only once past halfway from its stop.
   Neither within `--off-course-min-dist` of the far end (route data: an arrival's origin, a departure's
   destination): climbing out "away from" the destination and approach turns "back" (squawk replay: TO4755 out of
   Barcelona, AA2045 on approach to SFO "heading back to PHL, 2175 nm out").
@@ -781,7 +794,10 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   A NIC-0 report is used only if reachable from the last trusted position (3 nm + 650 kt), else
   dropped without a jump alert. The reach grows with time, so a report that continues the dropped ones
   (reachable from the last of them, `Track.nic_bad`) is dropped too: ISR972's fake place 73 nm away came
-  within reach after 3 min and its silence there was a DIVERSION (12 Oct 2026). Healthy NIC proves nothing: on 6 Oct 61% of the reports frozen
+  within reach after 3 min and its silence there was a DIVERSION (12 Oct 2026). So is a report with NIC > 0 that continues
+  them (within 300 s, in reach of the last dropped one) while out of reach of the last trusted position (25 Nov 2026, the owner):
+  J221 (GYD -> TLV) had six NIC-0 positions dropped, then one at the same fake place with NIC > 0 entered the track, and its
+  silence there on final into TLV was "Probably landing at BEY" (23 Nov). Healthy NIC proves nothing: on 6 Oct 61% of the reports frozen
   at the Amman point said NIC 8 (only 34% NIC 0), and 5.5% of ordinary reports were NIC 0. Drops
   to NIC 0 by 3+ aircraft within 2 min and 100 nm = one alert labelled `gps-YYYYMMDDTHHMMZ`
   (labels get -2, -3 when episodes start the same minute) and one when it ends (15 min without

@@ -1227,6 +1227,18 @@ class IntegrityTests(unittest.TestCase):
         self.assertNotIn("POSITION_JUMP", kinds(alerts))
         self.assertTrue(all(x.lon < 34 for x in mon.tracks["4ba011"].samples))
 
+    def test_healthy_nic_at_the_fake_place_is_dropped_too(self):
+        """J221 (GYD -> TLV, 23 Nov 2026): NIC-0 positions at a fake place 90 nm N of its approach were dropped, then one
+        there with NIC > 0 entered the track ("Probably landing at BEY"). It continues the dropped ones, out of reach of
+        the last trusted position: dropped. The real track afterwards is taken again."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        states = [{**st, "nic": 8} for st in path(32.6, 33.9, [300] * 16, [35000] * 16)]
+        for i in (6, 7, 8):
+            states[i] = {**states[i], "lat": 33.427, "lon": 35.446, "nic": 0 if i < 8 else 7}
+        fly(mon, feed, clock, "4ba015", states, flight="TST115")
+        self.assertTrue(all(x.lon < 34 for x in mon.tracks["4ba015"].samples))
+        self.assertEqual(len(mon.tracks["4ba015"].samples), 13)
+
     def test_nic_drops_together_are_one_episode(self):
         mon, feed, clock, alerts = make(["--no-routes"])
         hexes = ["4ba012", "4ba013", "4ba014"]
@@ -2336,6 +2348,24 @@ class RouteOffCourse(unittest.TestCase):
         self.assertNotIn("OFF_COURSE", kinds(alerts))
         self.assertEqual(mon.tracks["06a0c1"].region_dep[1], "BEY")
 
+    def test_direction_is_not_learned_backwards_near_a_listed_stop(self):
+        """LH8290 (GEC8290, B77L, listed EDDF-LLBG-HECA) left TLV westbound for Cairo, learned "bound for EDDF" and was
+        OFF_COURSE "137 deg away from it" 171 nm W of TLV (25 Nov 2026); UAE110 (LMML-LCLK-OMDB) the same out of Larnaca.
+        Closing on the origin with a listed stop nearer, the direction is not learned; with no stop listed it still is."""
+        hdr = "Code,Name,ICAO,IATA,Location,CountryISO2,Latitude,Longitude,AltitudeFeet\n"
+        tracks = [320] * 30 + [320 - 15 * i for i in range(1, 9)] + [200] * 40
+        got = {}
+        for route in ("EDDF-LLBG-HECA", "EDDF-HECA"):
+            mon, feed, clock, alerts = with_routes()
+            feed.files.update({
+                "routes/schema-01/G/GEC-all.csv": f"Callsign,Code,Number,AirlineCode,AirportCodes\nGEC8290,GEC,8290,GEC,{route}\n",
+                "airports/schema-01/E/ED.csv": hdr + "EDDF,Frankfurt,EDDF,FRA,Frankfurt,DE,50.0333,8.5706,364\n",
+                "airports/schema-01/H/HE.csv": hdr + "HECA,Cairo,HECA,CAI,Cairo,EG,30.1219,31.4056,382\n"})
+            fly(mon, feed, clock, "3c4b2a", path(32.6, 33.4, tracks, [30000] * len(tracks)),
+                flight="GEC8290", r="D-ALFD", t="B77L")
+            got[route] = "OFF_COURSE" in kinds(alerts)
+        self.assertEqual(got, {"EDDF-LLBG-HECA": False, "EDDF-HECA": True})
+
     def test_route_stored_the_wrong_way_round_is_learned_from_the_flight(self):
         hits = self.run_track("UAE122")       # listed LTFM-OMDB, flown toward Istanbul
         self.assertTrue(hits)
@@ -2894,6 +2924,19 @@ class Run18OctTests(unittest.TestCase):
             got[name] = "VERTICAL_RATE" in kinds(alerts)
         self.assertEqual(got, {"approach": False, "steep": True, "elsewhere": True})
 
+    def test_unknown_flight_descending_near_an_airfield_judged_by_its_altitude_history(self):
+        """AYT1260 (Ayeet E145, no board row nor route) "-4,480 ft/min (-10.3 deg) at 3,875 ft", history -2,344 ft/min
+        (~5 deg), ~6 nm from Hatzor AB (23 Nov 2026). As steep as reported, or far from any airfield, it still alerts."""
+        got = {}
+        for name, step_ft, field_nm in (("near", 390, 6), ("steep", 750, 6), ("far", 390, 45)):
+            mon, feed, clock, alerts = make([])
+            mon.standing.airfield_near = lambda lat, lon, nm=field_nm: ("LLHS", nm)
+            states = path(31.85, 34.85, [314] * 10, [7400 - step_ft * i for i in range(10)], gs=245)
+            states = [{**st, "baro_rate": -4480} for st in states]
+            fly(mon, feed, clock, "738a60", states, flight="AYT1260", r="4X-EMT", t="E145")
+            got[name] = "VERTICAL_RATE" in kinds(alerts)
+        self.assertEqual(got, {"near": False, "steep": True, "far": True})
+
     def test_board_departure_heard_far_away_after_its_leg_is_another_leg(self):
         """W46404 (9H-WBY, board TLV -> MXP due 19:18 IST) first found at 22:55 near Rome, then climbing out NE:
         TURNING_BACK "1,209 nm out and closing" (30 Oct 2026). Found there while its leg could still be on the way,
@@ -3236,6 +3279,21 @@ class LandingWordsTests(unittest.TestCase):
         self.assertNotIn("Diversion", text)
         self.assertNotIn("on the ground", text)
         self.assertIn(f"{rec['landing']['nm']:.0f} nm from London", text)
+
+    def test_cargo_departure_with_route_data_only_is_logged(self):
+        """MFX674 (listed LLBG-UTTT, off the board) landed at Ostrava, FDX4393 (listed for Cologne) at CDG, DHL's BCS995
+        (listed for Brussels) at Leipzig: "Landed at ...; listed for ..." on Telegram (21-23 Nov 2026). The route data is
+        wrong for these operators again and again: only logged. The same flight as an airline's is still sent."""
+        got = {}
+        for cs in ("MFX674", "ELY357"):
+            mon, feed, clock, alerts = self.setup()
+            mon.routes[cs] = (clock(), "LLBG-EGLL")
+            self.leave(mon, feed, clock, flight=cs)
+            with self.assertLogs(fw.log, "INFO") as logs:
+                fw.log.info("landing")
+                self.land(mon, feed, clock, flight=cs)
+            got[cs] = ("DIVERSION" in kinds(alerts), any("not sent: a cargo departure" in m for m in logs.output))
+        self.assertEqual(got, {"MFX674": (False, True), "ELY357": (True, False)})
 
     def test_back_where_its_arrival_came_from_is_its_rotation(self):
         """AIZ301 (LZ-EAG, 13 Nov 2026) came in as IZ302 KTW -> TLV, left as AIZ301 (listed LLBG-EGFF, off the board) and
@@ -3736,6 +3794,32 @@ class FarEndTests(unittest.TestCase):
                                                   track=90)] * 3, local=False, **ident)
             got[case] = (before, kinds(alerts, "73806a").count("DIVERSION"))
         self.assertEqual(got, {"low": (1, 1), "higher": (0, 1), "destination": (0, 0)})
+
+    def test_turnaround_unheard_at_its_destination_is_not_a_diversion(self):
+        """6H55 / ISR055 and IZ807 TLV -> Ramon went silent coming down 40-44 nm from Ramon and were heard again 60-80 min
+        later on their way back: "Probably landing at VDA" (22, 24 Nov 2026). Here TLV -> TBS silent at 9,000 ft 40 nm
+        short of Tbilisi, an airfield 8 nm from there; 90 nm short it is still a DIVERSION."""
+        tbilisi = (41.6692, 44.9547)
+        got = {}
+        for short in (40, 90):
+            mon, feed, clock, alerts = self.setup([board_row("LY", "5419", "D", local_time(Clock(), -1), "TBS")])
+            silent_at = fw.destination(*tbilisi, 270, short)
+            mon.standing.fields = [(*fw.destination(*silent_at, 0, 8), "UGXX"), (*tbilisi, "UGTB")]
+            mon.standing.all_fields = lambda: mon.standing.fields
+            ident = dict(flight="ELY5419", r="4X-EKP", t="B738")
+            start = fw.destination(*silent_at, 270, 30)
+            approach = path(*start, [90] * 120, [max(11000 - 100 * i, 9000) for i in range(120)], gs=300)
+            approach = approach[:next(i for i, st in enumerate(approach)
+                                      if fw.haversine_nm(st["lat"], st["lon"], *silent_at) < 2)]
+            fly(mon, feed, clock, "73806a", approach, local=False, **ident)
+            del feed.aircraft["73806a"]
+            for _ in range(90):
+                step(mon, clock)
+            clock.t += 70 * 60
+            back = path(*fw.destination(*silent_at, 0, 5), [270] * 3, [12000, 12500, 13000], gs=300)
+            fly(mon, feed, clock, "73806a", back, local=False, **ident)
+            got[short] = "DIVERSION" in kinds(alerts, "73806a")
+        self.assertEqual(got, {40: False, 90: True})
 
     def test_silent_low_at_an_impossible_speed_is_not_a_diversion(self):
         """OS83 VIE -> TLV "went silent descending through -50 ft" at 975 kt in Jordan, spoofed after an episode at

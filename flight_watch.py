@@ -309,6 +309,13 @@ LARGE_TYPES = re.compile(r"A[0-9]{2}[0-9K]|A[23][0-9]N|B7[0-9][0-9A-Z]|B[37][0-9
 # Rough outline of Israeli-controlled airspace over land (incl. West Bank, Golan), lat/lon.
 # Israeli airlines (ICAO): El Al, Israir, Arkia, CAL Cargo, Sun d'Or, Challenge Airlines IL, Air Haifa
 ISRAELI_AIRLINES = {"ELY", "ISR", "AIZ", "ICL", "ERO", "CHG", "HFA"}
+# Cargo airlines (ICAO) seen at TLV or common in the region. Their route data is wrong again and again (MFX673-676 all
+# listed for Tashkent, flying to Dubai, Ostrava and Tashkent; FDX4393 listed for Cologne at CDG; DHL's BCS995 listed for
+# Brussels at Leipzig): off the board, route data only, a departure's DIVERSION is only logged (Monitor.diversion; the
+# owner, 25 Nov 2026)
+CARGO_AIRLINES = {"FDX", "UPS", "MFX", "BCS", "DHK", "DHX", "DAE", "GEC", "BOX", "CLX", "CKS", "ABW", "TAY", "ICL", "CHG",
+                  "MPH", "GTI", "ABX", "ATN", "NCA", "CAO", "CKK", "SQC", "CLU", "AZG", "RCF", "CTJ", "TPA", "QAC", "SWN",
+                  "EIA", "WGN", "NPT", "MSX", "FCX", "TUA", "UPA"}
 ISRAELI_CODES = {c for c, v in REGION_AIRPORTS.items() if v[2]} | {"LLBG", "LLHA", "LLER", "LLOV"}
 # A changed callsign is taken up after it has been sent this long (s): adsb.lol gave 4X-ABG the
 # callsign of its sister 4X-ABF for 55 s and of another for 100 s (12 Oct 2026, see new_callsign)
@@ -3312,7 +3319,7 @@ class Monitor:
                       t.label(), s.vrate, angle, computed, c_angle)
             return
         if (-a.vrate < s.vrate < 0 and angle is not None and abs(c_angle) < limit and s.alt < APPROACH_ALT
-                and self.approaching(t, s)):
+                and (self.approaching(t, s) or self.unknown_near_field(t, s))):
             # RB516 DXB -> DAM "-4,288 ft/min, -10.9 deg" at 10,000 ft 12 nm from Damascus, history -2,831 (~7 deg), 31 Oct 2026
             log.info("%s descent %+d ft/min (%+.1f deg) into its destination, history %+.0f ft/min (%+.1f deg): not "
                      "steep enough", t.label(), s.vrate, angle, computed, c_angle)
@@ -3338,6 +3345,15 @@ class Monitor:
             return self.dist(s) <= APPROACH_NM
         dest = (self.other_end(t, "DEP") if kind == "DEP" else None) or (ends[-1] if len(ends) == 2 and t.route_dir >= 0 else None)
         return bool(dest) and haversine_nm(s.lat, s.lon, dest[1], dest[2]) <= APPROACH_NM
+
+    def unknown_near_field(self, t: Track, s: Sample) -> str | None:
+        """An airfield of the local checkout within APPROACH_NM of a flight with no board row nor route data (where it lands
+        is not known): AYT1260 (Ayeet E145) "-4,480 ft/min (-10.3 deg) at 3,875 ft", history ~5 deg, ~6 nm from Hatzor
+        AB, on Telegram (23 Nov 2026). MFO692 (military BE20, -10.1 deg at 1,425 ft, 1 Nov) is the same."""
+        if t.sched or (self.routes.get(t.callsign, (0, None))[1] if t.callsign != t.flown_cs else None) or not self.standing:
+            return None
+        field = self.standing.airfield_near(s.lat, s.lon)
+        return field[0] if field and field[1] <= APPROACH_NM else None
 
     def check_wobble(self, t: Track) -> None:
         """An airliner's altitude going up and down again and again: a fight with the flight controls
@@ -4570,6 +4586,11 @@ class Monitor:
 
     def diversion(self, t: Track, kind: str, msg: str, landed: bool = True) -> bool:
         """A DIVERSION, worded as a plain fact when nothing else was wrong with the flight (`landing_words`)."""
+        if (kind == "DEP" and not t.sched and (t.callsign or "")[:3] in CARGO_AIRLINES and not self.hot(t)
+                and not self.in_emergency(t)):
+            # (route data only, and wrong for these operators again and again: 4 of 7 Telegram messages on 21 Nov 2026)
+            log.info("[DIVERSION, not sent: a cargo departure off the board, route data only] %s %s", t.label(), msg)
+            return False
         words, before = self.landing_words(t, kind, landed), t.elsewhere_at
         t.elsewhere_at = t.last.t if words else before
         sent = self.alert(t, "DIVERSION", msg, fields={"landing": words} if words else None)
@@ -4730,7 +4751,19 @@ class Monitor:
                 t.route_dir = 1
             elif (d_orig < was_orig - 5 and d_dest > was_dest
                     and heading_diff(s.track, bearing(s.lat, s.lon, olat, olon)) <= 60):
+                stop = self.nearer_stop(t, s, d_orig)
+                if stop:
+                    # backwards only on the leg it flies: LH8290 (EDDF-LLBG-HECA) left TLV westbound for Cairo and learned
+                    # "bound for EDDF", OFF_COURSE 171 nm W of TLV; UAE110 (LMML-LCLK-OMDB) Larnaca -> Dubai learned "bound
+                    # for LMML", 3 OFF_COURSE (22, 25 Nov 2026)
+                    self.note(t, "route_dir", f"closing on {o}, the origin of its route ({self.routes[t.callsign][1]}), "
+                              f"but {stop} listed on the way is nearer: direction not learned", every=1800)
+                    return
                 t.route_dir = -1
+            if t.route_dir:  # (so a wrong direction can be judged from the log)
+                log.info("%s learned its route %s %s at %s ft %.4f,%.4f heading %.0f deg: bound for %s", t.label(),
+                         self.routes[t.callsign][1], "as listed" if t.route_dir > 0 else "backwards", s.alt, s.lat, s.lon,
+                         s.track, dst if t.route_dir > 0 else o)
             return
         if t.route_dir < 0:
             (o, olat, olon), (dst, dlat, dlon) = (dst, dlat, dlon), (o, olat, olon)
@@ -4773,6 +4806,18 @@ class Monitor:
             self.alert(t, "OFF_COURSE", f"bound for {dst} (route {self.routes[t.callsign][1]}) but heading "
                        f"{s.track:.0f} deg, {devs[-1]:.0f} deg away from it for {s.t - old.t:.0f}s, "
                        f"{d_dest:.0f} nm out and opening ({was_dest:.0f} -> {d_dest:.0f} nm)")
+
+    def nearer_stop(self, t: Track, s: Sample, nm: float) -> str | None:
+        """A stop listed in the flight's route (between its ends) nearer to `s` than `nm`, else None."""
+        route = (self.routes.get(t.callsign, (0, None))[1] or "").split("-")
+        for icao in route[1:-1]:
+            try:
+                pos = self.standing.airport(icao) if self.standing else None
+            except requests.RequestException:
+                pos = None
+            if pos and haversine_nm(s.lat, s.lon, *pos) < nm:
+                return icao
+        return None
 
     def route_stop_here(self, t: Track, s: Sample, orig: tuple, far: tuple) -> str | None:
         """A stop on the way between a route's ends (`orig` lat, lon; `far` ICAO, lat, lon, in its learned direction):
@@ -5189,6 +5234,15 @@ class Monitor:
                 or any(k.startswith("DIVERSION") and at >= max(t.left_at, prev.t - 6 * 3600)
                        for k, (at, _) in t.alerted.items())):
             return
+        dest = self.destination(t)
+        if dest and (prev.alt or 0) < 15000 and haversine_nm(prev.lat, prev.lon, dest[1], dest[2]) <= 50:
+            # its silence was "probably landing there" (check_lost): its turnaround at its destination, unheard low. 6H55 /
+            # ISR055 and IZ807 TLV -> Ramon, silent 40-44 nm out, heard again 60-80 min later on their way back to TLV:
+            # "Probably landing at VDA" on Telegram (22, 24 Nov 2026)
+            log.info("%s heard again after %.0f min: went silent coming down %.0f nm from its destination %s - its "
+                     "turnaround there", t.label(), (s.t - prev.t) / 60,
+                     haversine_nm(prev.lat, prev.lon, dest[1], dest[2]), dest[0])
+            return
         far = self.departure_away(t, prev, f"landed unseen near {prev.lat:.4f},{prev.lon:.4f}")
         if not far:
             return
@@ -5303,6 +5357,18 @@ class Monitor:
         dropped = x.nic == 0 and t.nic_last not in (0, None)
         t.nic_last = x.nic
         if x.nic != 0:
+            bad, last = t.nic_bad, t.last
+            if (bad is not None and 0 <= x.t - bad.t <= 300
+                    and haversine_nm(bad.lat, bad.lon, x.lat, x.lon) <= 3 + 650 * (x.t - bad.t) / 3600
+                    and last is not None and x.t > last.t
+                    and haversine_nm(last.lat, last.lon, x.lat, x.lon) > 3 + 650 * (x.t - last.t) / 3600):
+                # healthy NIC proves nothing: J221 (GYD -> TLV) had six NIC-0 positions dropped in 13 min, then one at the
+                # same fake place with NIC > 0 entered the track, and its silence there on final into TLV was "Probably
+                # landing at BEY" on Telegram (23 Nov 2026)
+                log.info("%s NIC %d position %.4f,%.4f continues dropped NIC-0 ones, out of reach of its last trusted "
+                         "one - dropped", t.label(), x.nic, x.lat, x.lon)
+                t.nic_bad = x
+                return t.gps or "nic0"
             return ""
         ep = next((e for e in self.nic_drops if x.t - e["last"] <= 900
                    and haversine_nm(e["lat"], e["lon"], x.lat if t.last is None else t.last.lat,
