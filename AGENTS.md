@@ -21,7 +21,7 @@ position jumps, diversions. Speed of warning matters more than completeness of d
   timer, `tools/nightly.sh health`), which tells the owner's private chat (`TELEGRAM_CHAT_ID`) only when something is badly
   wrong - the monitor stopped or its log silent, no local poll answered, empty answers, the board unread, adsb.lol gone from the
   local poll for 6 h, a feed refusing us, route data off, the squawk search or AeroSignals / Squawk Alert / the relay / Telegram /
-  the private feeder failing for hours, repeated restarts, a full disk. Told when it starts, every 12 h while it lasts, once when
+  the private feeder failing for hours, the local poll on the private feeder alone 20 min, aviationstack's day failing, repeated restarts, a full disk. Told when it starts, every 12 h while it lasts, once when
   over (`health_state.json`, git-ignored). It reads only the log and the process list. Add a check there when a new source or
   failure mode appears.
 - Never commit secrets (ntfy topic, Telegram token) or `alerts.jsonl` / `posts.jsonl`; they come from CLI
@@ -174,8 +174,22 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   so an aircraft's silence inside the circle is judged only on polls of the feed that last heard it
   (`Track.feed`; see LOST_CONTACT). No trace files there: backfill stays adsb.lol's (refused since 18 Oct).
   Tests and replays pin one feed (`--fallback-provider '' --remote-providers adsb.lol`).
-- **A private feeder, in shadow** (`FeederShadow`, `--feeder-shadow`, 24 Nov 2026, the owner: see what it would have rescued before
-  it goes into production). Someone's PiAware (dump1090-fa 10.2) ~7 nm SW of TLV behind Cloudflare Access; `FEEDER1_URL` (a bare
+- **A private feeder** (`Feeder`, `--feeder`; in shadow from 24 Nov 2026, `FeederShadow`, `--feeder-shadow`; merged 26 Nov 2026, the
+  owner: "since this is free, I suggest integrating it". The shadow's day: 253 aircraft adsb.lol never gave us - 222 beyond the circle,
+  ~25 Israeli 738xxx / 739xxx with no callsign 40-50 nm out at 4,000-10,000 ft -, 44 below 3,000 ft near TLV, 23 heard first (median
+  90 s), no LOST_CONTACT on an aircraft it still heard. Against adsb.fi, 20 min, 349 reports of 10 aircraft within 3 s: 0.011 nm apart
+  (median; max 0.16), clocks within 0.5 s, altitudes within 75 ft but one, no callsign or squawk differing.) Its fresh reports join
+  each local poll as the feed `FEEDER` ("feeder1"): only a position <= `FEEDER_FRESH_S` (5 s) old (SEY022 at the edge of its range came
+  with 18,975 ft decoded 48 s after its last position, the aggregators had 15,225 descending), never its MLAT / TIS-B positions
+  (FlightAware's network, its terms). Per aircraft the newer *position* of the feeder's and an aggregator's (a message may carry
+  only the time heard), heard at the later. No `r` / `t` in its aircraft.json: from its `/db/` (dump1090-fa's aircraft database, files
+  by hex prefix with "children"), at most `FEEDER_DB_PER_READ` file a poll, for aircraft no aggregator named. When neither adsb.lol
+  nor adsb.fi answers, the cycle runs on it alone ("local poll from the private feeder alone"; `ok_polls` has its own polls, the
+  sudden-drop check is per feed). An aircraft heard by it alone for `FEEDER_ONLY_S` (`Track.agg_heard`) that goes silent is at that
+  antenna's horizon: marked lost, not alerted, unless hot or falling. Its pairs are not shared with the relay (`share_callsigns`
+  takes `agg_heard`). Cost: a real loss of an aircraft only it heard, with no fall nor earlier alert, is only logged; a single
+  receiver's garbled altitude on a fresh position goes in like any (the checks' own glitch rules apply).
+  The shadow record goes on beside it, against the aggregators' answer alone. Someone's PiAware (dump1090-fa 10.2) ~7 nm SW of TLV behind Cloudflare Access; `FEEDER1_URL` (a bare
   host) / `FEEDER1_ID` / `FEEDER1_KEY` from the environment, never logged nor committed. Only `data/aircraft.json` (1 s refresh),
   `receiver.json`, `stats.json`, `history_0..119.json` (30 s snapshots, 1 h); no traces, no search, no `r` / `t` / `dbFlags`.
   Heard FL320 at 117 nm, and down to 500 ft near TLV. Read after each local poll (answered or not), 3 s timeout, never raising;
@@ -184,6 +198,18 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   was silent / lost, heard first) and one per LOST_CONTACT / DIVERSION on an aircraft it heard after our last report; an hourly
   summary in the log. `tools/feeder_shadow_report.py` sums the files. First read: Israeli 738xxx aircraft with no callsign at
   ~10,000 ft 30-48 nm out, absent from adsb.lol's answer.
+- **aviationstack** (`AvStack`, `AVSTACK_KEY`; 26 Nov 2026, the owner's free plan: 100 requests a month). Its flights carry no ATC
+  callsign but the aircraft's hex (`icao24`) and registration, before take-off. Of the 16 board arrivals not found on their callsign
+  on 25 Nov, 9 were Wizz (W4 / W6 / W9, alphanumeric callsigns that change: 9H-WAJ came in as WMT4XQ, due out as WMT5012); 4 of 4
+  checked were the right aircraft, and 24 hexes of other airlines were each the aircraft of that airline's flight before. One request
+  per airline of `AVSTACK_AIRLINES` (`arr_iata=TLV&airline_iata=..`: yesterday's and today's; a list of airlines answers nothing) at
+  the first poll after `AVSTACK_HOUR_UTC` (02:00) each day, counted in `--state` (`avstack`: day, month, used), at most
+  `AVSTACK_MONTH_MAX` (90) a calendar month; the key in the URL (the API's way), never logged. `Monitor.tails`: hex -> those board
+  arrivals; asked for by hex with the rotations (`rotation_query`) from `TAIL_AHEAD_S` (8 h) before the row's time to
+  `TAIL_AFTER_S` after, while no aircraft was found for it; in the air on a callsign the board does not give, listed to TLV or heading
+  for it, due within `ROTATION_ETA_S` (`tail_match`): that flight (`t.sched`), not learned (Wizz's callsigns change daily). Its
+  earlier legs of the day are left alone, unchecked. Cost: an aircraft swap after 02:00 UTC is not seen (the wrong hex never matches).
+  The other misses are left to `learn_at_home` (airlines that keep their callsigns).
 - **airplanes.live** became feeder-only in 2026 and returns **HTTP 403**. Do not make it a
   default or add it as a provider unless the owner becomes a feeder.
 - **HTTP 401 / 403 from a provider** pauses its lookups `TRACE_REFUSED_S` (30 min), doubling up to 6 h while it goes on

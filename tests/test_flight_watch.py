@@ -73,6 +73,8 @@ class FakeFeed:
         self.bsky = []            # AeroSignals' posts (Bluesky getAuthorFeed "feed" items)
         self.mastodon = []        # Squawk Alert's posts (Mastodon statuses)
         self.sqk_answer = {}      # squawk code -> the aircraft /sqk/ answers instead of the true ones
+        self.avstack = {"data": []}  # aviationstack's /v1/flights answer
+        self.avstack_params = []  # the params of each request to it
 
     def ac(self, hexid):
         a = dict(self.aircraft[hexid], hex=hexid)
@@ -117,6 +119,9 @@ class FakeFeed:
             return FakeResponse(200, self.mastodon, url=url)
         if path.endswith("/app.bsky.feed.getAuthorFeed"):
             return FakeResponse(200, {"feed": self.bsky}, url=url)
+        if path == "/v1/flights":
+            self.avstack_params.append(kw.get("params"))
+            return FakeResponse(200, self.avstack, url=url)
         if path == "/learn" and method == "POST":
             self.learned.append((kw.get("json"), (kw.get("headers") or {}).get("Authorization")))
             return FakeResponse(200, {"stored": len(kw.get("json") or {})})
@@ -4811,7 +4816,7 @@ class FeederShadowTests(unittest.TestCase):
         env = {"FEEDER1_URL": "feeder.example", "FEEDER1_ID": "id", "FEEDER1_KEY": "key"}
         with mock.patch.dict(os.environ, env):
             sh = fw.FeederShadow(tmp.name, *TLV)
-        sh.session = types.SimpleNamespace(get=lambda url, timeout=None: FakeResponse(
+        sh.feeder.session = types.SimpleNamespace(get=lambda url, timeout=None: FakeResponse(
             200, {"now": clock(), "aircraft": feeder_acs()}, url=url))
         return sh, tmp.name
 
@@ -4839,3 +4844,207 @@ class FeederShadowTests(unittest.TestCase):
     def test_off_without_the_environment(self):
         with mock.patch.dict(os.environ, {"FEEDER1_URL": ""}):
             self.assertFalse(fw.FeederShadow("x.jsonl", *TLV).on)
+
+
+class FakeReceiver:
+    """The private feeder's dump1090-fa: /data/aircraft.json (its own `now`, seconds) and its /db/ files."""
+
+    def __init__(self, clock):
+        self.clock = clock
+        self.aircraft = {}  # hex -> its fields (seen_pos 0.3 unless given)
+        self.db = {}        # /db/ file name -> records
+        self.down = False
+        self.calls = []
+
+    def get(self, url, timeout=None):
+        path = urlparse(url).path
+        self.calls.append(path)
+        if self.down:
+            raise requests.ConnectionError("down")
+        if path == "/data/aircraft.json":
+            return FakeResponse(200, {"now": self.clock(), "aircraft": [
+                {"seen": 0.2, "seen_pos": 0.3, **a, "hex": h} for h, a in self.aircraft.items()]}, url=url)
+        name = path.rsplit("/", 1)[1].split(".")[0]
+        return FakeResponse(200, self.db[name], url=url) if path.startswith("/db/") and name in self.db \
+            else FakeResponse(404, url=url)
+
+
+def with_feeder(mon, clock):
+    with mock.patch.dict(os.environ, {"FEEDER1_URL": "feeder.example", "FEEDER1_ID": "id", "FEEDER1_KEY": "key"}):
+        feeder = fw.Feeder()
+    rx = FakeReceiver(clock)
+    feeder.session = rx
+    mon.feeder = feeder
+    return rx
+
+
+class FeederMergeTests(unittest.TestCase):
+    """The private feeder merged into the local poll (26 Nov 2026, after a day in shadow: 253 aircraft and 44 below
+    3,000 ft adsb.lol's answer did not have; positions 0.011 nm from adsb.fi's at the same time)."""
+
+    def test_an_aircraft_only_the_feeder_hears_is_tracked_and_its_horizon_is_no_lost_contact(self):
+        got = {}
+        for src in ("feeder", "aggregator"):
+            mon, feed, clock, alerts = make(["--no-routes"])
+            rx = with_feeder(mon, clock)
+            rx.db = {"7": {"children": ["73"]}, "73": {"94BC": {"r": "4X-EKA", "t": "B738"}, "8A5D": {"r": "", "t": ""}}}
+            feed.aircraft["738002"] = airborne(31.0, 34.0, 20000, flight="ELY999")  # keeps the aggregator answering
+            feed.local = {"738002"}
+            for st in path(32.2, 33.9, [270] * 6, [9000] * 6):  # over the sea ~50 nm W of TLV, flying away
+                ac = dict(st, flight="ISR777  ")
+                if src == "feeder":
+                    rx.aircraft["7394bc"] = ac
+                else:
+                    feed.aircraft["7394bc"], feed.local = dict(ac, r="4X-EKA", t="B738"), {"738002", "7394bc"}
+                step(mon, clock)
+            t = mon.tracks["7394bc"]
+            if src == "feeder":
+                self.assertEqual((t.feed, t.reg, t.actype), (fw.FEEDER, "4X-EKA", "B738"))
+                rx.aircraft.pop("7394bc")
+            else:
+                feed.local = {"738002"}
+                feed.aircraft.pop("7394bc")
+            for _ in range(16):
+                step(mon, clock)
+            got[src] = kinds(alerts, "7394bc")
+            self.assertTrue(mon.tracks["7394bc"].lost)
+        self.assertEqual(got, {"feeder": [], "aggregator": ["LOST_CONTACT"]})
+
+    def test_both_feeds_merge_into_one_track_without_jumps(self):
+        """Each poll the newer position of the two; the aggregator's registration and type stay."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        rx = with_feeder(mon, clock)
+        states = path(32.5, 34.0, [90] * 12, [12000 + 300 * i for i in range(12)])
+        for i, st in enumerate(states):
+            # the aggregator's position 6 s old, the feeder's at the time; on odd polls the feeder's is late
+            feed.aircraft["738001"] = dict(airborne(st["lat"], st["lon"], st["alt_baro"]), seen=1, seen_pos=6)
+            feed.local = {"738001"}
+            rx.aircraft["738001"] = dict(st, flight="ELY315  ", seen_pos=0.2 if i % 2 == 0 else 8)
+            step(mon, clock)
+        t = mon.tracks["738001"]
+        self.assertEqual(kinds(alerts), [])
+        self.assertEqual((t.reg, t.actype), ("4X-EDC", "B789"))
+        ts = [s.t for s in t.samples]
+        self.assertEqual(ts, sorted(ts))
+        self.assertEqual(len(ts), 12)
+        self.assertGreater(t.agg_heard, 0)
+
+    def test_the_feeder_carries_the_cycle_when_the_aggregators_refuse(self):
+        mon, feed, clock, alerts = make(["--no-routes"])
+        rx = with_feeder(mon, clock)
+        feed.limited = {"/v2/point"}  # adsb.lol refuses every local poll (18 Oct 2026)
+        for i, st in enumerate(path(32.2, 34.6, [90] * 6, [3000] * 6, gs=200)):
+            rx.aircraft["4ca123"] = dict(st, flight="RYR1234 ", squawk="7700" if i >= 3 else "1000")
+            mon.poll()  # does not raise
+            clock.t += 10
+        self.assertEqual(mon.local_feed, fw.FEEDER)
+        self.assertEqual(kinds(alerts), ["EMERGENCY"])
+        self.assertIn((clock.t - 10, fw.FEEDER), list(mon.ok_polls))
+        rx.down = True
+        with self.assertRaises(requests.RequestException):
+            mon.poll()
+
+    def test_stale_and_network_positions_are_not_merged(self):
+        """SEY022 (25 Nov 2026) at the edge of the feeder's range: 18,975 ft decoded 48 s after its last position, the
+        aggregators had 15,225 descending. MLAT / TIS-B positions are FlightAware's network's, not the receiver's."""
+        mon, feed, clock, alerts = make(["--no-routes"])
+        rx = with_feeder(mon, clock)
+        base = airborne(31.3, 35.4, 15000)
+        rx.aircraft = {"074045": dict(base, seen_pos=48), "074046": dict(base, mlat=["lat", "lon"]),
+                       "074047": dict(base, tisb=["lat", "lon"]), "074048": dict(base, seen_pos=4)}
+        step(mon, clock)
+        self.assertEqual(sorted(mon.tracks), ["074048"])
+
+    def test_feeder_only_pairs_are_not_shared_with_the_relay(self):
+        with mock.patch.dict(os.environ, {"RELAY_TOKEN": "s3cret"}):
+            mon, feed, clock, _ = make(["--share-interval", "60"])
+            rx = with_feeder(mon, clock)
+            rx.aircraft["7394bc"] = airborne(32.0, 34.8, 1000, flight="ISR777")
+            fly(mon, feed, clock, "738062", path(32.3, 34.5, [180] * 3, [9000] * 3), flight="ELY5064")
+        self.assertEqual(set(feed.learned[0][0]) - {"_alerts"}, {"ELY5064"})
+
+
+class AvStackTests(unittest.TestCase):
+    """aviationstack's free plan (100 requests a month): the aircraft of each of the board's Wizz arrivals, once a day
+    (26 Nov 2026). W46403 MXP -> TLV flew as WMT4XQ on 9H-WAJ (25 Nov): never found by its callsign."""
+
+    def setUp(self):
+        self.mon, self.feed, self.clock, self.alerts = with_board(
+            [board_row("W4", "6403", "A", local_time(mon_clock(), 1.5), "MXP")])
+        self.mon.avstack = fw.AvStack(self.mon.http, "k3y")
+        due = datetime.fromtimestamp(self.clock() + 1.5 * 3600, fw.ZoneInfo("Asia/Jerusalem")).strftime("%Y-%m-%dT%H:%M")
+        self.feed.avstack = {"data": [
+            {"flight_date": "x", "flight": {"iata": "W46403", "icao": "WMT6403", "codeshared": None},
+             "arrival": {"iata": "TLV", "scheduled": due + ":00+00:00"},
+             "aircraft": {"registration": "9H-WAJ", "icao24": "4D241F"}},
+            {"flight": {"iata": "W46405", "codeshared": None}, "arrival": {"scheduled": due + ":00+00:00"},
+             "aircraft": None}]}
+
+    def fly_in(self, track_offset=0):
+        mon, feed, clock = self.mon, self.feed, self.clock
+        lat, lon = 34.0, 28.5  # over the sea W of Cyprus, ~330 nm from TLV
+        trk = fw.bearing(lat, lon, *TLV) + track_offset
+        fly(mon, feed, clock, "4d241f", path(lat, lon, [trk] * 8, [35000] * 8), local=False,
+            flight="WMT4XQ", r="9H-WAJ", t="A21N")
+        return mon.tracks.get("4d241f")
+
+    def test_the_board_arrival_is_found_by_its_aircraft(self):
+        t = self.fly_in()
+        self.assertEqual(t.sched.flight, "W46403")
+        self.assertTrue(t.followed)
+        self.assertNotIn("WMT4XQ", self.mon.schedule.learned.get("W46403", []))  # not learned: Wizz's change daily
+        self.assertEqual(len(self.feed.avstack_params), 3)
+        self.assertEqual([p["airline_iata"] for p in self.feed.avstack_params], ["W4", "W6", "W9"])
+        self.assertEqual({p["arr_iata"] for p in self.feed.avstack_params}, {"TLV"})
+
+    def test_its_aircraft_on_another_leg_is_left_alone(self):
+        t = self.fly_in(track_offset=170)  # flying away from TLV: an earlier leg of its day
+        self.assertIsNone(t.sched)
+        self.assertEqual(kinds(self.alerts), [])
+        self.assertIn("4d241f", self.mon.tails)
+
+    def test_once_a_day_and_at_most_the_monthly_cap_and_the_key_is_never_logged(self):
+        av = self.mon.avstack
+        with self.assertLogs(fw.log, "INFO") as logs:
+            self.mon.refresh_tails()
+            self.mon.refresh_tails()  # the same day: not asked again
+        self.assertEqual(len(self.feed.avstack_params), 3)
+        self.assertNotIn("k3y", "\n".join(logs.output))
+        self.assertEqual(self.mon.tails["4d241f"][0]["reg"], "9H-WAJ")
+        self.clock.t += 86400
+        av.used = fw.AVSTACK_MONTH_MAX - 1 if av.month == time_month(self.clock()) else 0
+        self.mon.refresh_tails()
+        self.assertLessEqual(av.used, fw.AVSTACK_MONTH_MAX)
+        before = len(self.feed.avstack_params)
+        self.clock.t += 86400
+        if av.month == time_month(self.clock()):
+            av.used = fw.AVSTACK_MONTH_MAX
+            self.mon.refresh_tails()
+            self.assertEqual(len(self.feed.avstack_params), before)
+
+    def test_its_count_survives_a_restart(self):
+        self.mon.refresh_tails()
+        with tempfile.TemporaryDirectory() as d:
+            self.mon.args.state = os.path.join(d, "state.json")
+            self.mon.save_state()
+            mon2, feed2, clock2, _ = with_board([], ["--state", self.mon.args.state])
+            mon2.avstack = fw.AvStack(mon2.http, "k3y")
+            mon2.load_state()
+            mon2.refresh_tails()
+        self.assertEqual(feed2.avstack_params, [])
+        self.assertEqual(mon2.avstack.used, 3)
+        self.assertIn("4d241f", mon2.tails)
+
+
+class RedactTests(unittest.TestCase):
+    def test_the_key_is_blanked_in_urllib3_lines(self):
+        rec = fw.logging.LogRecord("urllib3.connectionpool", 10, "", 0, '%s://%s:%s "%s %s %s" %s %s',
+                                   ("https", "api.aviationstack.com", 443, "GET",
+                                    "/v1/flights?access_key=k3y&arr_iata=TLV", "HTTP/1.1", 200, None), None)
+        self.assertTrue(fw.redact_keys(rec))
+        self.assertNotIn("k3y", rec.getMessage())
+        self.assertIn("access_key=***&arr_iata=TLV", rec.getMessage())
+
+
+def time_month(t):
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m")

@@ -953,12 +953,205 @@ class SchedFlight:
                 else f"{self.flight} {home}->{self.other}")
 
 
+FEEDER = "feeder1"   # the private feeder's name as a feed (Track.feed, ok_polls)
+FEEDER_FRESH_S = 5   # its report is merged only when its position is at most this old (seen_pos): SEY022, 25 Nov 2026,
+#                      at the edge of its range, came with an 18,975 ft altitude decoded 48 s after its last position
+FEEDER_ONLY_S = 120  # a track not heard by an aggregator this long, silent after the feeder's reports: its horizon
+FEEDER_DB_PER_READ = 1  # aircraft-database files (/db/<prefix>.json) fetched per read at most
+
+
+class Feeder:
+    """A private receiver's own aircraft.json (dump1090-fa: what its antenna decodes, 1 s refresh), read once per local
+    poll. A PiAware ~7 nm SW of TLV behind Cloudflare Access: ~50 nm low down, ~120 nm at cruise, down to the runways.
+    Host and keys from the environment only (FEEDER1_URL, a bare host; FEEDER1_ID / FEEDER1_KEY), never logged.
+    No traces, no search, no r / t / dbFlags in aircraft.json; its /db/ (dump1090-fa's aircraft database, files by hex
+    prefix) gives registration and type. With --feeder its reports join the local poll as the feed FEEDER (26 Nov 2026,
+    the owner, after the shadow: 25 Nov, 349 reports paired with adsb.fi's within 3 s: positions 0.011 nm apart (median,
+    max 0.16), clocks within 0.5 s, altitudes within 75 ft but one, no callsign / squawk differing)."""
+
+    TIMEOUT_S = 3
+    REFUSED_S = 1800
+
+    def __init__(self):
+        host, cid, key = (os.environ.get(n, "").strip() for n in ("FEEDER1_URL", "FEEDER1_ID", "FEEDER1_KEY"))
+        self.on = bool(host and cid and key)
+        if not self.on:
+            return
+        self.host = host.split("://")[-1].strip("/")
+        self.session = requests.Session()
+        self.session.headers.update({"CF-Access-Client-Id": cid, "CF-Access-Client-Secret": key})
+        self.paused_until = 0.0
+        self.errors = 0
+        self.db: dict[str, dict] = {}  # /db/ file name (hex prefix) -> its records
+
+    def read(self) -> tuple[float, list] | None:
+        """(the receiver's time, its aircraft), or None (no answer: never raises)."""
+        if not self.on or time.time() < self.paused_until:
+            return None
+        try:
+            r = self.session.get(f"https://{self.host}/data/aircraft.json", timeout=self.TIMEOUT_S)
+            if r.status_code in (401, 403):
+                self.paused_until = time.time() + self.REFUSED_S
+                log.warning("feeder: HTTP %s, paused %d min", r.status_code, self.REFUSED_S // 60)
+                return None
+            r.raise_for_status()
+            d = r.json()
+        except (requests.RequestException, ValueError) as e:
+            self.errors += 1
+            log.debug("feeder: %s", type(e).__name__)
+            return None
+        return float(d.get("now") or time.time()), d.get("aircraft") or []
+
+    def fresh(self, got: tuple[float, list], need_ident=lambda h: False) -> list:
+        """Its reports to merge: a position <= FEEDER_FRESH_S old, its own (not MLAT / TIS-B, which come from FlightAware's
+        network: its terms), as copies marked `_feed` FEEDER; registration / type from its database where `need_ident`."""
+        now, acs = got
+        out, fetches = [], FEEDER_DB_PER_READ
+        for ac in acs:
+            h = (ac.get("hex") or "").lower()
+            sp = ac.get("seen_pos")
+            if (not h or h.startswith("~") or "lat" not in ac or sp is None or float(sp) > FEEDER_FRESH_S
+                    or "lat" in (ac.get("mlat") or []) or "lat" in (ac.get("tisb") or [])):
+                continue
+            ac = dict(ac, hex=h, _feed=FEEDER)
+            if need_ident(h):
+                got_id, fetches = self.ident(h, fetches)
+                if got_id:
+                    ac["r"], ac["t"] = got_id
+            out.append(ac)
+        return out
+
+    def ident(self, h: str, fetches: int) -> tuple[tuple | None, int]:
+        """(registration, type) from the receiver's aircraft database, and the fetches left: files by hex prefix, each
+        record keyed by the rest of the hex; a prefix with "children" has its longer prefixes in files of their own."""
+        h, level = h.upper(), 1
+        while level <= len(h):
+            name = h[:level]
+            if name not in self.db:
+                if fetches <= 0:
+                    return None, fetches
+                fetches -= 1
+                try:
+                    r = self.session.get(f"https://{self.host}/db/{name}.json", timeout=self.TIMEOUT_S)
+                    if r.status_code == 404:
+                        self.db[name] = {}
+                    else:
+                        r.raise_for_status()
+                        self.db[name] = r.json()
+                except (requests.RequestException, ValueError) as e:
+                    log.debug("feeder db %s: %s", name, type(e).__name__)
+                    return None, 0
+            d = self.db[name]
+            rec = d.get(h[level:])
+            if isinstance(rec, dict) and (rec.get("r") or rec.get("t")):
+                return (rec.get("r") or "", rec.get("t") or ""), fetches
+            if h[:level + 1] not in (d.get("children") or []):
+                return None, fetches
+            level += 1
+        return None, fetches
+
+
+AVSTACK_URL = "https://api.aviationstack.com/v1/flights"
+AVSTACK_AIRLINES = ("W4", "W6", "W9")  # one request each a day: Wizz Air Malta / Hungary / UK (AvStack)
+AVSTACK_HOUR_UTC = 2   # asked at the first poll after this hour (UTC) of each day: the day's aircraft assigned
+AVSTACK_MONTH_MAX = 90  # requests a calendar month at most (the free plan: 100)
+AVSTACK_TOL_S = 3 * 3600  # its scheduled arrival within this of the board row's time: the same flight
+TAIL_AHEAD_S = 8 * 3600   # its aircraft asked for by hex from this long before the board's time ...
+TAIL_AFTER_S = 3600       # ... until this long after it
+
+
+class AvStack:
+    """The aircraft (ICAO hex) each of our board's Wizz arrivals is planned on, from aviationstack's free API (AVSTACK_KEY;
+    100 requests a month). Its answers carry no ATC callsign, but the hex, before the flight leaves (26 Nov 2026, the owner):
+    Wizz flies on callsigns its numbers do not give (W46403 as WMT4XQ / WMT5012), and 9 of the 16 board arrivals not found on
+    their callsign on 25 Nov were Wizz. 4 of 4 checked then were right (W43263 HA-LGV as WMT7302, ...), and 24 hexes of
+    other airlines were each the aircraft of that airline's flight before. One request per airline in AVSTACK_AIRLINES a day
+    (an airline list in one request answers nothing), counted in the state file, at most AVSTACK_MONTH_MAX a month. The key
+    goes in the URL (the API's way) and is never logged."""
+
+    def __init__(self, http: "Http", key: str):
+        self.http, self.key = http, key
+        self.day, self.month, self.used = "", "", 0   # last UTC day asked, its month, requests that month
+        self.flights: list[dict] = []  # {"flight", "sched" (epoch), "hex", "reg"}
+
+    def state(self) -> dict:
+        return {"day": self.day, "month": self.month, "used": self.used, "flights": self.flights}
+
+    def load(self, d: dict) -> None:
+        self.day, self.month, self.used = d.get("day", ""), d.get("month", ""), int(d.get("used", 0))
+        self.flights = list(d.get("flights", []))
+
+    def due(self, now: float) -> bool:
+        g = time.gmtime(now)
+        return g.tm_hour >= AVSTACK_HOUR_UTC and time.strftime("%Y-%m-%d", g) != self.day
+
+    def refresh(self, now: float, airport: str, tz) -> bool:
+        """Once a UTC day: each airline's arrivals here (yesterday's and today's) with their aircraft. True when asked."""
+        if not self.due(now):
+            return False
+        g = time.gmtime(now)
+        self.day, month = time.strftime("%Y-%m-%d", g), time.strftime("%Y-%m", g)
+        if month != self.month:
+            self.month, self.used = month, 0
+        flights = []
+        for code in AVSTACK_AIRLINES:
+            if self.used >= AVSTACK_MONTH_MAX:
+                log.warning("aviationstack: %d requests this month, no more until the next", self.used)
+                break
+            self.used += 1
+            try:
+                r = self.http.s.request("GET", AVSTACK_URL, params={"access_key": self.key, "arr_iata": airport,
+                                                         "airline_iata": code, "limit": 100}, timeout=15)
+                d = r.json()
+            except (requests.RequestException, ValueError) as e:
+                log.warning("aviationstack %s: %s", code, type(e).__name__)
+                continue
+            if r.status_code != 200 or d.get("error"):
+                log.warning("aviationstack %s: HTTP %s %s", code, r.status_code, (d.get("error") or {}).get("code", ""))
+                continue
+            n = 0
+            for x in d.get("data") or []:
+                hexid = ((x.get("aircraft") or {}).get("icao24") or "").lower()
+                num = (x.get("flight") or {}).get("iata") or ""
+                sched = (x.get("arrival") or {}).get("scheduled") or ""
+                if not (re.fullmatch(r"[0-9a-f]{6}", hexid) and num and sched) or (x.get("flight") or {}).get("codeshared"):
+                    continue
+                try:  # local time at the arrival airport, though marked +00:00
+                    ts = datetime.fromisoformat(sched[:19]).replace(tzinfo=tz).timestamp()
+                except ValueError:
+                    continue
+                if ts < now - 6 * 3600:
+                    continue
+                flights.append({"flight": num, "sched": ts, "hex": hexid,
+                                "reg": (x.get("aircraft") or {}).get("registration") or ""})
+                n += 1
+            log.info("aviationstack: %d %s arrivals with their aircraft (%d requests this month)", n, code, self.used)
+        self.flights = flights
+        return True
+
+
+def redact_keys(record: logging.LogRecord) -> bool:
+    """A log filter: an `access_key=` in a record's text blanked out (AvStack's key in a URL)."""
+    msg = record.getMessage()
+    if "access_key=" in msg:
+        record.msg, record.args = re.sub(r"access_key=[^&\s\"']+", "access_key=***", msg), ()
+    return True
+
+
+def flight_key(flight: str) -> str:
+    """A flight number without the zeros after its airline code: W4 06403 / W46403 -> W46403."""
+    m = re.fullmatch(r"([A-Z0-9]{2})\s*0*(\d+[A-Z]?)", (flight or "").upper())
+    return m.group(1) + m.group(2) if m else (flight or "").upper()
+
+
 class FeederShadow:
     """A private receiver's own aircraft.json, read beside the aggregator in shadow: it changes no track and no
     alert, and records only what it heard that our feeds did not (24 Nov 2026, the owner: see what it would have
     rescued before it goes into production). A PiAware (dump1090-fa 10.2) ~7 nm SW of TLV behind Cloudflare
     Access: range ~50 nm, down to the runways; no traces, no aircraft database. Host and keys come from the
     environment only (FEEDER1_URL, a bare host; FEEDER1_ID / FEEDER1_KEY) and are never logged.
+    Since 26 Nov 2026 the feeder's reports join the poll (--feeder, Feeder): the shadow goes on, against the aggregators'
+    answer alone (`Monitor.local_seen`), on the poll's own read of the feeder.
 
     One line per aircraft episode in `path` (heard, then unheard by the feeder SHADOW_GONE_S), only when it added
     something: `failed` polls of ours it was heard on (refused / no answer), `missing` from an answered local poll,
@@ -973,21 +1166,16 @@ class FeederShadow:
     TIMEOUT_S = 3
     REFUSED_S = 1800
 
-    def __init__(self, path: str, lat: float, lon: float):
-        host, cid, key = (os.environ.get(n, "").strip() for n in ("FEEDER1_URL", "FEEDER1_ID", "FEEDER1_KEY"))
+    def __init__(self, path: str, lat: float, lon: float, feeder: Feeder | None = None):
+        self.feeder = feeder or Feeder()
         self.path, self.lat, self.lon = path, lat, lon
-        self.on = bool(path and host and cid and key)
+        self.on = bool(path and self.feeder.on)
         if not self.on:
             if path:
                 log.info("feeder shadow off: FEEDER1_URL / FEEDER1_ID / FEEDER1_KEY not in the environment")
             return
-        host = host.split("://")[-1].strip("/")
-        self.url = f"https://{host}/data/aircraft.json"
-        self.session = requests.Session()
-        self.session.headers.update({"CF-Access-Client-Id": cid, "CF-Access-Client-Secret": key})
         self.eps: dict[str, dict] = {}     # hex -> episode
         self.heard: dict[str, float] = {}  # hex -> feeder's last position time
-        self.paused_until = 0.0
         self.hour = {"polls": 0, "errors": 0, "failed_polls": 0, "missing": 0, "fresher": 0, "silent": 0, "new": 0}
         self.hour_at = time.time()
         log.info("feeder shadow on (feeder 1), episodes in %s", path)
@@ -1000,21 +1188,10 @@ class FeederShadow:
             log.warning("feeder shadow: %s", e)
 
     def fetch(self) -> tuple[float, list] | None:
-        if time.time() < self.paused_until:
-            return None
-        try:
-            r = self.session.get(self.url, timeout=self.TIMEOUT_S)
-            if r.status_code in (401, 403):
-                self.paused_until = time.time() + self.REFUSED_S
-                log.warning("feeder shadow: HTTP %s, paused %d min", r.status_code, self.REFUSED_S // 60)
-                return None
-            r.raise_for_status()
-            d = r.json()
-        except (requests.RequestException, ValueError) as e:
-            self.hour["errors"] += 1
-            log.debug("feeder shadow: %s", type(e).__name__)
-            return None
-        return float(d.get("now") or time.time()), d.get("aircraft") or []
+        errors = self.feeder.errors
+        got = self.feeder.read()
+        self.hour["errors"] += self.feeder.errors - errors
+        return got
 
     def tick(self, monitor: "Monitor", ok: bool) -> None:
         """After each local poll of ours, answered (`ok`) or not. Never raises: the poll loop comes first."""
@@ -1026,7 +1203,13 @@ class FeederShadow:
             log.warning("feeder shadow: %s: %s", type(e).__name__, e)
 
     def _tick(self, monitor: "Monitor", ok: bool) -> None:
-        got = self.fetch()
+        if monitor.feeder is not None:  # merged: the poll's own read (None: no answer), against the aggregators alone
+            got = monitor.feeder_got
+            if got is None:
+                self.hour["errors"] += 1
+            ok = ok and monitor.local_feed != FEEDER
+        else:
+            got = self.fetch()
         h = self.hour
         if not ok:
             h["failed_polls"] += 1
@@ -1178,6 +1361,7 @@ class Track:
     abort_low: float = 0.0   # time of the last low point judged by check_aborted_landing
     flown_cs: str = ""       # a callsign whose flight to / from our airport it has completed (end_leg)
     feed: str = ""           # the provider of its newest report
+    agg_heard: float = 0.0   # time of its newest report from an aggregator (not the private feeder): FEEDER_ONLY_S
     left_home: bool = False  # seen on the ground or low at our airport in this leg (a departure, not just by route)
     rose_home: bool = False  # seen taking off from our airport in this leg: not an arrival, whatever its callsign says
     orig_first: float = -1.0  # an arrival: nm from its origin when first heard in this leg (-1: not yet)
@@ -2208,6 +2392,12 @@ class Monitor:
         self.gs_from = ""         # where trusted_gs took an MLAT report's speed from
         self.local_seen: dict[str, float] = {}  # the last answered local poll: hex -> position time
         self.shadow: FeederShadow | None = None  # set by main() (--feeder-shadow)
+        self.feeder: Feeder | None = None  # set by main() (--feeder): its reports join the local poll
+        self.feeder_got: tuple | None = None  # its answer in this poll (FeederShadow reads it too)
+        self.feeder_count = 0  # aircraft in its last answer (a sudden drop: its glitch, see poll)
+        self.tails: dict[str, dict] = {}  # hex -> the board arrival aviationstack names its aircraft for (AvStack)
+        self.avstack: AvStack | None = None  # set by main() (AVSTACK_KEY)
+        self.avstack_state: dict = {}  # its part of the --state file as read
 
     # ---- remote queries
     def multi_supported(self, prov: str, kind: str, local: list) -> bool | None:
@@ -2408,16 +2598,75 @@ class Monitor:
                 if sf.direction == "ARR" and sf.other == r["at"] and sf.callsigns and sf.callsigns[0][:3] == r["airline"]
                 and id(sf) not in found and -3600 <= sf.ts - now <= ROTATION_WATCH_S]
 
+    def refresh_tails(self) -> None:
+        """aviationstack's answer of the day (AvStack.refresh): hex -> the board arrivals it names that aircraft for."""
+        if not (self.avstack and self.schedule):
+            return
+        if self.avstack.refresh(self.wall(), self.args.airport, self.schedule.tz) or not self.tails:
+            self.tails = {}
+            for e in self.avstack.flights:
+                self.tails.setdefault(e["hex"], []).append(e)
+
+    def tail_flight(self, e: dict, now: float) -> SchedFlight | None:
+        """The board's arrival an aviationstack record names, while its aircraft is worth asking for (TAIL_AHEAD_S before
+        its time to TAIL_AFTER_S after) and no aircraft has been found for it."""
+        if not self.schedule or not -TAIL_AFTER_S <= e["sched"] - now <= TAIL_AHEAD_S + AVSTACK_TOL_S:
+            return None
+        key = flight_key(e["flight"])
+        for sf in self.schedule.flights:
+            if (sf.direction == "ARR" and key in {flight_key(f) for f in (sf.flight, *sf.codeshares)}
+                    and abs(sf.ts - e["sched"]) <= AVSTACK_TOL_S
+                    and -TAIL_AFTER_S <= sf.ts - now <= TAIL_AHEAD_S):
+                if any(t.sched is not None and t.sched.flight == sf.flight and abs(t.sched.ts - sf.ts) < 60
+                       for t in self.tracks.values()):
+                    return None  # (found: on the board's callsign, a learned one, or by its aircraft)
+                return sf
+        return None
+
+    def tail_match(self, t: Track, s: Sample) -> None:
+        """An aircraft aviationstack names for a board arrival (refresh_tails), in the air on a callsign the board does not
+        give, listed to our airport or heading for it, due within ROTATION_ETA_S of that row's time at ROTATION_KT: that
+        flight. Not learned (Wizz's callsigns change from day to day); its earlier legs of the day are left alone."""
+        a = self.args
+        if t.sched is not None or s.on_ground or not t.callsign:
+            return
+        rows = [sf for sf in (self.tail_flight(e, s.t) for e in self.tails.get(t.hex, [])) if sf]
+        if not rows:
+            return
+        try:
+            route = self.standing.route(t.callsign) if self.standing else None
+        except requests.RequestException:
+            route = None
+        if route and route[-1] not in (a.airport, a.icao):
+            return  # (another leg of the day: still watched)
+        toward = s.track is not None and (s.alt or 0) >= ROTATION_MIN_ALT and heading_diff(
+            s.track, bearing(s.lat, s.lon, a.lat, a.lon)) <= ROTATION_TOL
+        if not (route or toward):
+            return
+        eta = s.t + self.dist(s) / ROTATION_KT * 3600
+        sf = min(rows, key=lambda x: abs(x.ts - eta))
+        if abs(sf.ts - eta) > ROTATION_ETA_S:
+            return
+        t.sched = sf
+        reg = next((e["reg"] for e in self.tails[t.hex] if flight_key(e["flight"]) == flight_key(sf.flight)), "")
+        log.info("%s is %s: the aircraft aviationstack names for it%s (%s)", t.label(), sf.route(a.airport),
+                 f" ({reg})" if reg else "", "listed to " + a.airport if route else
+                 f"heading {s.track:.0f} deg, toward {a.airport}")
+
     def rotation_query(self, local_hexes: set, local: list) -> list:
-        """One hex request every ROTATION_ASK_S for the aircraft of watch_rotation that may fly an arrival of ours."""
+        """One hex request every ROTATION_ASK_S for the aircraft of watch_rotation that may fly an arrival of ours, and
+        those aviationstack names for the board's arrivals not found yet (refresh_tails)."""
         now = self.wall()
         for h in [h for h, r in self.rotations.items() if now > r["until"]]:
             log.debug("%s: rotation watch over", h)
             del self.rotations[h]
-        if not self.rotations or self.clock() - self.rotation_at < ROTATION_ASK_S:
+        self.refresh_tails()
+        if not (self.rotations or self.tails) or self.clock() - self.rotation_at < ROTATION_ASK_S:
             return []
         ids = [h for h, r in self.rotations.items() if h not in local_hexes
                and not (h in self.tracks and self.tracks[h].followed) and self.rotation_flights(r, now)]
+        ids += [h for h, es in self.tails.items() if h not in local_hexes and h not in ids
+                and not (h in self.tracks and self.tracks[h].followed) and any(self.tail_flight(e, now) for e in es)]
         if not ids:
             return []
         self.rotation_at = self.clock()
@@ -2680,6 +2929,9 @@ class Monitor:
             self.schedule.refresh_if_due()
 
         self.trace_left = a.trace_per_cycle
+        # the private feeder (--feeder): its own reception, merged into the local circle; it carries the cycle alone
+        # when neither aggregator answers (adsb.lol refused ~2 of 3 polls an hour on 18 Oct 2026, none for 2 h twice)
+        self.feeder_got = self.feeder.read() if self.feeder is not None else None
         # 1) local circle every cycle, top priority - failure here aborts the cycle (after the fallback)
         try:
             server_now, local = self.fetch("point", priority=HIGH, lat=a.lat, lon=a.lon,
@@ -2687,19 +2939,30 @@ class Monitor:
             feed = a.provider
         except requests.RequestException as e:
             got = self.second_feed(e)
-            if got is None:
+            if got is None and self.feeder_got is None:
                 self.fallback(self.watch_list())
                 raise
+            if got is None:
+                if self.local_feed != FEEDER:
+                    log.info("local poll from the private feeder alone (%s: %s)", a.provider, e)
+                got = (self.feeder_got[0], [], FEEDER)
             server_now, local, feed = got
         if feed != self.local_feed and feed == a.provider:
             log.info("local poll from %s again", feed)
         self.local_feed = feed
-        self.local_seen = {}  # hex -> position time in this answer (FeederShadow compares)
+        self.local_seen = {}  # hex -> position time in the aggregator's answer (FeederShadow compares)
         for ac in local:
             if ac.get("lat") is not None and ac.get("hex"):
                 self.local_seen[ac["hex"].lower()] = server_now - float(ac.get("seen_pos", ac.get("seen", 0)) or 0)
+        agg_count = len(local)
+        mine = []
+        if self.feeder_got is not None:
+            mine = self.feeder.fresh(self.feeder_got, lambda h: h not in self.local_seen and not (
+                h in self.tracks and self.tracks[h].actype))
+            local = local + mine
         self.read_mil_list()
-        batches = [(server_now, ac) for ac in local]
+        batches = [(server_now, ac) for ac in local if ac.get("_feed") != FEEDER]
+        batches += [(self.feeder_got[0], ac) for ac in mine]
         local_hexes = {(ac.get("hex") or "").lower() for ac in local}
 
         # 2) follow known TLV flights wherever they are (own, slower cadence)
@@ -2714,9 +2977,23 @@ class Monitor:
 
         # merge (same aircraft may come from several queries) and update tracks
         latest: dict[str, tuple] = {}
+        agg_heard: dict[str, float] = {}
         for now_r, ac in batches:
             parsed = parse_aircraft(ac, now_r)
-            if parsed and (parsed[0] not in latest or parsed[1] > latest[parsed[0]][0][1]):
+            if not parsed:
+                continue
+            if ac.get("_feed") != FEEDER:
+                agg_heard[parsed[0]] = max(agg_heard.get(parsed[0], 0.0), parsed[1])
+            prev = latest.get(parsed[0])
+            if prev is None:
+                latest[parsed[0]] = (parsed, ac)
+            elif FEEDER in (ac.get("_feed"), prev[1].get("_feed")) and ac.get("_feed") != prev[1].get("_feed"):
+                # the feeder and an aggregator: the newer position, heard at the later of the two (a message after
+                # a position may carry nothing but the time it was heard)
+                heard = max(parsed[1], prev[0][1])
+                parsed, ac = (parsed, ac) if parsed[2].t > prev[0][2].t else (prev[0], prev[1])
+                latest[parsed[0]] = ((parsed[0], heard, parsed[2]), ac)
+            elif parsed[1] > prev[0][1]:
                 latest[parsed[0]] = (parsed, ac)
 
         updated: list[tuple[Track, Sample | None, dict]] = []
@@ -2730,6 +3007,7 @@ class Monitor:
             t.category = ac.get("category") or t.category
             t.military = t.military or bool(int(ac.get("dbFlags") or 0) & 1) or hexid in self.mil_hexes
             t.feed = ac.get("_feed", "")
+            t.agg_heard = max(t.agg_heard, agg_heard.get(hexid, 0.0))
             t.last_msg = max(t.last_msg, msg_t)
             if self.schedule and t.callsign in self.schedule.by_callsign:
                 t.sched = None if t.callsign == t.flown_cs else self.schedule.by_callsign[t.callsign]
@@ -2738,6 +3016,8 @@ class Monitor:
                     got[1] = self.wall()  # (still flying it: kept LEARNED_KEEP_S from now)
             if hexid in self.rotations:
                 self.rotation_match(t, sample)
+            if hexid in self.tails:
+                self.tail_match(t, sample)
             prev = t.last
             # GPS and barometric altitude differ by hundreds of feet (4XDAN, 10 Oct 2026: +500-600):
             # a GPS value among barometric ones is a fake step. Converted with this aircraft's offset.
@@ -2760,7 +3040,8 @@ class Monitor:
                        and not t.lost and self.clock() - self.traces.get(t.hex, (-1e9,))[0] >= 30])
 
         for t, prev, ac, spoofed in updated:
-            if t.hex in self.rotations and not t.followed and t.hex not in local_hexes:
+            if (t.hex in self.rotations or t.hex in self.tails and t.sched is None) and not t.followed \
+                    and t.hex not in local_hexes:
                 continue  # asked for only to see its next callsign: no checks on a flight that may not be ours
             self.check_track(t, prev, ac, spoofed, server_now)
         self.aero_alerts()
@@ -2773,23 +3054,34 @@ class Monitor:
         self.telegram_followups(server_now)
 
         # Don't declare mass "lost contact" after a feed glitch; after our own outage, see check_lost.
-        feed_ok = not (self.last_count > 10 and len(local) < 0.5 * self.last_count)
-        if not feed_ok:
-            log.warning("feed returned %d aircraft (was %d) - skipping lost-contact check",
-                        len(local), self.last_count)
-        self.ok_polls.append((server_now, feed))
+        # Each feed against its own last answer (the feeder hears a fraction of the aggregator's circle).
+        feed_ok = True
+        if feed != FEEDER:
+            if self.last_count > 10 and agg_count < 0.5 * self.last_count:
+                feed_ok = False
+                log.warning("feed returned %d aircraft (was %d) - skipping lost-contact check",
+                            agg_count, self.last_count)
+            self.ok_polls.append((server_now, feed))
+            self.last_count = agg_count
+        if self.feeder_got is not None:
+            if self.feeder_count > 10 and len(mine) < 0.5 * self.feeder_count:
+                feed_ok = False
+                log.warning("the private feeder returned %d aircraft (was %d) - skipping lost-contact check",
+                            len(mine), self.feeder_count)
+            self.ok_polls.append((self.feeder_got[0], FEEDER))
+            self.feeder_count = len(mine)
         if feed_ok:
             self.check_lost(server_now)
         self.end_spoofs(server_now)
 
-        self.last_ok, self.last_count = server_now, len(local)
+        self.last_ok = server_now
         self.share_callsigns(server_now)
         # (one that has flown its callsign's leg is kept as long: KL462 TLV -> OTP landed at Bucharest, was dropped
         # 30 min later, then found again on its way on to Amsterdam as KL462 bound for OTP - a DIVERSION, 27 Oct 2026)
         self.tracks = {h: t for h, t in self.tracks.items()
                        if server_now - t.last_msg < (3 * 3600 if t.followed or t.flown_cs else 1800)}
         b = self.http.budget(PROVIDERS[a.provider]["base"].split("/")[2])
-        self.stats = {"local": len(local), "followed": sum(t.followed for t in self.tracks.values()),
+        self.stats = {"local": len(local_hexes - {""}), "followed": sum(t.followed for t in self.tracks.values()),
                       "hot": sum(t.followed and self.hot(t) for t in self.tracks.values()),
                       "followed_lost": sum(t.followed and t.follow_why == "LOST_CONTACT" for t in self.tracks.values()),
                       "scheduled": len(self.schedule.flights) if self.schedule else 0,
@@ -3182,8 +3474,9 @@ class Monitor:
         a, token = self.args, os.getenv("RELAY_TOKEN")
         if not (a.share_url and token) or now - self.shared_at < a.share_interval:
             return
-        pairs = {t.callsign.strip().upper(): [t.hex, round(t.last_msg)] for t in self.tracks.values()
-                 if t.callsign.strip() and t.last_msg > self.shared_at}
+        # (as an aggregator heard them: the private feeder's reception is not passed on)
+        pairs = {t.callsign.strip().upper(): [t.hex, round(t.agg_heard)] for t in self.tracks.values()
+                 if t.callsign.strip() and t.agg_heard > self.shared_at}
         self.shared_at = now
         # the flight board's alerts ride on the same POST: no KV write of their own (worker 0.7 keeps a day of them;
         # an older worker skips the "_alerts" key like any non-callsign). Kept for the next try when the POST fails.
@@ -3712,7 +4005,8 @@ class Monitor:
                            "learned": {k: v for k, v in (self.schedule.learned if self.schedule else {}).items()
                                        if now - v[1] <= LEARNED_KEEP_S},
                            "sightings": {k: v for k, v in (self.schedule.sightings if self.schedule else {}).items()
-                                         if now - v[2] <= LEARNED_KEEP_S}}, f)
+                                         if now - v[2] <= LEARNED_KEEP_S},
+                           "avstack": self.avstack.state() if self.avstack else self.avstack_state}, f)
             os.replace(tmp, self.args.state)
             log.debug("state of %d aircraft written to %s", len(tracks), self.args.state)
         except OSError as e:
@@ -3743,6 +4037,9 @@ class Monitor:
                 self.tracks[h] = t
                 n += 1
             self.rotations.update(data.get("rotations", {}))
+            self.avstack_state = data.get("avstack") or {}  # (kept when run without the key: its count this month)
+            if self.avstack:
+                self.avstack.load(self.avstack_state)
             if self.schedule:
                 self.schedule.learned.update({k: v for k, v in data.get("learned", {}).items()
                                               if now - v[1] <= LEARNED_KEEP_S})
@@ -5014,7 +5311,7 @@ class Monitor:
         by_feed: dict[str, list[float]] = {}
         for pt, pf in self.ok_polls:
             by_feed.setdefault(pf, []).append(pt)
-        every = sorted(pt for pt, _ in self.ok_polls)
+        every = sorted(pt for pt, pf in self.ok_polls if pf != FEEDER)  # (the feeder: inside the circle only)
         for t in self.tracks.values():
             s = t.last
             if t.lost or not s or s.on_ground or len(t.samples) < 3:
@@ -5047,6 +5344,15 @@ class Monitor:
             kind = self.classify(t)[0]
             apt, ad = nearest_airport(s.lat, s.lon, exclude=(a.airport,))
             plunging = self.plunging(t)
+            if (t.feed == FEEDER and silent >= a.lost_after and t.last_msg - t.agg_heard > FEEDER_ONLY_S
+                    and not plunging and not self.hot(t)):
+                # heard lately by the private feeder alone (low near TLV, or far): its silence is that one
+                # antenna's horizon, as an unfollowed aircraft leaving the circle is the aggregators'
+                t.lost, t.lost_alerted = True, False
+                log.info("%s silent %.0fs, last heard by the private feeder alone (%s) - its horizon, not alerted",
+                         t.label(), silent, f"an aggregator {t.last_msg - t.agg_heard:.0f}s before"
+                         if t.agg_heard else "never by an aggregator")
+                continue
             if (s.alt or 0) < a.lost_min_alt and not plunging:
                 # A TLV arrival vanishing low and far from TLV is most likely landing elsewhere
                 # (low-altitude coverage is poor, so we may never see it on the ground).
@@ -5663,6 +5969,9 @@ def parse_args(argv=None):
     g.add_argument("--feeder-shadow", default="",
                    help="read the private feeder (FEEDER1_URL / _ID / _KEY in the environment) after each local poll, "
                         "in shadow: append what it heard that our feeds did not to this JSONL file; changes no alert")
+    g.add_argument("--feeder", action="store_true",
+                   help="merge the private feeder's reports (FEEDER1_URL / _ID / _KEY in the environment) into the local "
+                        "poll; it carries the cycle alone when the aggregators do not answer")
     g.add_argument("--trace-per-cycle", type=int, default=3, help="at most this many trace requests per poll")
     g.add_argument("--standing-data",
                    help="VRS standing-data repository (URL or local checkout) for routes and airports "
@@ -5858,6 +6167,8 @@ def main(argv=None) -> None:
     logging.basicConfig(level=min(console, logging.INFO if args.log_file else console),
                         format="%(asctime)s %(levelname)-7s %(message)s", datefmt="%H:%M:%S")
     logging.getLogger().handlers[0].setLevel(console)
+    # urllib3's debug lines (-vv) carry each request's URL: aviationstack's key is in its query string
+    logging.getLogger("urllib3.connectionpool").addFilter(redact_keys)
     if args.log_file:
         fh = logging.FileHandler(args.log_file, encoding="utf-8")
         fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%Y-%m-%d %H:%M:%S"))
@@ -5877,9 +6188,19 @@ def main(argv=None) -> None:
                 airline_map.update({k.upper(): v.upper() for k, v in json.load(f).items()})
         schedule = Schedule(http, airline_map, args.schedule_refresh, args.schedule_window)
     monitor = Monitor(args, Notifier(args, http), http, schedule)
+    if os.environ.get("AVSTACK_KEY", "").strip() and schedule:
+        monitor.avstack = AvStack(http, os.environ["AVSTACK_KEY"].strip())
+        log.info("aviationstack on: the aircraft of the board's %s arrivals, once a day", "/".join(AVSTACK_AIRLINES))
     monitor.load_state()
+    feeder = Feeder() if args.feeder or args.feeder_shadow else None
+    if args.feeder:
+        if feeder.on:
+            monitor.feeder = feeder
+            log.info("private feeder on: merged into the local poll")
+        else:
+            log.info("private feeder off: FEEDER1_URL / FEEDER1_ID / FEEDER1_KEY not in the environment")
     if args.feeder_shadow:
-        monitor.shadow = FeederShadow(args.feeder_shadow, args.lat, args.lon)
+        monitor.shadow = FeederShadow(args.feeder_shadow, args.lat, args.lon, feeder)
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     log.info("watching %s (%s) r=%.0fnm every %.0fs via %s, code %s",

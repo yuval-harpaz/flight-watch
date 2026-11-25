@@ -58,6 +58,22 @@ class Problems(unittest.TestCase):
         items += [(m, "INFO    local poll: adsb.fi failed too (Read timed out)") for m in range(24, -1, -1)]
         self.assertIn("no_polls", self.check(items))
 
+    def test_the_feeder_alone(self):
+        """The private feeder carries the cycle (status lines go on) while neither aggregator answers."""
+        items = healthy() + [(30, "INFO    local poll from the private feeder alone (adsb.lol: 429 Client Error)")]
+        self.assertIn("no_polls", self.check(items))
+        self.assertNotIn("no_polls", self.check(items + [(5, "INFO    local poll from adsb.fi (adsb.lol: 429)")]))
+        self.assertNotIn("no_polls", self.check(healthy() + [(10, items[-1][1])]))
+
+    def test_feeder_silent_and_aviationstack_failing(self):
+        line = "INFO    feeder shadow, last hour: {} reads ({} failed), 0 of our local polls failed; reports missing ..."
+        self.assertIn("feeder", self.check(healthy() + [(m, line.format(0, 360)) for m in (150, 90, 30)]))
+        self.assertIn("feeder", self.check(healthy() + [(m, line.format(0, 0)) for m in (150, 90, 30)]))  # (refused)
+        self.assertNotIn("feeder", self.check(healthy() + [(m, line.format(n, 0)) for m, n in ((150, 0), (90, 3), (30, 0))]))
+        items = healthy() + [(100, f"WARNING aviationstack {c}: HTTP 429 usage_limit_reached") for c in ("W4", "W6", "W9")]
+        self.assertIn("avstack", self.check(items))
+        self.assertNotIn("avstack", self.check(healthy() + items[-1:]))
+
     def test_empty_answers(self):
         self.assertIn("empty", self.check(healthy(local=0)))
 

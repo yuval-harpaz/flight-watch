@@ -38,6 +38,7 @@ STARVED = 6
 START_RUNS = 4         # starts within an hour: crashing again and again
 SQUAWK_DEAD_MIN = 60
 DISK_MIN_GB = 1.0
+AVSTACK_AIRLINES = ("W4", "W6", "W9")  # flight_watch.AVSTACK_AIRLINES: one request each a day
 
 TS = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) ")
 
@@ -109,6 +110,14 @@ def problems(now: datetime, lines: list[tuple[datetime, str]], alive: bool, free
                         f"{((now - board).total_seconds() / 60) if board else run_min:.0f} min: no discovery of "
                         "TLV flights far away.")
 
+    # the private feeder (--feeder) keeps the cycle going without them: a status line every poll, its circle ~50 nm
+    alone = last(r"local poll from the private feeder alone")
+    agg_back = max([t for t in (last(r"local poll from adsb\.lol again"), last(r"local poll from adsb\.fi \(")) if t],
+                   default=None)
+    if alone and (agg_back is None or agg_back < alone) and (now - alone).total_seconds() / 60 >= NO_POLL_MIN:
+        out["no_polls"] = (f"Neither adsb.lol nor adsb.fi has answered a local poll for "
+                           f"{(now - alone).total_seconds() / 60:.0f} min: the circle comes from the private feeder alone "
+                           "(~50 nm low down).")
     on_fi, back = last(r"local poll from adsb\.fi \("), last(r"local poll from adsb\.lol again")
     if on_fi and (back is None or back < on_fi) and (now - on_fi).total_seconds() / 3600 >= ADSBLOL_LOCAL_H:
         out["adsblol_local"] = (f"adsb.lol has not answered a local poll for {(now - on_fi).total_seconds() / 3600:.0f} h: "
@@ -142,10 +151,15 @@ def problems(now: datetime, lines: list[tuple[datetime, str]], alive: bool, free
     n = len([t for t in starts if (now - t).total_seconds() <= 3600])
     if n >= START_RUNS:
         out["restarts"] = f"The monitor started {n} times in the last hour: it may be crashing."
+    # "N reads (M failed)": N the answered reads (none while it refuses us: no failure counted then either)
     shadow = [line for t, line in lines if "feeder shadow, last hour:" in line][-3:]
     reads = [re.search(r"(\d+) reads \((\d+) failed\)", line) for line in shadow]
-    if len(reads) == 3 and all(m and int(m.group(1)) > 0 and m.group(1) == m.group(2) for m in reads):
-        out["feeder"] = "The private feeder (shadow) has not answered for 3 h."
+    if len(reads) == 3 and all(m and int(m.group(1)) == 0 for m in reads):
+        out["feeder"] = "The private feeder has not answered for 3 h."
+    n = count(r"WARNING aviationstack ", 24)
+    if n >= len(AVSTACK_AIRLINES):
+        out["avstack"] = (f"aviationstack failed {n} times today: the board's Wizz arrivals are not looked for by their "
+                          "aircraft.")
     if free_gb < DISK_MIN_GB:
         out["disk"] = f"Only {free_gb:.1f} GB free on the disk."
     return out

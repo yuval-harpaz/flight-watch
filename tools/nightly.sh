@@ -66,7 +66,7 @@ mkdir -p reviews
 exec >>"reviews/$D.nightly.log" 2>&1
 echo "=== $(date -u '+%F %T') UTC"
 # the monitor's variables: ~/.bashrc stops early when not interactive, so only its export lines are read
-eval "$(grep -E '^export (TELEGRAM_[A-Z_]+|RELAY_TOKEN|SENDTO|FEEDER1_[A-Z]+)=' ~/.bashrc)"
+eval "$(grep -E '^export (TELEGRAM_[A-Z_]+|RELAY_TOKEN|SENDTO|FEEDER1_[A-Z]+|AVSTACK_KEY)=' ~/.bashrc)"
 NODE=$(ls -d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | tail -1)  # the page tests run flightboard.js in node
 export PATH="$HOME/.local/bin:${NODE:+$NODE:}/usr/local/bin:/usr/bin:/bin"
 
