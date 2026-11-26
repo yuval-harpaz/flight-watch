@@ -2398,6 +2398,7 @@ class Monitor:
         self.feeder_got: tuple | None = None  # its answer in this poll (FeederShadow reads it too)
         self.feeder_count = 0  # aircraft in its last answer (a sudden drop: its glitch, see poll)
         self.tails: dict[str, dict] = {}  # hex -> the board arrival aviationstack names its aircraft for (AvStack)
+        self.tail_found: set = set()  # "<flight>@<board time>" found by its aircraft (tail_match): learn_at_home's line
         self.avstack: AvStack | None = None  # set by main() (AVSTACK_KEY)
         self.avstack_state: dict = {}  # its part of the --state file as read
 
@@ -2569,7 +2570,8 @@ class Monitor:
             mine = [p for p in self.home_landings if p["flight"] == sf.flight and abs(p["t"] - sf.ts) <= 3 * LEARN_TOL_S]
             if mine:
                 log.info("board arrival %s from %s, landed %s: found as %s (%s)", sf.flight, sf.other, when,
-                         mine[0]["cs"], "learned callsign" if mine[0]["learned"] else "board callsign")
+                         mine[0]["cs"], "learned callsign" if mine[0]["learned"] else
+                         "aviationstack's aircraft" if mine[0].get("tail") else "board callsign")
                 continue
             air = sf.callsigns[0][:3] if sf.callsigns else ""
             near = [p for p in self.home_landings if not p["flight"] and p["cs"][:3] == air
@@ -2632,7 +2634,10 @@ class Monitor:
         Not when this leg took off more than DIVERTED_NM from the board's origin: another leg, or another aircraft
         flies the row. aviationstack named 9H-WDN for W61559 WAW -> TLV (26 Nov 2026), which flew Warsaw - Tallinn -
         Warsaw: out of Tallinn heading 180 deg it was "toward TLV", 2.7 h late at 450 kt (then within ROTATION_ETA_S),
-        and its landing back at Warsaw a DIVERSION on Telegram; W61559 landed at TLV on another aircraft."""
+        and its landing back at Warsaw a DIVERSION on Telegram; W61559 landed at TLV on another aircraft.
+        Route data listing the callsign elsewhere is not used: Wizz reuses its callsigns from day to day. On 26 Nov 2026
+        4 of the 9 aircraft aviationstack named right were left alone for it - WMT389 (W43257 OTP -> TLV) listed
+        LIMJ-LATI, WZZ2SQ LRCV-LIRA, WZZ314 EHEH-LWSK, WUK79 LRBC-EGGW."""
         a = self.args
         if t.sched is not None or s.on_ground or not t.callsign:
             return
@@ -2655,8 +2660,7 @@ class Monitor:
             route = self.standing.route(t.callsign) if self.standing else None
         except requests.RequestException:
             route = None
-        if route and route[-1] not in (a.airport, a.icao):
-            return  # (another leg of the day: still watched)
+        route = route if route and route[-1] in (a.airport, a.icao) else None
         toward = s.track is not None and (s.alt or 0) >= ROTATION_MIN_ALT and heading_diff(
             s.track, bearing(s.lat, s.lon, a.lat, a.lon)) <= ROTATION_TOL
         if not (route or toward):
@@ -2666,6 +2670,7 @@ class Monitor:
         if abs(sf.ts - eta) > TAIL_ETA_S:
             return
         t.sched = sf
+        self.tail_found.add(f"{sf.flight}@{sf.ts:.0f}")
         reg = next((e["reg"] for e in self.tails[t.hex] if flight_key(e["flight"]) == flight_key(sf.flight)), "")
         log.info("%s is %s: the aircraft aviationstack names for it%s (%s)", t.label(), sf.route(a.airport),
                  f" ({reg})" if reg else "", "listed to " + a.airport if route else
@@ -3120,6 +3125,7 @@ class Monitor:
             self.home_landings.append({
                 "cs": t.callsign, "t": t.last.t, "flight": sf.flight if sf else "",
                 "learned": bool(sf and self.schedule and (self.schedule.learned.get(sf.flight) or [""])[0] == t.callsign),
+                "tail": bool(sf) and f"{sf.flight}@{sf.ts:.0f}" in self.tail_found,
                 "origin": route.split("-")[0] if route else ""})
         if kind == "ARR" and d <= 15:  # (where its next flight may well go back to: back_to_prev)
             t.prev_from = self.other_end(t, "ARR")

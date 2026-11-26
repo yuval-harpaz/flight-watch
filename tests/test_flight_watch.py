@@ -5009,11 +5009,14 @@ class AvStackTests(unittest.TestCase):
         t = self.fly_in()
         self.assertIsNone(t.sched)
 
-    def with_origin_known(self, ground_at):
+    def with_origin_known(self, ground_at, listed=None):
         """W61559 BUD -> TLV due in 3 h (the test files' Budapest), its aircraft on the ground at `ground_at`,
-        then climbing toward TLV."""
+        then climbing toward TLV; its callsign WZZ578L `listed` in the route data."""
         mon, feed, clock, alerts = make(["--rate", "600", "--rate-max", "6000"], with_schedule=True)
         feed.files = dict(ROUTE_FILES)
+        if listed:
+            feed.files["routes/schema-01/W/WZZ-5.csv"] = ("Callsign,Code,Number,AirlineCode,AirportCodes\n"
+                                                          f"WZZ578L,WZZ,578L,WZZ,{listed}\n")
         mon.schedule.load([board_row("W6", "1559", "A", local_time(clock, 3), "BUD")],
                           datetime.fromtimestamp(clock(), mon.schedule.tz))
         mon.standing.airport("LHBP")  # (its airport file read, as the route data does in a run)
@@ -5030,6 +5033,11 @@ class AvStackTests(unittest.TestCase):
         """9H-WDN took off at Tallinn, 340 nm from Warsaw, and its landing back at Warsaw was a DIVERSION."""
         self.assertEqual(self.with_origin_known((47.44, 19.26)).sched.flight, "W61559")  # out of Budapest: it is
         self.assertIsNone(self.with_origin_known((44.57, 26.09)).sched)  # out of Bucharest, 300 nm away: not
+
+    def test_route_data_listing_its_callsign_elsewhere_is_not_used(self):
+        """Wizz reuses callsigns daily: WMT389 (W43257 OTP -> TLV, 26 Nov 2026) was listed LIMJ-LATI and left alone."""
+        mon_t = self.with_origin_known((47.44, 19.26), listed="LIMJ-LATI")
+        self.assertEqual(mon_t.sched.flight, "W61559")
 
     def test_once_a_day_and_at_most_the_monthly_cap_and_the_key_is_never_logged(self):
         av = self.mon.avstack
