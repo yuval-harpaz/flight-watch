@@ -207,7 +207,7 @@ new page with the old script failed ("FB.blocked is not a function"); a test fai
   `AVSTACK_MONTH_MAX` (90) a calendar month; the key in the URL (the API's way), never logged. `Monitor.tails`: hex -> those board
   arrivals; asked for by hex with the rotations (`rotation_query`) from `TAIL_AHEAD_S` (8 h) before the row's time to
   `TAIL_AFTER_S` after, while no aircraft was found for it; in the air on a callsign the board does not give, listed to TLV or heading
-  for it, due within `ROTATION_ETA_S` (`tail_match`): that flight (`t.sched`), not learned (Wizz's callsigns change daily). Its
+  for it, due within `TAIL_ETA_S` (90 min; `tail_match`): that flight (`t.sched`), not learned (Wizz's callsigns change daily). Not when this leg took off more than `DIVERTED_NM` from the board's origin (26 Nov 2026): 9H-WDN, named for W61559 WAW -> TLV, flew Warsaw - Tallinn - Warsaw; out of Tallinn heading 180 deg it was "toward TLV" (2.7 h late at 450 kt, inside the 3 h then allowed) and its landing back at Warsaw a DIVERSION on Telegram, while W61559 landed at TLV on another aircraft. Its
   earlier legs of the day are left alone, unchecked. Cost: an aircraft swap after 02:00 UTC is not seen (the wrong hex never matches).
   The other misses are left to `learn_at_home` (airlines that keep their callsigns).
 - **airplanes.live** became feeder-only in 2026 and returns **HTTP 403**. Do not make it a

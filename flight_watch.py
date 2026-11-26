@@ -1058,6 +1058,8 @@ AVSTACK_MONTH_MAX = 90  # requests a calendar month at most (the free plan: 100)
 AVSTACK_TOL_S = 3 * 3600  # its scheduled arrival within this of the board row's time: the same flight
 TAIL_AHEAD_S = 8 * 3600   # its aircraft asked for by hex from this long before the board's time ...
 TAIL_AFTER_S = 3600       # ... until this long after it
+TAIL_ETA_S = 5400         # its arrival at ROTATION_KT within this of the board row's time (estimated: the board's
+#                           latest), tighter than a rotation's ROTATION_ETA_S - it is in the air, the board is current
 
 
 class AvStack:
@@ -2625,14 +2627,30 @@ class Monitor:
 
     def tail_match(self, t: Track, s: Sample) -> None:
         """An aircraft aviationstack names for a board arrival (refresh_tails), in the air on a callsign the board does not
-        give, listed to our airport or heading for it, due within ROTATION_ETA_S of that row's time at ROTATION_KT: that
-        flight. Not learned (Wizz's callsigns change from day to day); its earlier legs of the day are left alone."""
+        give, listed to our airport or heading for it, due within TAIL_ETA_S of that row's time at ROTATION_KT: that
+        flight. Not learned (Wizz's callsigns change from day to day); its earlier legs of the day are left alone.
+        Not when this leg took off more than DIVERTED_NM from the board's origin: another leg, or another aircraft
+        flies the row. aviationstack named 9H-WDN for W61559 WAW -> TLV (26 Nov 2026), which flew Warsaw - Tallinn -
+        Warsaw: out of Tallinn heading 180 deg it was "toward TLV", 2.7 h late at 450 kt (then within ROTATION_ETA_S),
+        and its landing back at Warsaw a DIVERSION on Telegram; W61559 landed at TLV on another aircraft."""
         a = self.args
         if t.sched is not None or s.on_ground or not t.callsign:
             return
         rows = [sf for sf in (self.tail_flight(e, s.t) for e in self.tails.get(t.hex, [])) if sf]
         if not rows:
             return
+        prev = t.last
+        dep = t.takeoff_pos or ((prev.lat, prev.lon) if prev is not None and prev.on_ground
+                                and haversine_nm(prev.lat, prev.lon, s.lat, s.lon) <= TAKEOFF_POS_NM else None)
+        if dep and self.standing:
+            def elsewhere(sf):
+                orig = self.standing.airport_by_iata(sf.other)
+                return bool(orig) and haversine_nm(dep[0], dep[1], orig[1], orig[2]) > DIVERTED_NM
+            rows = [sf for sf in rows if not elsewhere(sf)]
+            if not rows:
+                log.debug("%s took off away from the origin of the board's arrival aviationstack names it for",
+                          t.label())
+                return
         try:
             route = self.standing.route(t.callsign) if self.standing else None
         except requests.RequestException:
@@ -2645,7 +2663,7 @@ class Monitor:
             return
         eta = s.t + self.dist(s) / ROTATION_KT * 3600
         sf = min(rows, key=lambda x: abs(x.ts - eta))
-        if abs(sf.ts - eta) > ROTATION_ETA_S:
+        if abs(sf.ts - eta) > TAIL_ETA_S:
             return
         t.sched = sf
         reg = next((e["reg"] for e in self.tails[t.hex] if flight_key(e["flight"]) == flight_key(sf.flight)), "")

@@ -5003,6 +5003,34 @@ class AvStackTests(unittest.TestCase):
         self.assertEqual(kinds(self.alerts), [])
         self.assertIn("4d241f", self.mon.tails)
 
+    def test_too_late_for_the_board_time_is_not_that_flight(self):
+        """9H-WDN (named for W61559 WAW -> TLV, 26 Nov 2026) out of Tallinn heading 180 deg: 2.7 h late at 450 kt."""
+        self.clock.t -= 2 * 3600  # the row is due 3.5 h from here; ~330 nm out arrives in 0.7 h
+        t = self.fly_in()
+        self.assertIsNone(t.sched)
+
+    def with_origin_known(self, ground_at):
+        """W61559 BUD -> TLV due in 3 h (the test files' Budapest), its aircraft on the ground at `ground_at`,
+        then climbing toward TLV."""
+        mon, feed, clock, alerts = make(["--rate", "600", "--rate-max", "6000"], with_schedule=True)
+        feed.files = dict(ROUTE_FILES)
+        mon.schedule.load([board_row("W6", "1559", "A", local_time(clock, 3), "BUD")],
+                          datetime.fromtimestamp(clock(), mon.schedule.tz))
+        mon.standing.airport("LHBP")  # (its airport file read, as the route data does in a run)
+        mon.tails = {"4d24ab": [{"flight": "W61559", "sched": mon.schedule.flights[0].ts, "hex": "4d24ab", "reg": ""}]}
+        lat, lon = ground_at
+        trk = fw.bearing(lat, lon, *TLV)
+        fly(mon, feed, clock, "4d24ab", [dict(lat=lat, lon=lon, alt_baro="ground", gs=5, track=trk)] * 3,
+            local=False, flight="WZZ578L", r="9H-WDN", t="A21N")
+        fly(mon, feed, clock, "4d24ab", path(lat, lon, [trk] * 6, list(range(4000, 16000, 2000)), gs=300),
+            local=False, flight="WZZ578L", r="9H-WDN", t="A21N")
+        return mon.tracks["4d24ab"]
+
+    def test_taking_off_away_from_the_board_origin_is_not_that_flight(self):
+        """9H-WDN took off at Tallinn, 340 nm from Warsaw, and its landing back at Warsaw was a DIVERSION."""
+        self.assertEqual(self.with_origin_known((47.44, 19.26)).sched.flight, "W61559")  # out of Budapest: it is
+        self.assertIsNone(self.with_origin_known((44.57, 26.09)).sched)  # out of Bucharest, 300 nm away: not
+
     def test_once_a_day_and_at_most_the_monthly_cap_and_the_key_is_never_logged(self):
         av = self.mon.avstack
         with self.assertLogs(fw.log, "INFO") as logs:
