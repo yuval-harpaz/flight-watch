@@ -95,9 +95,17 @@ meanwhile (it may not be ours). Airborne on a new callsign listed to our airport
 it above 3,000 ft, it is the board's arrival due nearest its time at 450 kt (within 3 h); listed elsewhere, or not heading here
 `CLIMB_OUT_S` after take-off, it is dropped (A6-AEO: EY596 TLV -> AUH, then ETD238 to Bangalore). The callsign is learned for
 that board flight (`Schedule.learned`, in `--state`, kept `LEARNED_KEEP_S` 14 days since last flown) and searched with the
-board's own: they stick (ETD3QF was EY599 every night of 19-25 Nov 2026, on five aircraft). Cost: one that left on its
-departure routing toward TLV and flies elsewhere, with no route data, is taken for the arrival and its turn away is an
-OFF_COURSE.
+board's own: they stick (ETD3QF was EY599 every night of 19-25 Nov 2026, on five aircraft).
+**A guess until near** (`Track.guess`, `Monitor.check_guess`, `ROTATION_DETOUR`; 27 Nov 2026, the owner's choice): A6-BLT flew ETD75C
+TLV -> AUH, then ETD90Y AUH -> MUC (no route data) heading 319 deg with TLV at 298: taken for EY609 and learned at once, 4 OFF_COURSE
+and a DIVERSION at Munich on Telegram, while discovery no longer searched the real ETD609 (it landed at TLV unseen by us). Now a
+rotation's callsign is learned only once the aircraft is within `--radius` of our airport; until then, and for a match on a learned
+callsign, it is dropped with no alert (the callsign unlearned) once board origin -> aircraft -> our airport is longer than 1.25 x the
+straight line (ETD90Y: 1.24 at Mosul, 1.58 at its first OFF_COURSE) or the board's own callsign is found on another aircraft, unless in
+an emergency; discovery goes on searching the board's callsign meanwhile. On a detour route the ratio at any point is at most the
+route's own, so a real arrival within 1.25 x is never dropped; EY599's turn-backs stay near 1.0 and still alert. Cost: a real arrival on
+such a callsign flying a wider detour (or a far diversion off its way) is no longer taken for the board's flight; one that turns away
+while still within 1.25 is OFF_COURSE as before.
 **Learned at TLV too** (`Monitor.learn_at_home`, `Schedule.sighting`; the owner's choice, 25 Nov 2026: in the git-ignored state
 file, no worker): `LEARN_WAIT_S` (25 min) after a board arrival landed (the board keeps 3 h of landed rows, `Schedule.landed`), an
 airline-callsign aircraft that landed here within `LEARN_TOL_S` (10 min) on a callsign of its own is that flight's, when it is the

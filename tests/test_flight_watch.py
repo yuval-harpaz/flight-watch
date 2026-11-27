@@ -1633,7 +1633,7 @@ class RotationTests(unittest.TestCase):
     lands there; a new callsign heading for TLV is the board's arrival from there."""
     AUH = (24.433, 54.651)
 
-    def run_case(self, out_track):
+    def run_case(self, out_track, then=None):
         mon, feed, clock, alerts = with_board([board_row("EY", "608", "D", local_time(mon_clock(), -3.2), "AUH"),
                                                board_row("EY", "599", "A", local_time(mon_clock(), 3), "AUH")])
         ident = dict(flight="ETD608", r="A6-AEB", t="A321")
@@ -1655,8 +1655,11 @@ class RotationTests(unittest.TestCase):
         t = mon.tracks["8963aa"]
         if out_track != 305:
             return mon, t, alerts
-        # 180 nm out it turns back to Abu Dhabi
         lat, lon = climb[-1]["lat"], climb[-1]["lon"]
+        if then:
+            fly(mon, feed, clock, "8963aa", path(lat, lon, *then), local=False, **ident)
+            return mon, t, alerts
+        # 180 nm out it turns back to Abu Dhabi
         tracks = [305] * 60 + [305 - 15 * i for i in range(1, 12)] + [125] * 40
         fly(mon, feed, clock, "8963aa", path(lat, lon, tracks, [29000] * len(tracks)), local=False, **ident)
         return mon, t, alerts
@@ -1666,9 +1669,48 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(t.sched.flight, "EY599")
         self.assertTrue(t.followed)
         self.assertNotIn("8963aa", mon.rotations)
-        self.assertEqual(mon.schedule.by_callsign["ETD3QF"].flight, "EY599")
-        self.assertEqual(mon.schedule.learned["EY599"][0], "ETD3QF")
         self.assertIn("OFF_COURSE", kinds(alerts))
+        self.assertNotIn("EY599", mon.schedule.learned)  # (never near TLV: a guess, not learned)
+
+    def test_learned_once_near_us(self):
+        n = 820  # (on to within --radius of TLV)
+        mon, t, alerts = self.run_case(305, ([295] * n, [36000] * n))
+        self.assertEqual(t.sched.flight, "EY599")
+        self.assertEqual(t.guess, "")
+        self.assertEqual(mon.schedule.learned["EY599"][0], "ETD3QF")
+        self.assertEqual(mon.schedule.by_callsign["ETD3QF"].flight, "EY599")
+
+    def test_toward_us_at_first_then_elsewhere(self):
+        """A6-BLT flew ETD75C TLV -> AUH, then ETD90Y AUH -> MUC, heading 319 deg out of the Gulf with TLV at 298: taken
+        for EY609, learned, 4 OFF_COURSE and a DIVERSION at Munich on Telegram (27 Nov 2026). Off the way from Abu Dhabi
+        to TLV it is dropped before any alert, and nothing is learned."""
+        n = 900
+        mon, t, alerts = self.run_case(305, ([330] * n, [36000] * n))
+        self.assertIsNone(t.sched)
+        self.assertFalse(t.followed)
+        self.assertNotIn("EY599", mon.schedule.learned)
+        self.assertEqual(kinds(alerts), [])
+
+    def test_wrong_learned_callsign_unlearned(self):
+        """ETD90Y saved as EY609's callsign: flying off the way from Abu Dhabi it is unlearned, with no alert."""
+        mon, feed, clock, alerts = with_board([board_row("EY", "599", "A", local_time(mon_clock(), 3), "AUH")])
+        mon.schedule.learned["EY599"] = ["ETD90Y", clock()]
+        mon.schedule.load([board_row("EY", "599", "A", local_time(clock, 3), "AUH")],
+                          datetime.fromtimestamp(clock(), mon.schedule.tz))
+        ident = dict(flight="ETD90Y", r="A6-BLT", t="B789")
+        ground = [dict(lat=self.AUH[0], lon=self.AUH[1], alt_baro="ground", gs=10, track=320)] * 6
+        fly(mon, feed, clock, "8964f9", ground, local=False, **ident)
+        t = mon.tracks["8964f9"]
+        self.assertEqual(t.sched.flight, "EY599")
+        n = 900
+        with self.assertLogs(fw.log, "INFO") as got:
+            fly(mon, feed, clock, "8964f9", path(*self.AUH, [330] * n, [min(1000 + 400 * i, 36000) for i in range(n)]),
+                local=False, **ident)
+        self.assertTrue(any("is not EY599" in m and "ETD90Y unlearned" in m for m in got.output))
+        self.assertIsNone(t.sched)
+        self.assertNotIn("EY599", mon.schedule.learned)
+        self.assertNotIn("ETD90Y", mon.schedule.by_callsign)
+        self.assertEqual(kinds(alerts), [])
 
     def test_flying_elsewhere_is_not_ours(self):
         """A6-AEO flew EY596 TLV -> AUH, then ETD238 to Bangalore (22 Oct 2026): not an arrival of ours, no checks."""

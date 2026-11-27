@@ -347,6 +347,14 @@ ROTATION_TOL = 45             # heading within this of the way to our airport, a
 ROTATION_MIN_ALT = 3000
 ROTATION_ETA_S = 3 * 3600     # its arrival at ROTATION_KT within this of the board row's time
 ROTATION_KT = 450
+# A rotation match (rotation_match) is a guess until the aircraft comes within --radius of our airport, and only then
+# learned; a match on a learned callsign is re-checked the same way (Monitor.check_guess). Either is dropped, with no
+# alert, once origin -> aircraft -> our airport is longer than this x the straight line, or the board's own callsign is
+# found on another aircraft. A6-BLT flew ETD75C TLV -> AUH, then ETD90Y AUH -> MUC (no route data), heading 319 deg with
+# TLV at 298: taken for EY609, learned at once, 4 OFF_COURSE and a DIVERSION at Munich on Telegram, while discovery no
+# longer searched the real ETD609 (27 Nov 2026). Out of Mosul it was at 1.24, at the first OFF_COURSE 1.58. On a detour
+# route the ratio at any point is at most the route's own: a route within 1.25 x the straight line is never dropped.
+ROTATION_DETOUR = 1.25
 # Learned at our airport too (Monitor.learn_at_home): an arrival heard on a callsign the board does not give, landing within
 # LEARN_TOL_S of the board's one landed arrival of its airline then, the only one of that airline: on two days, learned.
 LEARN_TOL_S = 10 * 60
@@ -1313,6 +1321,8 @@ class Track:
     max_dist: float = 0.0
     max_alt: int = 0         # highest altitude of the leg, ft (RETURNED after a climb, not a circuit)
     sched: SchedFlight | None = None
+    guess: str = ""          # sched from "rotation" (rotation_match) or a "learned" callsign: not yet near us (check_guess)
+    guess_from: tuple | None = None  # (lat, lon) where a rotation's aircraft had landed, for check_guess
     alerted: dict = field(default_factory=dict)      # key -> (time, severity)
     squawk: str = ""
     em_status: str = ""      # the last ADS-B emergency status (check_emergency)
@@ -1648,6 +1658,14 @@ class Schedule:
         if cs not in sf.callsigns:
             sf.callsigns += (cs,)
         self.by_callsign[cs] = sf
+
+    def unlearn(self, sf: SchedFlight, cs: str) -> None:
+        """`cs` does not fly `sf` after all (Monitor.check_guess)."""
+        if (self.learned.get(sf.flight) or [""])[0] == cs:
+            del self.learned[sf.flight]
+        sf.callsigns = tuple(c for c in sf.callsigns if c != cs)
+        if self.by_callsign.get(cs) is sf:
+            del self.by_callsign[cs]
 
     def sighting(self, flight: str, cs: str, when: float) -> str:
         """`cs` landed as board flight `flight` (Monitor.learn_at_home): learned when seen on two days."""
@@ -2547,7 +2565,7 @@ class Monitor:
         if not re.fullmatch(r"[A-Z0-9]{3}", at or "") or pos and haversine_nm(s.lat, s.lon, pos[1], pos[2]) > DIVERTED_NM:
             return  # (landed elsewhere: its next flight is not the board's from there)
         self.rotations[t.hex] = {"at": at, "airline": t.callsign[:3], "cs": t.callsign,
-                                 "until": s.t + ROTATION_WATCH_S, "up": 0.0}
+                                 "until": s.t + ROTATION_WATCH_S, "up": 0.0, "pos": [s.lat, s.lon]}
         log.info("%s landed at %s: watching its next flight for one of the board's arrivals from there", t.label(), at)
 
     def learn_at_home(self, now: float) -> None:
@@ -2731,11 +2749,51 @@ class Monitor:
         if not cands or abs(cands[0].ts - eta) > ROTATION_ETA_S:
             return
         sf = cands[0]
-        self.schedule.learn(sf, cs, self.wall())
-        t.sched = sf
+        t.sched, t.guess = sf, "rotation"  # (learned once near us: check_guess)
+        t.guess_from = tuple(r["pos"]) if r.get("pos") else None
         del self.rotations[t.hex]
         log.info("%s is %s: the aircraft of %s, back on a callsign of its own (%s)", t.label(), sf.route(a.airport),
                  r["cs"], "listed to " + a.airport if route else f"heading {s.track:.0f} deg, toward {a.airport}")
+
+    def check_guess(self, t: Track, s: Sample) -> None:
+        """A board arrival taken from the aircraft's rotation or a learned callsign (`t.guess`; see ROTATION_DETOUR):
+        within --radius of our airport it is that flight (a rotation's callsign learned then); off the way from the board's
+        origin (or from where it took off, without the airport's place), or with the board's own callsign heard on another
+        aircraft, it is not: dropped, and the callsign unlearned.
+        Not in an emergency."""
+        sf, a = t.sched, self.args
+        if not (t.guess and sf and self.schedule) or s.on_ground:
+            return
+        d = self.dist(s)
+        if d <= a.radius:
+            if t.guess == "rotation":
+                self.schedule.learn(sf, t.callsign, self.wall())
+                log.info("%s within %.0f nm of %s: %s learned for %s", t.label(), d, a.airport, t.callsign, sf.flight)
+            t.guess = ""
+            return
+        if self.in_emergency(t):
+            return
+        why = ""
+        if any(o is not t and o.sched is sf and not o.guess for o in self.tracks.values()):
+            why = "the board's callsign is heard on another aircraft"
+        else:
+            try:
+                orig = self.standing.airport_by_iata(sf.other) if self.standing else None
+            except requests.RequestException:
+                orig = None
+            orig = orig[1:] if orig else t.guess_from or t.takeoff_pos  # (else where it landed / took off)
+            if orig:
+                line = haversine_nm(orig[0], orig[1], a.lat, a.lon)
+                way = haversine_nm(orig[0], orig[1], s.lat, s.lon) + d
+                if line > 0 and way > ROTATION_DETOUR * line:
+                    why = f"off the way from {sf.other} ({way / line:.2f} x the straight line)"
+        if not why:
+            return
+        log.info("%s is not %s: %s%s", t.label(), sf.route(a.airport), why,
+                 f"; {t.callsign} unlearned" if t.guess == "learned" else "")
+        self.schedule.unlearn(sf, t.callsign)
+        t.sched, t.guess = None, ""
+        self.unfollow(t, "not ours")
 
     def follow(self, local_hexes: set, local: list) -> list:
         """One combined hex request per --follow-interval for followed flights not in the local circle.
@@ -2787,7 +2845,7 @@ class Monitor:
         if not any(self.disc_queue.values()):
             if self.clock() - self.disc_round < a.discovery_interval:
                 return []
-            exclude = {id(t.sched) for t in self.tracks.values() if t.followed and t.sched}
+            exclude = {id(t.sched) for t in self.tracks.values() if t.followed and t.sched and not t.guess}
             wanted = self.schedule.search_order(self.wall(), exclude, a.departed_max_h)
             self.disc_round = self.clock()
             self.disc_queue = {p: list(wanted) for p in a.remote_providers if p not in self.disabled}
@@ -3033,12 +3091,17 @@ class Monitor:
             t.agg_heard = max(t.agg_heard, agg_heard.get(hexid, 0.0))
             t.last_msg = max(t.last_msg, msg_t)
             if self.schedule and t.callsign in self.schedule.by_callsign:
+                was = t.sched
                 t.sched = None if t.callsign == t.flown_cs else self.schedule.by_callsign[t.callsign]
                 got = self.schedule.learned.get(t.sched.flight) if t.sched else None
                 if got and got[0] == t.callsign:
                     got[1] = self.wall()  # (still flying it: kept LEARNED_KEEP_S from now)
+                    t.guess = t.guess if t.sched is was else "learned"
+                else:
+                    t.guess = ""
             if hexid in self.rotations:
                 self.rotation_match(t, sample)
+            self.check_guess(t, sample)
             if hexid in self.tails:
                 self.tail_match(t, sample)
             prev = t.last
